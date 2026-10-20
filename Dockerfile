@@ -68,8 +68,8 @@ USER app:app
 
 # Default: 常驻 Admin API 服务模式（生产配置绑定 0.0.0.0:8910）。
 # 生产配置的非回环绑定强制要求 ADMIN_API_KEY —— 运行时请传入：
-#   docker run -d -p 8910:8910 -e ADMIN_API_KEY=change-me doc-pipeline
+#   docker run -d -p 8910:8910 -e ADMIN_API_KEY=change-me nexusloom
 # 需要一次性生成文档时覆盖默认 CMD：
-#   docker run --rm -v $(pwd)/output:/app/output doc-pipeline test_input.md -o output/doc.md
+#   docker run --rm -v $(pwd)/output:/app/output nexusloom test_input.md -o output/doc.md
 ENTRYPOINT ["python", "run.py"]
 CMD ["-c", "config.production.json", "--admin", "--daemon"]

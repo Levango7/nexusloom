@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Doc-Pipeline Dashboard</title>
+<title>Loom 控制台</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -36,7 +36,7 @@
 </svg>
 
 <div class="header">
-  <h1><svg class="ico ico-lg" aria-hidden="true"><use href="#i-wrench"/></svg> <span class="accent">Doc-Pipeline</span> Dashboard</h1>
+  <h1><svg class="ico ico-lg" aria-hidden="true"><use href="#i-wrench"/></svg> <span class="accent">Loom</span> 控制台</h1>
   <div class="header-right">
     <span id="last-updated" class="last-updated">--</span>
     <span class="refresh-indicator"></span>
@@ -83,6 +83,20 @@
       <div class="empty-state">
         <div class="icon"><svg class="ico ico-lg" aria-hidden="true"><use href="#i-inbox"/></svg></div>
         <div>暂无任务</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FULL-WIDTH: Approvals（跨运行待批收件箱；数据来自持久台账，重启后仍在） -->
+  <div class="card wide" id="panel-approvals">
+    <div class="card-header">
+      <h2><svg class="ico" aria-hidden="true"><use href="#i-check"/></svg> 待审批</h2>
+      <span id="badge-approvals" class="badge">0</span>
+    </div>
+    <div class="card-body">
+      <div class="empty-state">
+        <div class="icon"><svg class="ico ico-lg" aria-hidden="true"><use href="#i-check"/></svg></div>
+        <div>没有等待审批的运行</div>
       </div>
     </div>
   </div>

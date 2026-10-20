@@ -68,6 +68,11 @@ REQUIRED_DATA = (
     "packs/docgen/prompts/default.yaml",
     "packs/docgen/pack.yaml",
     "scripts/checker_rules.yaml",
+    # 控制台随包发布（2026-10-20）：3.12.0 及以前的 wheel 里一个 dashboard
+    # 资源都没有，pip 装出来的用户打开 / 只看到一行纯文本。
+    "loom_core/dashboard/index.html",
+    "loom_core/dashboard/app.js",
+    "loom_core/dashboard/style.css",
 )
 
 #: 非 PyPI 分发的第三方依赖登记表：源码真的 import，但不以版本约束出现。

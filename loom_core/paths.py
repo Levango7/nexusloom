@@ -83,6 +83,16 @@ def agents_dir() -> Path:
     return project_root() / "agents"
 
 
+def dashboard_dir() -> Path:
+    """控制台静态资源目录（随包发布，`loom_core/dashboard/`）。
+
+    放在包内而不是项目根：项目根在安装态是 site-packages 的上一级，
+    源码树里能跑、`pip install` 之后却是一片空白（2026-10-20 复核实测：
+    3.12.0 wheel 里 0 个 dashboard 资源）。
+    """
+    return Path(__file__).resolve().parent / "dashboard"
+
+
 def scripts_dir() -> Path:
     """脚本/工具目录。"""
     return project_root() / "scripts"

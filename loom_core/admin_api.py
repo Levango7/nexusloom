@@ -436,6 +436,26 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_dashboard_index(self) -> bool:
+        """`GET /` → 控制台入口页（`loom_core/dashboard/index.html`）。
+
+        没有 dashboard_dir 时返回 False，调用方退回纯文本 API 索引。
+        """
+        if not self.dashboard_dir:
+            return False
+        path = Path(self.dashboard_dir) / "index.html"
+        try:
+            body = path.read_bytes()
+        except OSError:
+            return False
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self._apply_cors_headers()
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return True
+
     def _serve_static(self, path: str) -> bool:
         """尝试从 dashboard_dir 提供静态文件"""
         if not self.dashboard_dir:
@@ -591,6 +611,30 @@ class AdminHandler(BaseHTTPRequestHandler):
             return task
         return None
 
+    def _require_admin(self) -> bool:
+        """运维级只读面（日志/质量/告警）只对 admin 开放：跨租户聚合会泄露任务内容。"""
+        if self._principal().admin:
+            return True
+        self._json({"error": "admin required"}, 403)
+        return False
+
+    def _can_approve(self, task_id: str) -> bool:
+        """审批写操作的可见性：内存任务沿用 `_scoped_task`；已不在内存的
+        运行看持久台账里的 principal（admin 全见）。越权同样按不存在处理。"""
+        if self._scoped_task(task_id) is not None:
+            return True
+        if not self.orch:
+            return False
+        try:
+            row = self.orch.approvals.pending_for_run(task_id)
+        except Exception:  # noqa: BLE001
+            return False
+        # 只认台账真给出来的 dict：替身/损坏的 store 返回别的东西时不能当成"有待办"
+        if not isinstance(row, dict):
+            return False
+        p = self._principal()
+        return bool(p.admin) or str(row.get("principal") or "") == p.id
+
     def log_message(self, fmt, *args):
         """访问日志拼装点：requestline 中的 ?token= 凭证打码后再输出"""
         masked = tuple(mask_token_query(a) if isinstance(a, str) else a for a in args)
@@ -650,6 +694,10 @@ class AdminHandler(BaseHTTPRequestHandler):
         try:
             # 静态资源免鉴权
             if self._serve_static(self.path):
+                return
+            # 控制台入口 `/`：只发静态壳，数据端点各自鉴权
+            # （浏览器要先拿到页面才谈得上填 token；壳里没有任何租户数据）
+            if self.path == "/" and self._serve_dashboard_index():
                 return
             # 健康端点免鉴权（只读，供监控探针使用）
             if self.path == "/health":
@@ -739,20 +787,28 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._handle_versions_list(file_path)
             elif self.path == "/api/dashboard":
                 self._handle_dashboard()
+            elif self.path == "/api/approvals":
+                self._handle_approvals()
             elif self.path == "/api/pipeline":
                 self._handle_pipeline()
             elif self.path == "/api/openapi.json":
                 from .openapi_spec import generate_spec
                 self._json(generate_spec())
             elif self.path == "/api/alerts":
+                if not self._require_admin():
+                    return
                 self._handle_alerts()
             elif self.path == "/api/quality/feedback":
+                if not self._require_admin():
+                    return
                 from .quality_feedback import get_quality_feedback
                 self._json(get_quality_feedback().stats())
             elif self.path.startswith("/api/logs"):
+                if not self._require_admin():
+                    return
                 self._handle_logs()
             elif self.path == "/":
-                self._text("Doc-Pipeline Admin API v1\n"
+                self._text("Loom Admin API v1\n"
                            "Endpoints: /health /metrics /tasks /agents /dlq /api/dashboard /api/pipeline /stream")
             else:
                 self._json({"error": "not found"}, 404)
@@ -1413,7 +1469,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         """
         if not self.orch:
             return self._json({"error": "orchestrator not set"}, 500)
-        if self._scoped_task(task_id) is None:
+        # 已在内存的任务走 _scoped_task；进程重启后的待批走持久台账（同样按 principal）
+        if not self._can_approve(task_id):
             return self._json({"error": "task not found"}, 404)
         try:
             payload = json.loads(body.decode("utf-8")) if body else {}
@@ -1432,7 +1489,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         """
         if not self.orch:
             return self._json({"error": "orchestrator not set"}, 500)
-        if self._scoped_task(task_id) is None:
+        if not self._can_approve(task_id):
             return self._json({"error": "task not found"}, 404)
         try:
             payload = json.loads(body.decode("utf-8")) if body else {}
@@ -1478,6 +1535,12 @@ class AdminHandler(BaseHTTPRequestHandler):
             return self._json({"error": "orchestrator not set"}, 500)
         orch = self.orch
         tasks = orch.list_tasks()
+        # 非 admin 只看自己的任务（2026-10-20：此前这里不隔离，普通 token
+        # 能看到全仓任务列表——与 /tasks 的作用域口径自相矛盾）
+        p = self._principal()
+        if not p.admin:
+            tasks = [t for t in tasks
+                     if str(getattr(t, "owner", "") or "") == p.id]
         tasks_data = [
             {
                 "id": t.id,
@@ -1505,6 +1568,40 @@ class AdminHandler(BaseHTTPRequestHandler):
             "agents": agents,
             "task_count": len(tasks_data),
         })
+
+    def _handle_approvals(self):
+        """待批收件箱（跨运行、跨重启）：`GET /api/approvals`。
+
+        非 admin 只看 principal 属于自己的待办；admin 看全部并附带归属。
+        数据来自持久台账而不是内存任务表——进程重启后收件箱照常可读。
+        """
+        if not self.orch:
+            return self._json({"error": "orchestrator not set"}, 500)
+        p = self._principal()
+        try:
+            rows = self.orch.approvals.list_pending(
+                principal=None if p.admin else p.id)
+        except Exception as e:  # noqa: BLE001
+            _logger.warning("[AdminAPI] 读取审批台账失败: %s", e)
+            return self._json({"error": "approvals unavailable"}, 503)
+        now = time.time()
+        items = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            item = {
+                "request_id": r.get("request_id", ""),
+                "run_id": r.get("run_id", ""),
+                "pipeline": r.get("pipeline", ""),
+                "nodes": list(r.get("nodes") or []),
+                "messages": dict(r.get("messages") or {}),
+                "requested_at": r.get("requested_at", 0),
+                "waiting_sec": round(now - float(r.get("requested_at") or now), 1),
+            }
+            if p.admin:
+                item["principal"] = r.get("principal", "")
+            items.append(item)
+        self._json({"approvals": items, "count": len(items)})
 
     def _handle_pipeline(self):
         """返回流水线配置信息"""

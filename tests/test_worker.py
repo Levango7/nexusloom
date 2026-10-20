@@ -29,7 +29,8 @@ class _FakeOrchestrator:
         self._error = error
         self._raises = raises
 
-    def run_plan(self, plan, input_file="", task_id=None, wait=True, owner=""):
+    def run_plan(self, plan, input_file="", task_id=None, wait=True, owner="",
+                 resume=False):
         self.calls.append({"plan": plan.pipeline_name, "input_file": input_file,
                            "task_id": task_id, "output": plan.raw.get("pipeline", {}).get("output"),
                            "owner": owner})

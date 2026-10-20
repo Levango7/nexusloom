@@ -124,6 +124,13 @@
 | S5 | 触发与集成 | HTTP / MCP / webhook / 定时 / 队列 的接入配置与调试 | 新建 |
 | S6 | 成本与质量 | 预算熔断线、按 pack/token 归因、质量失败原因分布 | 复用 cost/quality 面板 |
 
+> **2026-10-20 复核后的状态**：控制台已**随包发布**（`loom_core/dashboard/`，`GET /` 直出，
+> 发布门禁 `verify_dist.py` 钉住三个资源）；新增**审批收件箱** `GET /api/approvals` + 控制台
+> "待审批"卡片，审批**跨重启可用**（台账 `approvals.db` + 队列续跑标记）。
+> 六屏 IA（S1–S6）在 `docs/product-design-review-2026-10-20.md` 里被建议替换为按任务切的
+> 六个面（Runs / Run 详情 / Approvals / Deliveries / Workflows&Schedules / Settings）——
+> 本表保留为历史目标，不再作为下一批 UI 的排期依据。
+
 ### 4.3 视觉基调（已确认）
 
 **沿用现有深色等宽"运维控制台"基调**，不另起浅色 SaaS 风。理由：买家是自动化工程师，运维台审美更对味，且能直接复用 `style.css` 基线。
@@ -165,7 +172,7 @@
 
 | 功能 | 现状 | v1 目标 | 验收判据 |
 |---|---|---|---|
-| 身份与租户 | **已达标（2026-10-12，P1-A）**：`tokens.yaml` 多凭证 → Principal（密钥只经 env/hash 注入；admin 位与普通租户可分）；`ADMIN_API_KEY` 兼容为 admin（旧部署零改动）；启用身份后回环同样要求凭证；任务与成本按 Principal 隔离，越权与不存在同形（404，不泄露存在性）；触发类提交记 `trigger:/webhook:/mcp` 归属；缺密钥条目不可用且启动告警。判据 `tests/test_identity_tokens.py` 28 条（含真 HTTP 双 token 互不可见 + 六类越权操作） | token → 任务/成本/产物三类数据的作用域隔离 | **两个 token 互不可见对方任务（真 HTTP 断言，非 mock）〔2026-10-12 达标〕** |
+| 身份与租户 | **已达标（2026-10-12，P1-A；2026-10-20 补控制台作用域）**：`tokens.yaml` 多凭证 → Principal（密钥只经 env/hash 注入；admin 位与普通租户可分）；`ADMIN_API_KEY` 兼容为 admin（旧部署零改动）；启用身份后回环同样要求凭证；任务与成本按 Principal 隔离，越权与不存在同形（404，不泄露存在性）；触发类提交记 `trigger:/webhook:/mcp` 归属；缺密钥条目不可用且启动告警。判据 `tests/test_identity_tokens.py` 28 条（含真 HTTP 双 token 互不可见 + 六类越权操作）；控制台 `/api/dashboard` 任务列表按 principal 过滤，日志/质量/告警对非 admin 403（`tests/test_approvals.py` 真 HTTP） | token → 任务/成本/产物三类数据的作用域隔离 | **两个 token 互不可见对方任务（真 HTTP 断言，非 mock）〔2026-10-12 达标〕** |
 | 状态后端 | 队列后端可换（2026-10-12，P1-B）：`LOOM_DATABASE_URL` 指向 Postgres 时 `TaskQueue` 走 PG（psycopg，`nexusloom[postgres]` extra；不设 = SQLite WAL 默认不变）；并发契约由 SQL 层保证（rowcount 归属 / ON CONFLICT 幂等 / lease 回收跨后端同义）。**仍单机**：消息总线持久层、cost/quality feedback、pub/sub 进程内回调 | 后端抽象（SQLite / Postgres），队列与总线可换 | **两实例共享一库并发跑通（P1 判据）〔2026-10-12 达成：真 PG 上两进程领取互斥 + 两个真 TaskWorker 共享一库跑完 test_pipeline〕**；总线可换是下一批 |
 | 配置热更新 | **已达标（2026-10-13，P1-C）**：运行时变更写覆写文件 `<状态目录>/config_overrides.json`（revision 单调递增 + 点号平铺键 + 原子写），级联位置在环境变量之后；新进程构造即读、常驻进程 `poll_overlay()` 轮询即热加载；`POST /api/config` 与 `/reload` 均带传播结果（失败=仅本进程生效，响应如实带 `propagation_error`，不静默）；worker 循环与 Admin API 请求入口均接线。判据 `tests/test_config_overlay.py` 23 条（含真跨进程两进程共享状态目录） | 配置变更对所有相关进程生效 | **`/api/config` 热更新不再只对本进程生效〔2026-10-13 达标：真子进程轮询到父进程写入；P1 §3 三条验收判据至此全部闭合〕** |
 | 成本归因 | 定价表 + 按供应商/Agent 维度已有 | 增加按 **pack / token** 归因 | `GET /api/cost` 能按 pack 出账 |

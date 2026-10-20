@@ -1,10 +1,15 @@
 # Loom（发行名 nexusloom）
 
-> **主打：多 Agent 协作的文档生成流水线** — 输入主题，自动检索/抓取/写作/质检/排版/落盘
+> **主打：可验收的 Agent 交付运行时** — 把「取数/资料 → 加工 → 核查 → 人审 → 交付」做成可复现、可审计的作业
 
-基于消息总线的多智能体文档生成系统。输入一个主题，自动完成**检索 → 抓取 → 写作 → 质量门控 → 检查 → 排版 → 安全落盘**全流程，输出结构化 Markdown 文档。
+Loom 是一个自托管的 Agent 工作流运行时：声明式 YAML 编排可插拔 Agent，内核自带
+**产出契约**（声明了交付物却没交付就不算 `done`）、**锁文件拓扑指纹**（配置或拓扑漂移即拒绝执行）、
+**审批闸门**、**交付账本**与 **LLM 成本预算熔断**；可 `pip install`，可被 CLI / HTTP / MCP / 队列调用。
 
-## 场景分级
+**文档生成（docgen）是它自带的旗舰 pack**：下面的场景分级、输出格式与检索/摄入能力都属于这个 pack；
+引擎本身与领域无关，换一个 pack 就是另一类交付物。
+
+## 场景分级（docgen pack 出厂场景）
 
 | 级别 | 场景 | 入口 | 说明 |
 |---|---|---|---|
@@ -81,7 +86,7 @@ kb.search("本季度营收增长多少", top_k=3)        # 向量检索
 | **写作** | TF-IDF 向量语义匹配、骨架生成、LLM 润色、质量反馈闭环 |
 | **质量** | QualityGate v2（Profile 模板）、**产出保真底线**（空/占位文档直接判失败，不再 done+exit 0）、Style Enforcer、Citation Verifier、评分历史学习、**fact_checker 事实核查**（数字类声明 vs 检索源一致性，`--pipeline docgen-verified`） |
 | **弹性** | 熔断器、限流器、Agent Pool、背压、自动重生成、告警机制 |
-| **可观测** | 结构化日志（轮转）、Prometheus Metrics、Admin REST API、Dashboard、日志查询 |
+| **可观测** | 结构化日志（轮转）、Prometheus Metrics、Admin REST API、**内置控制台**（随包发布，打开 `/` 即用）、日志查询 |
 | **成本** | LLM 调用成本追踪（16 供应商定价表）、预算熔断、`GET /api/cost` |
 | **安全** | Agent 沙箱（AST 安全检查 + 白名单）、.env 明文密钥检测 |
 | **运维** | 版本锁定（`loom lock` 生成/刷新锁文件；运行时自动比对 version + config_hash，配置漂移即拒绝执行）、Schema 校验、基础鉴权、Docker 化、配置热更新、MCP Server |
@@ -455,8 +460,15 @@ agents:
 - 决策落审计 `audit/approvals.jsonl`（任务/节点/决定/note/时间/审批人标识）；
 - `when` 不成立的闸门不挂起，按条件跳过（与普通条件节点同语义）。
 
-边界（P1 余量，刻意不做）：不提供"驳回到另一分支"、无通知渠道、无控制台界面、
-无多级审批与超时策略；"审批人"当前记客户端地址 + 凭证指纹（真名实姓等 P1 身份系统）。
+- **重启后仍可批**：待批与决策落 `approvals.db`（跟随 `LOOM_STATE_DIR`）。进程重启后
+  `POST /tasks/<id>/approve` 把队列行放回 `pending` 并带续跑标记，worker 从 checkpoint
+  续跑越过闸门；驳回则把行置 `cancelled`、不再执行。判据 `tests/test_approvals.py`
+  含真子进程硬退出在闸门上、父进程批准后完成的端到端；
+- **待办收件箱**：`GET /api/approvals`（非 admin 只看自己的，admin 见全量），控制台
+  "待审批"卡片可直接放行/驳回。
+
+边界（P1 余量，刻意不做）：不提供"驳回到另一分支"、无通知渠道、无多级审批与超时策略；
+"审批人"当前记客户端地址 + 凭证指纹（真名实姓等 P1 身份系统）。
 判据见 `tests/test_approval_gate.py`（解析/清册/执行/条件闸门/HTTP 与审计五层）。
 
 ### 通用 Agent（`http_request` / `transform`）
@@ -921,7 +933,7 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**2822 个测试本机全绿**（`2822 passed, 7 skipped, 6 deselected`，2026-10-15 本机全量实测；
+**2835 个测试本机全绿**（`2835 passed, 7 skipped, 6 deselected`，2026-10-20 本机全量实测；
 本轮 `LOOM_TEST_PG_URL` 未设置 ⇒ 5 条真 Postgres 判据按 `requires_pg` 跳过；
 设了该变量的口径应比本行数多出那 5 条执行（2026-10-14 那次 2801 passed / 2 skipped 含真 PG）；
 工具层迁出 artesian 后 19 条 fast_json 用例随库走，等价判据在新库加强至 35 条；
@@ -973,14 +985,16 @@ P1-D 并发模型批净加 14 条判据（同连接两请求 keep-alive / 五处
 池满 503+Retry-After 与 200 数等于池大小 / 工位借还与空闲回收两条真时序 /
 半开连接被服务端关闭 / SSE 入口不复用连接）；
 S2 运行详情批净加 20 条判据（DAG 视图全字段真 HTTP：四态/两种跳过可区分/无 DAG 给空结构/
-层级与 attempts 兜底/审批两字段 + dashboard 结构护栏 13 条；真机渲染由无头 Chrome 走查留证）；
+层级与 attempts 兜底/审批两字段 + dashboard 结构护栏 13 条；仓内**无浏览器级证据**（只有静态结构护栏））；
 S3 节点检查器批净加 15 条判据（节点检查器载荷真 HTTP：artifact 截断预览 / 幂等键三态
 （真库 True·False·store 未就绪 None）/ 熔断限流 None 与在场两态 / 质量门只认质量形状 /
-404 三型 / 断点三种态 + dashboard 结构护栏增补 4 条；点节点出抽屉由无头 Chrome 走查留证）；
+404 三型 / 断点三种态 + dashboard 结构护栏增补 4 条；抽屉交互无浏览器级证据）；
 RunHandle 那批加了 20 条判据（status 新鲜度/读穿/队列回落/未知态/to_dict 6 / wait 终态·超时·审批闸门 3 /
 cancel·resume 透传引擎布尔 3 / 产物清单形状与不虚增 5 / MCP+Admin 同源与淘汰降级 3）；
 产物持久化那批加了 6 条判据（账本行携带逐节点 artifact_keys / 被淘汰运行从账本重建同一形状 /
 淘汰态 to_dict 补齐 pipeline·error·artifacts / 读路径不建库 / 坏账本降级不抛 / 无产物键节点不编造）；
+控制台随包 + 审批跨重启那批净加 13 条判据（控制台 3：包内资源 / 打包声明 / 真 HTTP `GET /` 返回 HTML；
+审批 10：台账 6 + **真子进程硬退出后批准并续跑完成** 1 + 驳回后不再执行 1 + 真 HTTP 收件箱作用域 2）；
 现测命令 `python -m pytest tests/ -q`；coverage 门禁 83%，
 本机 2026-10-08 全量实测 87.99%，CI 侧 2026-10-08 实测 87.28%（3.11–3.13，3.14 是 87.25%））。
 CI 的通过数可能与本机略有

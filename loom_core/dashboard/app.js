@@ -66,6 +66,8 @@
     els.badgeAgents    = $('#badge-agents');
     els.badgeStatus    = $('#badge-status');
     els.badgeMetrics   = $('#badge-metrics');
+    els.approvalsPanel = $('#panel-approvals .card-body');
+    els.badgeApprovals = $('#badge-approvals');
     els.badgeQuality   = $('#badge-quality');
     els.badgeCost      = $('#badge-cost');
     els.badgeLogs      = $('#badge-logs');
@@ -163,7 +165,11 @@
       requestToken();
       throw new Error('HTTP 401（需要 API Token）');
     }
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    if (!resp.ok) {
+      const err = new Error('HTTP ' + resp.status);
+      err.status = resp.status;
+      throw err;
+    }
     return resp.json();
   }
 
@@ -181,7 +187,13 @@
       fetchJson(API_BASE + '/api/cost'),
       fetchJson(API_BASE + '/api/quality/feedback'),
       fetchJson(API_BASE + '/api/logs?limit=30&since=86400'),
+      fetchJson(API_BASE + '/api/approvals'),
     ]);
+    const settle = (r, forbidden) => {
+      if (r.status === 'fulfilled') return r.value;
+      if (forbidden && r.reason && r.reason.status === 403) return { __forbidden: true };
+      return null;
+    };
     const health = results[0].status === 'fulfilled' ? results[0].value : null;
     const dash = results[1].status === 'fulfilled' ? results[1].value : null;
     return {
@@ -189,8 +201,9 @@
       tasks: dash || null,           // /api/dashboard 含 tasks[].progress/steps 与 agents
       agents: dash || null,
       cost: results[2].status === 'fulfilled' ? results[2].value : null,
-      quality: results[3].status === 'fulfilled' ? results[3].value : null,
-      logs: results[4].status === 'fulfilled' ? results[4].value : null,
+      quality: settle(results[3], true),
+      logs: settle(results[4], true),
+      approvals: results[5].status === 'fulfilled' ? results[5].value : null,
       failedCount: results.filter(r => r.status === 'rejected').length,
     };
   }
@@ -840,6 +853,11 @@
 
   /* ---- Quality (bottom) ---- */
   function renderQuality (data) {
+    if (data && data.__forbidden) {
+      els.qualityPanel.replaceChildren(emptyState('i-quality', '需要 admin 权限'));
+      if (els.badgeQuality) els.badgeQuality.textContent = '--';
+      return;
+    }
     if (!data || data.total_records == null) {
       els.qualityPanel.replaceChildren(emptyState('i-quality', '暂无质量数据'));
       if (els.badgeQuality) els.badgeQuality.textContent = '--';
@@ -936,6 +954,11 @@
 
   /* ---- Logs (full-width bottom) ---- */
   function renderLogs (data) {
+    if (data && data.__forbidden) {
+      els.logsPanel.replaceChildren(emptyState('i-logs', '需要 admin 权限'));
+      if (els.badgeLogs) els.badgeLogs.textContent = '--';
+      return;
+    }
     const logs = (data && Array.isArray(data.logs)) ? data.logs : [];
     if (els.badgeLogs) els.badgeLogs.textContent = String(logs.length);
 
@@ -1156,6 +1179,7 @@
       state.health = data.health;
       state.tasks = data.tasks;
       state.agents = data.agents;
+      state.approvals = data.approvals;
       state.partialFail = data.failedCount > 0;
 
       // If all endpoints failed, treat it as offline
@@ -1183,10 +1207,70 @@
     renderStatus(state.health);
     renderTasks(state.tasks);
     renderAgents(state.agents);
+    renderApprovals(state.approvals);
     renderMetrics(state.health);
     renderQuality(state.quality);
     renderCost(state.cost);
     renderLogs(state.logs);
+  }
+
+  /* ---- Approvals（跨运行待批收件箱） ---- */
+  function renderApprovals (data) {
+    const items = (data && Array.isArray(data.approvals)) ? data.approvals : [];
+    if (els.badgeApprovals) els.badgeApprovals.textContent = String(items.length);
+    if (!items.length) {
+      els.approvalsPanel.replaceChildren(emptyState('i-check', '没有等待审批的运行'));
+      return;
+    }
+    const table = elt('table', 'tasks-table');
+    const thead = elt('thead');
+    const hr = elt('tr');
+    for (const h of ['运行', '流水线', '闸门', '等待', '操作']) hr.appendChild(elt('th', null, h));
+    thead.appendChild(hr);
+    const tbody = elt('tbody');
+    for (const a of items) {
+      const tr = elt('tr');
+      tr.appendChild(elt('td', 'mono', a.run_id || ''));
+      tr.appendChild(elt('td', null, a.pipeline || ''));
+      tr.appendChild(elt('td', null, (a.nodes || []).join(', ')));
+      tr.appendChild(elt('td', null, Math.round(a.waiting_sec || 0) + 's'));
+      const td = elt('td');
+      const ok = elt('button', 'retry-btn', '放行');
+      ok.type = 'button';
+      ok.onclick = () => decideApproval(a.run_id, 'approve', '');
+      const no = elt('button', 'retry-btn', '驳回');
+      no.type = 'button';
+      no.onclick = () => {
+        const reason = prompt('驳回原因（可空）');
+        if (reason === null) return;  // 取消不是"空原因"
+        decideApproval(a.run_id, 'reject', reason);
+      };
+      td.appendChild(ok);
+      td.appendChild(no);
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+    table.appendChild(thead);
+    table.appendChild(tbody);
+    els.approvalsPanel.replaceChildren(table);
+  }
+
+  async function decideApproval (runId, action, text) {
+    const token = getToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const payload = action === 'approve' ? { note: text || '' } : { reason: text || '' };
+    try {
+      const resp = await fetch(API_BASE + '/tasks/' + encodeURIComponent(runId) + '/' + action, {
+        method: 'POST', headers, body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(8000),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+      await update();
+    } catch (err) {
+      alert('审批操作失败：' + (err.message || err));
+    }
   }
 
   function renderError () {
@@ -1195,7 +1279,7 @@
     els.dashboard.style.display = 'none';
     if (els.errorMsg) {
       els.errorMsg.textContent =
-        state.error || 'Unable to connect to the Doc-Pipeline API at ' + API_BASE;
+        state.error || 'Unable to connect to the Loom API at ' + API_BASE;
     }
   }
 

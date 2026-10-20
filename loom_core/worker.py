@@ -172,7 +172,11 @@ class TaskWorker:
 
         task = self.orchestrator.run_plan(plan, input_file=item.get("input_file", ""),
                                           task_id=task_id, wait=True,
+                                          resume=bool(item.get("resume")),
                                           owner=str(item.get("principal") or ""))
+        if item.get("resume"):
+            # 标记只在这一次认领生效：失败重试/手动重跑不该再复用旧断点
+            self.queue.clear_resume(task_id)
         # _finalize_plan_task 已经写过终态；这里只兜住它没跑到的分支
         self.queue.finish(task_id, task.status.value,
                           result=dict(task.result) if task.result else None,

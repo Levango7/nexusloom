@@ -316,7 +316,7 @@ class TestNewTaskId:
             aa.AdminHandler._handle_submit_task)
 
     def test_dashboard_token_moved_to_session_storage(self):
-        dash = Path(__file__).parent.parent / "dashboard"
+        dash = Path(__file__).parent.parent / "loom_core" / "dashboard"
         js = (dash / "app.js").read_text(encoding="utf-8")
         assert "localStorage" not in js
         assert js.count("sessionStorage") >= 2

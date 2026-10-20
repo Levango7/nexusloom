@@ -1,8 +1,8 @@
 """dashboard S2 运行详情屏的结构护栏（docs/product-spec.md §4.2）。
 
-CI 没有浏览器，真机渲染（无头 Chrome 点击任务行 → DAG/审批条/详情态）由
-人工走查留证；这里钉住** wiring 契约**，防止"后端加了字段、前端忘了接"或
-"接了一半"这类静默退化：
+仓库内**没有浏览器级证据**（2026-10-20 设计复核记为缺口；此前"无头 Chrome
+走查留证"的说法已撤回）；这里钉住**wiring 契约**，防止"后端加了字段、前端忘了接"
+或"接了一半"这类静默退化：
 
 - `index.html` 有 `#panel-run`（默认 hidden）与返回按钮 + S2 图标；
 - `app.js` 的真接线：任务行 click → `openRun`；`openRun` 隐藏其他卡并显示
@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-DASH = Path(__file__).resolve().parent.parent / "dashboard"
+DASH = Path(__file__).resolve().parent.parent / "loom_core" / "dashboard"
 
 
 def _read(name: str) -> str:
@@ -118,3 +118,46 @@ class TestStyleContract:
         for token in (".node-inspector", ".insp-art-row", ".dag-checkpoint-badge",
                       ".dag-checkpoint-resumed", ".dag-node-clickable"):
             assert token in self.css, f"缺少 {token} 样式"
+
+
+class TestConsoleShipping:
+    """控制台必须随包发布（2026-10-20 复核：3.12.0 wheel 里 0 个 dashboard 资源）。"""
+
+    def test_dashboard_lives_inside_the_package(self):
+        from loom_core import paths
+
+        d = paths.dashboard_dir()
+        for name in ("index.html", "app.js", "style.css"):
+            assert (d / name).is_file(), f"控制台资源缺失：{name}"
+
+    def test_package_data_declares_the_dashboard(self):
+        import tomllib
+
+        root = Path(__file__).resolve().parent.parent
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        assert "dashboard/*" in data["tool"]["setuptools"]["package-data"]["loom_core"]
+
+    def test_root_serves_the_console_shell(self):
+        """`GET /` 直接给控制台入口页（免鉴权，只发静态壳）。"""
+        import urllib.request
+        from unittest.mock import MagicMock
+
+        from loom_core import paths
+        from loom_core.admin_api import AdminAPI, AdminHandler
+
+        api = AdminAPI(host="127.0.0.1", port=0, api_key="",
+                       serve_static=True,
+                       dashboard_dir=str(paths.dashboard_dir()))
+        try:
+            assert api.start(MagicMock()) is True
+            port = api._server.server_address[1]
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/", timeout=5) as r:
+                body = r.read().decode("utf-8")
+                assert r.status == 200
+                assert r.headers.get_content_type() == "text/html"
+            assert "Loom" in body
+        finally:
+            api.stop()
+            # start() 写的是类属性，清掉避免污染后续用例
+            AdminHandler.dashboard_dir = None

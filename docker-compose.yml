@@ -13,8 +13,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: doc-pipeline:latest
-    container_name: doc-pipeline
+    image: nexusloom:latest
+    container_name: nexusloom
     restart: unless-stopped
 
     # ── 端口 ──
