@@ -35,6 +35,45 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Fixed（2026-10-21·续55，RunStore Stage 0：异步引擎补齐同步侧的运行事实）
+
+- **异步收尾不再"只跑不记"**：`_finalize_plan_task_async` 此前整段不写持久队列、
+  不发终态事件（它自己的 docstring 就写着"与 `_finalize_plan_task` 的差异是不更新
+  task_queue、不发事件钩子"）。而 `run_plan_async` 的唯一调用方是管理 API 的 SSE
+  worker——于是**从控制台发起的运行在 `/api/tasks` 里查不到、事件面一条不发**，
+  "UI 看得见、接口查不到"。现在两条收尾共用 `_record_plan_terminal_state`
+  （队列 `finish` + 终态事件），载荷键集与同步侧逐字段一致。
+- **异步发起补登记**：`run_plan_async` 现在与同步版同写 `task_queue.submit` +
+  `claim_direct`（直跑也占住行，防被 worker 重排成第二个执行者）并发
+  `task.created`/`task.started`——此前异步运行在队列里没有行、事件序列缺头两笔。
+- **异步闸门接上"他进程决定"**：暂停循环原先只 `await asyncio.sleep` 等一个
+  永远不会来的信号（同步版有观察逻辑、异步版没有）。抽出同步/异步共用的
+  `_pause_boundary_snapshot`（完整状态快照，浅检查点会让已完成节点全部重跑）与
+  `_observe_external_decision`（waiting/running/cancelled），两条执行循环的差异
+  只剩"怎么睡"。
+- **终态事件至多一条**：新增 `PipelineTask.terminal_event` + `_claim_terminal_event`
+  先到先得。原先 `cancel()` 在置 cancelled 的当下发一条、收尾链按状态再发一条 ⇒
+  同一次运行两条 `task.cancelled`，钩子/审计看到两次收尾。现在这是**属性**而不是
+  调用顺序的运气；四处写入点各自的载荷形状保持原样（对外契约不扩键、不改名）。
+- **判据**：新增 `tests/test_async_run_parity.py` 4 条——同步/异步两条路径**Leave
+  the same run facts**（事件序列逐条相等 + 队列行终态与节点结果）、同步取消与异步
+  取消各"至多一条终态事件"、异步暂停保完整状态并被另一实例的决定唤醒。
+  变异验证（在最终头 `5143380` 上重跑，不是早期树上的结果）：① 把 `pipeline.py` 换回 main 版 ⇒
+  **4 条全红**（缺登记 / 缺终态 / 缺观察，且连"同步取消至多一条"也红——还原 main 同时把去重也摘掉了）；
+  ② 只关掉 `_claim_terminal_event` 的"已发过"闸门 ⇒ **恰好 2 红 + 2 绿**（两条取消判据红并直接打印
+  重复的 `task.cancelled`，另两条不受影响）——这条才是"变异只打掉它该打掉的东西"的对照。
+  本机 `Python 3.14.3` 全量实测 `2844 passed, 7 skipped, 6 deselected in 873.44s`
+  （收集 2852；唯一一条红就是读 README 计数的那条护栏，改数后 `tests/test_doc_consistency.py`
+  9 passed / 16.44s；`LOOM_TEST_PG_URL` 未设 ⇒ 5 条真 Postgres 判据按 `requires_pg` 跳过）。
+  影响面另跑 `218 passed / 765.32s`，rebase 到 main 后复跑 `57 passed / 217.11s`。
+- **连带两处口径同步**：README 的测试计数 2839 → **2845**（不同步就会推一个已知红 SHA——
+  护栏判据是 `collected − declared ≤ 10`，本批 +4 条后差值到 13）；
+  `scripts/check_design_anchors.py` 的 `pipeline.py` 锚点随本次重构重钉 9 条 + 退役 1 条。
+  退役的是那句「不更新 task_queue」的 docstring 引用——它已被并轨改掉，改成钉在新增的共用写口
+  `pipeline.py:499 _record_plan_terminal_state` 上，**"裂缝已补"这件事本身也要可核对**。
+  重钉靠整行文本对齐而不是推算偏移：同一次改动里 `+4 / +65 / +47` 三种 delta 并存
+  （开头插字段、中段插 helper、又把 `_finalize_plan_task` 的内联收尾换成一次调用）。
+
 ### Added（2026-10-21·续54，RunStore + EventLog 设计入库，P1-① 起手）
 
 - **新增设计复核** `docs/runstore-eventlog-design-2026-10-21.md`：运行态散在**五处写面**
