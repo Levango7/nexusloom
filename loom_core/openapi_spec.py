@@ -337,9 +337,15 @@ def _ops_paths() -> dict:
                 "responses": {"200": {"description": "重放结果"}},
             },
         },
+        "/api/approvals": {
+            "get": {
+                "summary": "审批收件箱（跨运行、跨重启；非 admin 只看自己的待办）",
+                "responses": {"200": {"description": "待批列表"}},
+            },
+        },
         "/api/dashboard": {
             "get": {
-                "summary": "Dashboard 聚合数据（任务含 progress/steps + Agent 摘要）",
+                "summary": "Dashboard 聚合数据（任务含 progress/steps + Agent 摘要；任务按 principal 过滤）",
                 "responses": {"200": {"description": "聚合状态"}},
             },
         },

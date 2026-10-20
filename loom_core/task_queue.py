@@ -112,6 +112,10 @@ class TaskQueue:
             # token 身份（spec §5.4）：任务归属的 Principal.id（""=无身份世界）
             self._backend.add_column_if_missing(
                 conn, "task_queue", "principal", "TEXT DEFAULT ''")
+            # 续跑标记（2026-10-20 审批跨重启）：批准一个"进程已死"的闸门任务时
+            # 把行放回 pending 并置 1，worker 据此走 run_plan(resume=True)。
+            self._backend.add_column_if_missing(
+                conn, "task_queue", "resume", "INTEGER DEFAULT 0")
 
     def submit(self, task_id: str, pipeline_name: str, input_file: str,
                config: dict = None, principal: str = "") -> bool:
@@ -149,13 +153,14 @@ class TaskQueue:
         with self._lock, self._get_conn() as conn:
             while True:
                 row = conn.execute(
-                    "SELECT task_id, pipeline_name, input_file, config_json, principal "
+                    "SELECT task_id, pipeline_name, input_file, config_json, principal, "
+                    "COALESCE(resume, 0) AS resume "
                     "FROM task_queue WHERE status = 'pending' "
                     "ORDER BY created_at ASC LIMIT 1"
                 ).fetchone()
                 if not row:
                     return None
-                task_id, pipeline_name, input_file, config_json, principal = row
+                task_id, pipeline_name, input_file, config_json, principal, resume = row
                 now = time.time()
                 cursor = conn.execute(
                     "UPDATE task_queue SET status = 'running', started_at = ?, worker_id = ?, "
@@ -175,6 +180,7 @@ class TaskQueue:
                     "input_file": input_file,
                     "config": _fast_loads(config_json) if config_json else {},
                     "principal": principal or "",
+                    "resume": bool(resume),
                 }
 
     def complete(self, task_id: str, result: dict = None, error: str = ""):
@@ -195,6 +201,27 @@ class TaskQueue:
                 "WHERE task_id = ? AND status IN ('pending', 'running')",
                 (time.time(), task_id),
             )
+
+    def mark_for_resume(self, task_id: str) -> bool:
+        """把一行放回 pending 并置续跑标记（审批跨重启：批准一个进程已死的闸门）。
+
+        接受 running/pending：进程被杀死时行停在 running（acquire 后没有收尾），
+        闸门挂起并不会写终态。返回是否真的改了行（False = 行不存在或已是终态）。
+        """
+        with self._lock, self._get_conn() as conn:
+            cur = conn.execute(
+                "UPDATE task_queue SET status = 'pending', worker_id = '', "
+                "owner_pid = 0, started_at = 0, error = '', resume = 1, "
+                "finished_at = 0 WHERE task_id = ? AND status IN ('running', 'pending')",
+                (task_id,),
+            )
+            return bool(cur.rowcount > 0)
+
+    def clear_resume(self, task_id: str) -> None:
+        """worker 认领后清掉续跑标记——重试/重跑时不该再复用旧断点。"""
+        with self._lock, self._get_conn() as conn:
+            conn.execute("UPDATE task_queue SET resume = 0 WHERE task_id = ?",
+                         (task_id,))
 
     def update_status(self, task_id: str, status: str, result: dict = None, error: str = ""):
         """通用状态更新"""

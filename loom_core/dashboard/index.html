@@ -87,6 +87,20 @@
     </div>
   </div>
 
+  <!-- FULL-WIDTH: Approvals（跨运行待批收件箱；数据来自持久台账，重启后仍在） -->
+  <div class="card wide" id="panel-approvals">
+    <div class="card-header">
+      <h2><svg class="ico" aria-hidden="true"><use href="#i-check"/></svg> 待审批</h2>
+      <span id="badge-approvals" class="badge">0</span>
+    </div>
+    <div class="card-body">
+      <div class="empty-state">
+        <div class="icon"><svg class="ico ico-lg" aria-hidden="true"><use href="#i-check"/></svg></div>
+        <div>没有等待审批的运行</div>
+      </div>
+    </div>
+  </div>
+
   <!-- FULL-WIDTH: Run Detail（S2 运行详情——spec §4.2，默认隐藏，点任务 ID 打开） -->
   <div class="card wide" id="panel-run" hidden>
     <div class="card-header">

@@ -35,6 +35,30 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Added（2026-10-20·续51，P0 落地：控制台随包 + 审批跨重启/收件箱 + 租户作用域）
+
+- **控制台随包发布**：`dashboard/` 迁入 `loom_core/dashboard/` 并进 `package-data`
+  （3.12.0 的 wheel 里 0 个 dashboard 资源，装完打开 `/` 只有一行纯文本）；`GET /`
+  免鉴权直出入口页（只发静态壳，数据端点各自鉴权）；管理 API/守护模式一律带静态资源；
+  `verify_dist.py` 把三个控制台资源列进 `REQUIRED_DATA`，发布门禁从此会拦。
+- **审批跨重启**：新增 `loom_core/approvals.py`（SQLite 台账，跟随 `LOOM_STATE_DIR`）。
+  闸门挂起时落 pending 行；`approve/reject` 对"已不在内存"的任务改为写台账 +
+  把队列行放回 `pending` 并置 `resume=1`，worker 以 `run_plan(resume=True)` 从
+  checkpoint 续跑越过闸门；决定在结算时标记消费（不会二次越闸）。驳回同理：
+  台账记 rejected、队列行置 cancelled、不再执行。
+- **审批收件箱**：`GET /api/approvals`（非 admin 只看 principal 属于自己的待办，
+  admin 见全量并带归属）；控制台新增"待审批"卡片，放行/驳回直接落到既有端点。
+- **租户作用域补齐**：`/api/dashboard` 的任务列表按 principal 过滤（此前普通 token
+  能看到全仓任务）；`/api/logs`、`/api/quality/feedback`、`/api/alerts` 这些跨租户
+  聚合面对非 admin 返回 403；控制台对 403 显式显示"需要 admin 权限"，不再折叠成"暂无数据"。
+- **旧名清理（运行面）**：compose 镜像/容器、Dockerfile 示例、OTel tracer、控制台标题
+  与根文案里的 `doc-pipeline` 全部改为 `loom`/`nexusloom`。
+- **判据**：新增 `tests/test_approvals.py` 10 条——台账 6 条（请求复用 / 只有 pending
+  可决策 / 决定消费 / principal 过滤 / 未知结论拒绝 / 历史倒序）+ **真重启 2 条**
+  （子进程硬退出在闸门上，父进程批准后 worker 续跑完成；驳回后队列为 cancelled 且
+  不再执行）+ 真 HTTP 2 条（双 token 收件箱隔离 / 越权审批 404 / 日志质量告警 403 /
+  dashboard 任务过滤）。控制台新增 3 条（包内资源 / 打包声明 / `GET /` 真 HTTP 返回 HTML）。
+
 ### Changed（2026-10-20·续50，产品定位收口：宽内核、窄门面）
 
 - **对外定位收敛为「可验收的 Agent 交付运行时」**：README 首屏与 PyPI 摘要不再以
