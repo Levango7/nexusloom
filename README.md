@@ -938,7 +938,9 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**2835 个测试本机全绿**（`2835 passed, 7 skipped, 6 deselected`，2026-10-20 本机全量实测；
+**2839 个测试本机全绿**（`2839 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
+其中 2838 条是直接观测，第 2839 条就是读这一行的那条护栏——它上一轮红正是因为本行还写着 2835，
+改数后单跑该用例绿（本机收集 2846 条，护栏按 `collected − declared ≤ 10` 判）；
 本轮 `LOOM_TEST_PG_URL` 未设置 ⇒ 5 条真 Postgres 判据按 `requires_pg` 跳过；
 设了该变量的口径应比本行数多出那 5 条执行（2026-10-14 那次 2801 passed / 2 skipped 含真 PG）；
 工具层迁出 artesian 后 19 条 fast_json 用例随库走，等价判据在新库加强至 35 条；
