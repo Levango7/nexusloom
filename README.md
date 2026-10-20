@@ -6,10 +6,10 @@ Loom 是一个自托管的 Agent 工作流运行时：声明式 YAML 编排可�
 **产出契约**（声明了交付物却没交付就不算 `done`）、**锁文件拓扑指纹**（配置或拓扑漂移即拒绝执行）、
 **审批闸门**、**交付账本**与 **LLM 成本预算熔断**；可 `pip install`，可被 CLI / HTTP / MCP / 队列调用。
 
-**文档生成（docgen）是它自带的旗舰 pack**：下面的场景分级、输出格式与检索/摄入能力都属于这个 pack；
-引擎本身与领域无关，换一个 pack 就是另一类交付物。
+**文档生成（docgen）是它自带的旗舰 pack**；检索、摄入、变换等通用 Agent 也可被其他工作流复用。
+下面同时列出文档场景与 `api-report` 等通用工作流，引擎本身不限定交付领域。
 
-## 场景分级（docgen pack 出厂场景）
+## 出厂场景（文档 pack 与通用工作流）
 
 | 级别 | 场景 | 入口 | 说明 |
 |---|---|---|---|
@@ -985,7 +985,7 @@ P1-D 并发模型批净加 14 条判据（同连接两请求 keep-alive / 五处
 池满 503+Retry-After 与 200 数等于池大小 / 工位借还与空闲回收两条真时序 /
 半开连接被服务端关闭 / SSE 入口不复用连接）；
 S2 运行详情批净加 20 条判据（DAG 视图全字段真 HTTP：四态/两种跳过可区分/无 DAG 给空结构/
-层级与 attempts 兜底/审批两字段 + dashboard 结构护栏 13 条；仓内**无浏览器级证据**（只有静态结构护栏））；
+层级与 attempts 兜底/审批两字段 + dashboard 结构护栏 13 条；浏览器验证范围见下方独立命令）；
 S3 节点检查器批净加 15 条判据（节点检查器载荷真 HTTP：artifact 截断预览 / 幂等键三态
 （真库 True·False·store 未就绪 None）/ 熔断限流 None 与在场两态 / 质量门只认质量形状 /
 404 三型 / 断点三种态 + dashboard 结构护栏增补 4 条；抽屉交互无浏览器级证据）；
@@ -1006,6 +1006,17 @@ Schema 校验、Lockfile 与 edges 一致性、消息总线（含幂等去重的
 容错注入、断点续传、管理 API、并发压力、SSE 流式、执行器工厂、任务队列、
 成本追踪、告警机制、质量闭环、MCP Server、OpenAPI Spec、Agent 沙箱、
 配置热更新、kb-docgen 离线端到端、运行态路径隔离。
+
+控制台浏览器回归（独立于 pytest 计数，需安装 Playwright 与 Chrome）：
+
+```bash
+python -m pip install playwright
+python tests/check_dashboard_browser.py --channel chrome
+```
+
+该脚本启动随机回环端口，在真实浏览器执行控制台源码，以固定 HTTP 响应验证成本/质量/日志渲染、
+403 与 503 的区别、真实空结果、驳回取消/确认、登录后重载工作流目录。它不替代后端鉴权与数据库测试，
+也未自动接入 CI；已有 Chromium 可省略 `--channel`，使用 Edge 可改为 `--channel msedge`。
 
 > `python -m pytest tests/ -m e2e` 是 6 个打真实网络的用例，`skipif` 读仓库根的 `.env`：
 > 搜索类要 `BOCHA_API_KEY` 或 `TAVILY_API_KEY`，LLM 类要 `LLM_API_KEY`，全链路两条都要，
