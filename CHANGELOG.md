@@ -35,6 +35,22 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Added（2026-10-21·续54，RunStore + EventLog 设计入库，P1-① 起手）
+
+- **新增设计复核** `docs/runstore-eventlog-design-2026-10-21.md`：运行态散在**五处写面**
+  （内存 `_running_tasks` 硬顶 100 条 / `task_queue` / checkpoint JSON /
+  `deliveries.db` / `approvals.db`），事件面散在**五条总线**（`emit_event` 只在内存、
+  `bus.publish` 进 message_store、`write_audit` 进 JSONL、deliveries、approvals），
+  20 处直接读点里最坏的三条（`_scoped_task` 以内存存在性判可见、`/api/cost` 的作用域
+  集合、`/stream` 的进程内 `_history`）都建立在"进程没重启过"这个假设上。文档给出
+  `RunRecorder` 同事务双写 + `events`/`runs`/`run_nodes` 投影的模型、Stage 0→3 分期与
+  退出判据，以及三条已拍板边界：**不 backfill 历史运行**、**本批只立接口 + SQLite**
+  （PG 后端延后）、**checkpoint 保留为续跑快照而不并入 RunStore**。
+- **配套 `scripts/check_design_anchors.py`**：文档里 40 处 `(文件, 行号, 该行的锚文本)`
+  逐条核对，行号漂了或代码被改掉即退出码 1——防止设计文档的引用变成"看起来很确定的
+  历史传闻"。**刻意不接进 CI**：它是文档的自我校验工具，Stage 每推进一格就要按新现实
+  更新或退役一批锚点，挂在流水线里只会让人为了变绿而改锚点。当前 40/40 通过。
+
 ### Fixed（2026-10-21·续53，判据修一处采样竞态）
 
 - `tests/test_approvals.py::TestLiveWorkerObservesExternalApproval` 的子进程原先把
