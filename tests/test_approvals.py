@@ -269,38 +269,48 @@ LIVE_CHILD_SCRIPT = textwrap.dedent("""
     orch._executor.execute_node_from_scheduler = counted
 
     task = orch.run_plan(plan, input_file=inp, task_id=task_id, wait=False)
-    deadline = time.time() + 60
-    while time.time() < deadline and not task.awaiting_approval \\
-            and task.status.value not in ("done", "failed", "cancelled"):
-        time.sleep(0.05)
-    if not task.awaiting_approval:
-        Path(out_path).write_text(json.dumps(
-            {"phase": "no_gate", "status": task.status.value, "error": task.error,
-             "counts": dict(counts)}, ensure_ascii=False, default=str), encoding="utf-8")
-        os._exit(9)
 
-    # 关键：不退出进程。这就是"暂停中的真 worker"——决定只能从持久台账被观察到
-    deadline = time.time() + 90
+    # 观察点必须是**终态**，不是"此刻还挂在暂停上"。外部批准可能落在两次 50ms 采样之间：
+    # 子进程确实挂起过（父进程看到台账 pending 行才会继续），但等这个主线程回头看时，
+    # awaiting_approval 已被清空、运行已经跑完 ⇒ 把"没观察到暂停"误报成"没暂停"。
+    # "挂起发生过"这件事由父进程侧的台账判据负责，不靠子进程采样。
+    deadline = time.time() + 150
     while time.time() < deadline and task.status.value not in ("done", "failed", "cancelled"):
         time.sleep(0.05)
+    status = task.status.value
+    if status not in ("done", "failed", "cancelled"):
+        Path(out_path).write_text(json.dumps(
+            {"phase": "timeout", "status": status, "error": task.error,
+             "counts": dict(counts), "pid": os.getpid()},
+            ensure_ascii=False, default=str), encoding="utf-8")
+        os._exit(9)
+
+    # 关键：进程活到终态才退出——这就是"暂停中的真 worker"被外部决定唤醒的完整过程
     time.sleep(0.5)  # 等 finally 链把队列终态/账本写完（父进程仍按等待条件复核）
     gate = task.dag_nodes.get("release_gate")
     Path(out_path).write_text(json.dumps({
-        "phase": "finished",
-        "status": task.status.value,
+        "phase": "terminal",
+        "status": status,
         "error": task.error,
         "pid": os.getpid(),
         "counts": dict(counts),
         "gate_status": getattr(gate, "status", None),
         "gate_result": gate.result if gate else None,
     }, ensure_ascii=False, default=str), encoding="utf-8")
-    os._exit(0 if task.status.value == "done" else 8)
+    os._exit(0 if status == "done" else 8)
 """)
 
 
 class TestLiveWorkerObservesExternalApproval:
     def test_paused_worker_resumes_on_other_process_decision(self, tmp_path):
-        """批准方在另一个进程、执行方还活着：台账是唯一通路，且不得重排活 owner。"""
+        """批准方在另一个进程、执行方还活着：台账是唯一通路，且不得重排活 owner。
+
+        分工写死，避免再把瞬时状态当信号：
+        - "闸门确实挂起过" = 父进程读到 pending 台账行的那一刻 `proc.poll()` 仍是 None；
+        - "被外部决定唤醒并跑完" = 子进程终态落盘（闸门节点 success + 批准人写的 note）；
+        - 子进程**不**报告"此刻是否还挂在暂停上"——批准可能落在两次采样之间，
+          等它回头读 `awaiting_approval` 时已被清空（CI 3.13 腿实测红在 no_gate）。
+        """
         task_id = "live_worker"
         pipes = _pipeline_dir(tmp_path)
         inp = tmp_path / "in.md"
@@ -340,9 +350,9 @@ class TestLiveWorkerObservesExternalApproval:
             ok, err = orch.approve(task_id, note="外部进程批准", by="ops")
             assert ok and err == "", err
 
-            state = _wait_for(lambda: _read_json(out), timeout=180)
+            state = _wait_for(lambda: _read_json(out), timeout=210)
             assert state is not None, f"子进程没跑完：{logs.read_text()[-800:]}"
-            assert state["phase"] == "finished", state
+            assert state["phase"] == "terminal", state
             assert state["status"] == "done", f"外部批准后没继续执行：{state}"
             assert state["counts"] == {"tldr": 1}, \
                 f"已完成节点被重跑：{state['counts']}"

@@ -21,9 +21,25 @@ def _square(x: int) -> int:
     return x * x
 
 
-def _sleep_identity(x: float) -> float:
-    time.sleep(x)
-    return x
+def _sleep_window(sec: float) -> dict:
+    """睡 sec 秒并回报**自己的起止窗口**——判断"真并行"要看同一时刻有几个在跑。"""
+    start = time.time()
+    time.sleep(sec)
+    return {"start": start, "end": time.time(), "sec": sec}
+
+
+def _max_concurrent(windows: list) -> int:
+    """扫描线求最大并发数（窗口重叠的峰值）。"""
+    events = []
+    for w in windows:
+        events.append((w["start"], 1))
+        events.append((w["end"], -1))
+    events.sort()
+    cur = peak = 0
+    for _, delta in events:
+        cur += delta
+        peak = max(peak, cur)
+    return peak
 
 
 # ═══════════════════════════════════════════════════════════
@@ -70,26 +86,25 @@ class TestProcessPoolExecution:
             results = [f.result() for f in futures]
         assert results == [0, 1, 4, 9, 16]
 
-    def test_parallel_speedup(self):
-        """多进程并行执行结果正确（Windows 进程启动开销大，验证正确性而非速度）"""
-        n = 8
-        sleep_sec = 0.3
-        # 串行
-        t0 = time.time()
-        serial = [_sleep_identity(sleep_sec) for _ in range(n)]
-        serial_time = time.time() - t0
+    def test_parallel_execution_actually_overlaps(self):
+        """进程池的真并行 = 任务窗口重叠，不是"比串行快几倍"。
 
-        # 并行
-        t0 = time.time()
-        with ProcessPoolExecutor(max_workers=4) as pool:
-            futures = [pool.submit(_sleep_identity, sleep_sec) for _ in range(n)]
-            parallel = [f.result() for f in futures]
-        parallel_time = time.time() - t0
+        旧断言 `parallel_time < serial_time * 3.0`（n=8、sleep=0.3 ⇒ 预算 7.21s）两头都不成立：
+        - **零射程**：把池人为串行化（`max_workers=1`）实测 parallel_time=2.73s < 7.21s，
+          照样绿——它声称"防止退化"却测不出退化本身（本机实测 2026-10-21）；
+        - **假阳性**：Windows 上 4 个进程的 spawn 开销算进 parallel_time，
+          机器并行负载下超预算就红（本机全量 34 min 那次红在这条，单跑 3 次全绿）。
+        窗口峰值只看"同一时刻有几个在跑"：负载让 spawn 变慢，但不会伪造重叠，
+        也不会因为慢而误红。
+        """
+        n, workers, sec = 8, 4, 1.5
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            windows = [f.result() for f in
+                       [pool.submit(_sleep_window, sec) for _ in range(n)]]
 
-        assert serial == parallel
-        # Windows 进程启动开销 ~0.3-0.8s/进程，短任务可能并行更慢
-        # 仅验证并行不超过串行的 3 倍（防止退化）
-        assert parallel_time < serial_time * 3.0
+        assert [w["sec"] for w in windows] == [sec] * n, "有任务没跑完或返回值不对"
+        peak = _max_concurrent(windows)
+        assert peak >= 2, f"窗口没有重叠，池退化成串行执行：peak={peak} windows={windows}"
 
     def test_thread_pool_also_works(self):
         """ThreadPoolExecutor 也能执行模块级函数"""
