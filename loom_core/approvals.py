@@ -149,14 +149,27 @@ class ApprovalStore:
                 "ORDER BY requested_at DESC LIMIT 1", (run_id, PENDING)).fetchone()
         return self._row_to_dict(row)
 
-    def open_decision(self, run_id: str) -> dict[str, Any] | None:
-        """该运行已作出但尚未被消费的决定（续跑用）。"""
+    def open_decision(self, run_id: str,
+                      nodes: list[str] | None = None) -> dict[str, Any] | None:
+        """该运行已作出但尚未被消费的决定（续跑用）。
+
+        `nodes` 非 None 时**只认节点集合完全一致的决定**：同一运行里多个闸门
+        共用 run_id，按"最新决定"取值会让后一个闸门的决定去结算前一个闸门
+        （2026-10-20 复核确认的错绑路径）。
+        """
         with self._conn() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 "SELECT * FROM approvals WHERE run_id = ? AND status IN (?, ?) "
-                "AND consumed = 0 ORDER BY decided_at DESC LIMIT 1",
-                (run_id, APPROVED, REJECTED)).fetchone()
-        return self._row_to_dict(row)
+                "AND consumed = 0 ORDER BY decided_at DESC",
+                (run_id, APPROVED, REJECTED)).fetchall()
+        wanted = set(nodes) if nodes is not None else None
+        for row in rows:
+            decision = self._row_to_dict(row)
+            if decision is None:
+                continue
+            if wanted is None or set(decision.get("nodes") or []) == wanted:
+                return decision
+        return None
 
     def list_pending(self, principal: str | None = None,
                      limit: int = 200) -> list[dict[str, Any]]:

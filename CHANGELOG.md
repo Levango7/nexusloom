@@ -80,11 +80,15 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
   本仓全量类型面零新错）。
 - **旧名清理（运行面）**：compose 镜像/容器、Dockerfile 示例、OTel tracer、控制台标题
   与根文案里的 `doc-pipeline` 全部改为 `loom`/`nexusloom`。
-- **判据**：新增 `tests/test_approvals.py` 10 条——台账 6 条（请求复用 / 只有 pending
-  可决策 / 决定消费 / principal 过滤 / 未知结论拒绝 / 历史倒序）+ **真重启 2 条**
-  （子进程硬退出在闸门上，父进程批准后 worker 续跑完成；驳回后队列为 cancelled 且
-  不再执行）+ 真 HTTP 2 条（双 token 收件箱隔离 / 越权审批 404 / 日志质量告警 403 /
-  dashboard 任务过滤）。控制台新增 3 条（包内资源 / 打包声明 / `GET /` 真 HTTP 返回 HTML）。
+- **判据**：新增 `tests/test_approvals.py` 14 条——台账 7 条（请求复用 / 只有 pending
+  可决策 / 决定消费 / principal 过滤 / 未知结论拒绝 / 历史倒序 / **决定绑定闸门节点集合**）
+  + **真重启 2 条**（子进程硬退出在闸门上，父进程批准后 worker 续跑完成；驳回后队列为
+  cancelled 且不再执行）+ 暂停边界完整检查点 1 条 + 活 owner 队列守卫 1 条 +
+  **真双进程 1 条**（执行方仍活着停在闸门：另一进程批准→台账成为唯一通路→暂停循环自己
+  观察到决定并跑完；同一段里钉"活 owner 不被重排"与"前序节点计数不涨"，计数挂在真实
+  执行漏斗 `dag_executor.execute_node_from_scheduler` 上而非状态推断）+ 真 HTTP 2 条
+  （双 token 收件箱隔离 / 越权审批 404 / 日志质量告警 403 / dashboard 任务过滤）。
+  控制台新增 3 条（包内资源 / 打包声明 / `GET /` 真 HTTP 返回 HTML）。
 
 ### Changed（2026-10-20·续50，产品定位收口：宽内核、窄门面）
 
