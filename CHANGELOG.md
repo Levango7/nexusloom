@@ -46,6 +46,14 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
   反向对照实跑：同一脚本不批准 ⇒ 落盘 `{"phase": "timeout", "status": "paused",
   "counts": {"tldr": 1}}` 且退出码 9 ⇒ 新断言不是空转。正向 3 次重跑全绿
   （19.68 / 19.70 / 26.35s，本机 Python 3.14.3，未设 `LOOM_TEST_PG_URL`）。
+- `tests/test_executor_factory.py::test_parallel_speedup` 换成 `test_parallel_execution_actually_overlaps`。
+  旧断言 `parallel_time < serial_time * 3.0`（n=8、sleep=0.3 ⇒ 预算 7.21s）**两头都不成立**：
+  把池人为串行化（`max_workers=1`）实测 `parallel_time=2.73s`，仍远小于预算 ⇒ 它声称"防止退化"
+  却对退化**零射程**；而 Windows 的 4 次进程 spawn 全算进被除数 ⇒ 本机并行负载下假阳性
+  （2026-10-21 全量 2066.16s 那次红在这条，单跑 3 次 4.5–5.6s 全绿）。
+  新判据看**窗口重叠峰值**（同一时刻几个任务在跑）：`workers=4` 得 peak=4，
+  变异 `workers=1` 当场红 `peak=1`（33 passed / 14.18s 复原）。负载只会拖慢 spawn，
+  不会伪造重叠、也不会因慢而误红。顺手删掉失去使用者的 `_sleep_identity`。
 
 ### Added（2026-10-20·续51，P0 落地：控制台随包 + 审批跨重启/收件箱 + 租户作用域）
 
