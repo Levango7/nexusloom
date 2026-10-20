@@ -35,6 +35,20 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+## [3.12.0] - 2026-10-16
+
+v3.11.0（10-12）之后的累计发行版，按下面的续41–续49 逐批归档：首个真第三方插件例证（生态轴
+0→1）、P1-A token 身份与多租户作用域隔离、P1-B 状态后端可换（SQLite/Postgres 双后端）、
+P1-C 配置热更新跨进程生效、P1-D 常驻服务并发模型两处缺陷关闭、spec §4.2 控制台 S2 运行详情屏
+与 S3 节点检查器、spec §6 API 原语 `RunHandle` 落地并接进 MCP `get_task` 与 Admin
+`GET /tasks/<id>`，以及产物清单持久化到交付账本（`deliveries.db`——任务被内存历史淘汰后
+`artifacts` 不再凭空变空）。
+
+响应面只增不改：`artifacts` 是新增字段，MCP `get_task` 的既有键
+（`id/status/pipeline/result/error`）一个没动（判据 `tests/test_run_handle.py`）。
+升级时请顺带核对这几处新读面：`tokens.yaml`（P1-A 身份）、状态后端 DSN（P1-B）、
+配置覆写文件与 `LOOM_*` 前缀（P1-C）。
+
 ### Added（2026-10-15·续48，spec §6 的 API 原语 `RunHandle` 落地）
 
 - **`loom_core/run_handle.py`**：一次运行的句柄，五个原语 `status / wait / cancel /
