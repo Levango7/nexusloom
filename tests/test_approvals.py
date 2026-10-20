@@ -94,6 +94,16 @@ class TestApprovalStore:
         with pytest.raises(ValueError):
             store.decide(rid, "maybe")
 
+    def test_open_decision_is_bound_to_the_gate_nodes(self, store):
+        """多闸门共用 run_id：G2 的决定不得被 G1 借走（2026-10-20 复核确认）。"""
+        first = store.request("r1", "p", ["g1"])
+        store.decide(first, APPROVED, note="g1-note")
+        store.consume(first)
+        second = store.request("r1", "p", ["g2"])
+        store.decide(second, APPROVED, note="g2-note")
+        assert store.open_decision("r1", nodes=["g1"]) is None,             "G1 拿到了 G2 的决定"
+        assert store.open_decision("r1", nodes=["g2"])["note"] == "g2-note"
+
     def test_history_is_newest_first(self, store):
         first = store.request("r1", "p", ["g1"])
         store.decide(first, APPROVED)
@@ -332,3 +342,16 @@ class TestApprovalHTTP:
             assert {t["id"] for t in data["tasks"]} == {"t_a", "t_b"}
         finally:
             api.stop()
+
+
+class TestPauseCheckpointIsFullState:
+    def test_pause_boundary_keeps_completed_nodes(self, tmp_path):
+        """暂停边界必须是完整检查点：浅存档会丢掉已完成节点（复核确认）。"""
+        task_id = "cp_full"
+        _run_child_to_gate(tmp_path, task_id)
+        ckpt = tmp_path / "ckpt" / f"{task_id}.json"
+        data = json.loads(ckpt.read_text(encoding="utf-8"))
+        nodes = data.get("_dag_nodes") or {}
+        assert "tldr" in nodes, f"暂停检查点没有已完成节点：{sorted(data)}"
+        assert nodes["tldr"]["status"] == "success"
+        assert data.get("_result"), "暂停检查点没有结果快照"
