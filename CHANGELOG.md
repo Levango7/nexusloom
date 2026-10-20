@@ -51,6 +51,12 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 - **租户作用域补齐**：`/api/dashboard` 的任务列表按 principal 过滤（此前普通 token
   能看到全仓任务）；`/api/logs`、`/api/quality/feedback`、`/api/alerts` 这些跨租户
   聚合面对非 admin 返回 403；控制台对 403 显式显示"需要 admin 权限"，不再折叠成"暂无数据"。
+- **CI 类型门禁修一条上游漂移**：runner 上 pymupdf 2.0 起自带 `.pyi` 并引入 numpy，
+  numpy 2.5 的 stub 用了 PEP 695 `type` 语句；mypy 1.20.2 + `python_version=3.11`
+  判 `[syntax]` 直接失败（只在 3.12+ 腿命中，3.11 腿装旧 numpy 所以是绿的）。
+  `follow_imports=skip` 实测**不阻止** stub 解析，故改为钉 `mypy==2.4.0`
+  （对照 venv 实测：1.20.2 + numpy 2.5.4 = syntax error；2.4.0 = 通过，
+  本仓全量类型面零新错）。
 - **旧名清理（运行面）**：compose 镜像/容器、Dockerfile 示例、OTel tracer、控制台标题
   与根文案里的 `doc-pipeline` 全部改为 `loom`/`nexusloom`。
 - **判据**：新增 `tests/test_approvals.py` 10 条——台账 6 条（请求复用 / 只有 pending

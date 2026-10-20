@@ -61,7 +61,8 @@ jobs:
           # 只在测试期需要，不是运行时依赖。
           # psycopg：P1-B 真 PG 判据（state backend 可换）需要；
           # 运行时经 `nexusloom[postgres]` 可选装（见 pyproject extras）。
-          pip install "pytest==8.3.4" "pytest-cov==7.1.0" "coverage==7.15.2" "pytest-asyncio==0.25.2" "ruff==0.16.4" "mypy==1.20.2" "types-PyYAML" "bandit>=1.7.0" "pip-audit>=2.7.0" "pymupdf>=1.24.0" "psycopg[binary]>=3.1.0"
+          # mypy 2.4.0：1.20.2 无法解析 numpy 2.5 stub 的 PEP 695 `type`（3.12+ 腿红）。
+          pip install "pytest==8.3.4" "pytest-cov==7.1.0" "coverage==7.15.2" "pytest-asyncio==0.25.2" "ruff==0.16.4" "mypy==2.4.0" "types-PyYAML" "bandit>=1.7.0" "pip-audit>=2.7.0" "pymupdf>=1.24.0" "psycopg[binary]>=3.1.0"
 
       - name: Lint (ruff)
         run: |

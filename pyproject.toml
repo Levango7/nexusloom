@@ -154,6 +154,7 @@ disable_error_code = ["valid-type", "attr-defined"]
 module = ["yaml"]
 ignore_missing_imports = true
 
+
 [tool.bandit]
 # B310（urllib.urlopen）在本仓 scope 内实测 3 处：llm_router 1 + writer 2。
 # 三处的目标 URL 都是**运维配置**决定的（`llm_router` 从 env 取 `*_API_URL`、
