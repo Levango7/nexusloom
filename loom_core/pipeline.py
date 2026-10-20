@@ -1095,6 +1095,24 @@ class PipelineOrchestrator:
                 if task.stop_event.is_set() or self._stop_event.is_set():
                     task.status = TaskStatus.CANCELLED
                     return
+                # 别的进程/API 可能已批：本进程要自己观察持久决定，
+                # 不能指望"批准方一定在同一个进程里"。
+                gate_nodes = list((task.awaiting_approval or {}).get("nodes") or [])
+                decision = (self._consume_open_decision(task, gate_nodes)
+                            if gate_nodes else None)
+                if decision is not None:
+                    if str(decision.get("status")) == "rejected":
+                        reason = str(decision.get("reason") or "")
+                        task.error = (f"审批被驳回: {reason}" if reason
+                                      else "审批被驳回")
+                        task.status = TaskStatus.CANCELLED
+                        task.stop_event.set()
+                        return
+                    task.awaiting_approval = None
+                    task.status = TaskStatus.RUNNING
+                    self._log("info", "审批放行（他进程批准）：继续执行",
+                              task_id=task.id)
+                    break
                 task.stop_event.wait(0.5)
             if task.status == TaskStatus.CANCELLED:
                 return
@@ -1228,6 +1246,10 @@ class PipelineOrchestrator:
 
         self.task_queue.submit(task.id, plan.pipeline_name, input_file,
                                plan.raw.get("pipeline", {}))
+        try:
+            self.task_queue.claim_direct(task.id)  # 直跑也占住行，防被 worker 重排
+        except Exception as e:  # noqa: BLE001
+            self._log("warning", "队列行占位失败", task_id=task.id, error=str(e))
 
         task.started_at = time.time()
         total_nodes = plan.node_count

@@ -355,3 +355,26 @@ class TestPauseCheckpointIsFullState:
         assert "tldr" in nodes, f"暂停检查点没有已完成节点：{sorted(data)}"
         assert nodes["tldr"]["status"] == "success"
         assert data.get("_result"), "暂停检查点没有结果快照"
+
+
+class TestLiveOwnerIsNotRequeued:
+    def test_mark_for_resume_refuses_a_live_owner(self, tmp_path):
+        """管理员进程内存里没有任务 ≠ owner 已死：活 owner 的任务不得重排。"""
+        import subprocess
+        import sys
+
+        q = TaskQueue(str(tmp_path / "tasks.db"))
+        q.submit("live_owner", "gate_demo", "in.md")
+        assert q.claim_direct("live_owner") is True
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            with q._lock, q._get_conn() as conn:
+                conn.execute("UPDATE task_queue SET owner_pid = ? WHERE task_id = ?",
+                             (sleeper.pid, "live_owner"))
+            assert q.mark_for_resume("live_owner") is False, "活 owner 被重排"
+            assert q.get("live_owner")["status"] == "running"
+        finally:
+            sleeper.kill()
+            sleeper.wait(timeout=10)
+        assert q.mark_for_resume("live_owner") is True
+        assert q.get("live_owner")["status"] == "pending"

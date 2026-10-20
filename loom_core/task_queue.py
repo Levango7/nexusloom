@@ -202,6 +202,15 @@ class TaskQueue:
                 (time.time(), task_id),
             )
 
+    def claim_direct(self, task_id: str) -> bool:
+        """直跑（run_plan 不经 worker）也占住队列行：记 owner_pid，别人不得重排。"""
+        with self._lock, self._get_conn() as conn:
+            cur = conn.execute(
+                "UPDATE task_queue SET status = 'running', owner_pid = ?, started_at = ? "
+                "WHERE task_id = ? AND status = 'pending'",
+                (os.getpid(), time.time(), task_id))
+            return bool(cur.rowcount > 0)
+
     def mark_for_resume(self, task_id: str) -> bool:
         """把一行放回 pending 并置续跑标记（审批跨重启：批准一个进程已死的闸门）。
 
@@ -209,6 +218,18 @@ class TaskQueue:
         闸门挂起并不会写终态。返回是否真的改了行（False = 行不存在或已是终态）。
         """
         with self._lock, self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT status, COALESCE(owner_pid, 0) FROM task_queue WHERE task_id = ?",
+                (task_id,)).fetchone()
+            if not row:
+                return False
+            status, owner_pid = row
+            # 活着的 owner 还在跑：不能靠"别的进程内存里没有这个任务"就重排，
+            # 否则同一任务会被两个执行者同时推进（2026-10-20 复核确认）。
+            if status == "running" and owner_pid and int(owner_pid) not in (0, os.getpid())                     and _pid_alive(int(owner_pid)):
+                return False
+            if status not in ("running", "pending"):
+                return False
             cur = conn.execute(
                 "UPDATE task_queue SET status = 'pending', worker_id = '', "
                 "owner_pid = 0, started_at = 0, error = '', resume = 1, "
