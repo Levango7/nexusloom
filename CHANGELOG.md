@@ -35,6 +35,42 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Added（2026-10-21·续56，RunStore Stage 1：事件 + 投影同事务的双写口）
+
+- **新增 `loom_core/run_store.py`**：一次运行的事实从此有一个写入口。四张表
+  （`schema_version` / `events` / `runs` / `run_nodes`），每个写口都是**同一事务里
+  追加事件 + 更新投影**——不会出现"事件说完成、投影说运行中"这种分属两个时间坐标系
+  的中间态。`seq` 在事务内取 `MAX(seq)+1`（不用自增 id：多进程共享库时跨进程唯一
+  ≠ 每运行单调，而 SSE 游标要的是后者），SQLite 侧靠 `BEGIN IMMEDIATE` 排队取号，
+  其余方言走驱动事务 + `SELECT … FOR UPDATE`。**`INSERT OR REPLACE` 全程禁用**——
+  `db_backend` 的翻译表里没有它，写了就是"SQLite 能跑、PG 直接报错"的假可用。
+- **引擎接线三处 + 一处补登记**：`run_plan` / `run_plan_async` 开头 `open_run`
+  （trigger 分别是 direct/resume/stream/stream-resume），每层跑完按**当时**的
+  `dag_node` 落 `run_nodes`，收尾与 Stage 0 的共用终态口一起 `close_run`。
+  闸门节点在 `_arm_approval_gate` 就登记一次——只靠层尾登记会漏掉"停在闸门上被取消"
+  的运行（本批的三方对账门禁实测抓到，见下）。**旧写面一个都没删**（Stage 3 才摘）。
+- **`LOOM_RUNSTORE=0` 是退路，不是特性开关**：关掉后旧三面照旧、新表零行，
+  读写两侧都不依赖新表（§5 要求的回退，有判据钉住"退路本身没把观测面一起删掉"）。
+- **判据 `tests/test_runstore_parity.py` 8 条**：同/异步 × done/cancelled 的
+  **四方对账**（`runs`+`run_nodes` vs `task_queue` 行 vs `deliveries` payload vs 内存
+  `dag_nodes`，节点集合、逐节点状态与产物键、`last_seq == 事件尾部`、seq 连续），
+  开关退路 1 条，「有事件必有投影行」不变式 2 条（含 `record()` 给陌生 run 也建行），
+  源码级禁 `INSERT OR REPLACE` 1 条，逐条 SQL 过 Postgres 翻译层 1 条
+  （`?` 全部消失、`OR IGNORE` 全部翻掉——探针先断言"至少抓到 8 条 SQL"，防自己瞎）。
+- **门禁与写口各自独立才有射程**：`run_nodes` 刻意**不**借用 `_build_delivery_record`
+  的形状，而是读层跑完那一刻的 `dag_node`。若改成抄那份记录，"投影 vs 账本"就成了
+  自己比自己。
+- **两处由判据自己抓出来的缺陷**（都已在实现里修掉，不是事后补的说明）：
+  ① 实例属性 `self._runstore` 遮蔽了同名方法 `_runstore()`（实例属性优先），
+  于是每次运行都在 `TypeError: 'NoneType' object is not callable` 上炸——
+  8 条 ERROR + 6 条 FAILED，是把 fail-soft 承诺写在 try 之外的代价； accessor
+  现在自己兜异常。② 闸门节点缺行：`run_nodes=['tldr']` vs 账本
+  `['release_gate','tldr']`。
+- **本批如实留下的空白**：`runs.cost_usd` / `quality_score` **不填**（来源还没定，
+  不拿猜测当事实）；`principal` 沿用调用方给的归属——今天 SSE 与直跑都传不出
+  owner，所以列是有的、值多为空串（Stage 2 读侧切换前先把身份接上）。
+  三方对账门禁是**显式用例**覆盖两引擎 × 成败，不是"每条用例跑完自动后置检查"。
+
 ### Fixed（2026-10-21·续55，RunStore Stage 0：异步引擎补齐同步侧的运行事实）
 
 - **异步收尾不再"只跑不记"**：`_finalize_plan_task_async` 此前整段不写持久队列、
