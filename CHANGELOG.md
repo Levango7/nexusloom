@@ -60,7 +60,17 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
   取消各"至多一条终态事件"、异步暂停保完整状态并被另一实例的决定唤醒。
   变异验证：① 把 `pipeline.py` 换回 main 版 ⇒ 3 条红（缺登记/缺终态/缺观察）；
   ② 关掉 `_claim_terminal_event` 去重 ⇒ 2 条红并直接打印重复的 `task.cancelled`。
-  本机 `Python 3.14.3` 影响面 218 条全量 12:45 全绿（`LOOM_TEST_PG_URL` 未设）。
+  本机 `Python 3.14.3` 全量实测 `2844 passed, 7 skipped, 6 deselected in 873.44s`
+  （收集 2852；唯一一条红就是读 README 计数的那条护栏，改数后 `tests/test_doc_consistency.py`
+  9 passed / 16.44s；`LOOM_TEST_PG_URL` 未设 ⇒ 5 条真 Postgres 判据按 `requires_pg` 跳过）。
+  影响面另跑 `218 passed / 765.32s`，rebase 到 main 后复跑 `57 passed / 217.11s`。
+- **连带两处口径同步**：README 的测试计数 2839 → **2845**（不同步就会推一个已知红 SHA——
+  护栏判据是 `collected − declared ≤ 10`，本批 +4 条后差值到 13）；
+  `scripts/check_design_anchors.py` 的 `pipeline.py` 锚点随本次重构重钉 9 条 + 退役 1 条。
+  退役的是那句「不更新 task_queue」的 docstring 引用——它已被并轨改掉，改成钉在新增的共用写口
+  `pipeline.py:499 _record_plan_terminal_state` 上，**"裂缝已补"这件事本身也要可核对**。
+  重钉靠整行文本对齐而不是推算偏移：同一次改动里 `+4 / +65 / +47` 三种 delta 并存
+  （开头插字段、中段插 helper、又把 `_finalize_plan_task` 的内联收尾换成一次调用）。
 
 ### Added（2026-10-21·续54，RunStore + EventLog 设计入库，P1-① 起手）
 
