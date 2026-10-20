@@ -35,6 +35,18 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Fixed（2026-10-21·续53，判据修一处采样竞态）
+
+- `tests/test_approvals.py::TestLiveWorkerObservesExternalApproval` 的子进程原先把
+  "此刻还挂在暂停上"当成功信号。外部批准可能落在两次 50ms 采样之间——闸门确实挂起过
+  （父进程读到 pending 台账行后才继续），等子进程回头读 `awaiting_approval` 已被清空，
+  于是把"没观察到暂停"误报成"没暂停"（**CI `test (3.13)` 腿实测红在
+  `{'phase': 'no_gate', 'status': 'done', 'counts': {'tldr': 1}}`，同一 SHA 另三条腿绿**）。
+  改为子进程只报**终态**（`phase: terminal` / `timeout`），"挂起发生过"由父进程侧的台账判据负责。
+  反向对照实跑：同一脚本不批准 ⇒ 落盘 `{"phase": "timeout", "status": "paused",
+  "counts": {"tldr": 1}}` 且退出码 9 ⇒ 新断言不是空转。正向 3 次重跑全绿
+  （19.68 / 19.70 / 26.35s，本机 Python 3.14.3，未设 `LOOM_TEST_PG_URL`）。
+
 ### Added（2026-10-20·续51，P0 落地：控制台随包 + 审批跨重启/收件箱 + 租户作用域）
 
 - **控制台随包发布**：`dashboard/` 迁入 `loom_core/dashboard/` 并进 `package-data`
