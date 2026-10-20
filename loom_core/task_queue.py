@@ -226,7 +226,9 @@ class TaskQueue:
             status, owner_pid = row
             # 活着的 owner 还在跑：不能靠"别的进程内存里没有这个任务"就重排，
             # 否则同一任务会被两个执行者同时推进（2026-10-20 复核确认）。
-            if status == "running" and owner_pid and int(owner_pid) not in (0, os.getpid())                     and _pid_alive(int(owner_pid)):
+            if (status == "running" and owner_pid
+                    and int(owner_pid) not in (0, os.getpid())
+                    and _pid_alive(int(owner_pid))):
                 return False
             if status not in ("running", "pending"):
                 return False
