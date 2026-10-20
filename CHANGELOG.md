@@ -58,8 +58,10 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 - **判据**：新增 `tests/test_async_run_parity.py` 4 条——同步/异步两条路径**Leave
   the same run facts**（事件序列逐条相等 + 队列行终态与节点结果）、同步取消与异步
   取消各"至多一条终态事件"、异步暂停保完整状态并被另一实例的决定唤醒。
-  变异验证：① 把 `pipeline.py` 换回 main 版 ⇒ 3 条红（缺登记/缺终态/缺观察）；
-  ② 关掉 `_claim_terminal_event` 去重 ⇒ 2 条红并直接打印重复的 `task.cancelled`。
+  变异验证（在最终头 `5143380` 上重跑，不是早期树上的结果）：① 把 `pipeline.py` 换回 main 版 ⇒
+  **4 条全红**（缺登记 / 缺终态 / 缺观察，且连"同步取消至多一条"也红——还原 main 同时把去重也摘掉了）；
+  ② 只关掉 `_claim_terminal_event` 的"已发过"闸门 ⇒ **恰好 2 红 + 2 绿**（两条取消判据红并直接打印
+  重复的 `task.cancelled`，另两条不受影响）——这条才是"变异只打掉它该打掉的东西"的对照。
   本机 `Python 3.14.3` 全量实测 `2844 passed, 7 skipped, 6 deselected in 873.44s`
   （收集 2852；唯一一条红就是读 README 计数的那条护栏，改数后 `tests/test_doc_consistency.py`
   9 passed / 16.44s；`LOOM_TEST_PG_URL` 未设 ⇒ 5 条真 Postgres 判据按 `requires_pg` 跳过）。

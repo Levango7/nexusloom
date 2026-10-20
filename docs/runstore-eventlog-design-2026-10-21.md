@@ -81,7 +81,7 @@
 
 | Stage | 交付 | 旧写入点处置 | 退出判据 |
 |---|---|---|---|
-| 0 | 两条引擎并轨（§2）**已交付** | 终态事件去重 | 同/异步 parity 断言逐字段相等（**实交付=事件序列+队列行+检查点形状；账本行比对挪 Stage 1**，见 §2 末）；parity 变异可红（还原 `pipeline.py` ⇒ 3 红，关去重 ⇒ 2 红） |
+| 0 | 两条引擎并轨（§2）**已交付** | 终态事件去重 | 同/异步 parity 断言逐字段相等（**实交付=事件序列+队列行+检查点形状；账本行比对挪 Stage 1**，见 §2 末）；parity 变异可红（最终头实测：还原 `pipeline.py` ⇒ 4 条全红，只摘"已发过"闸门 ⇒ 恰好 2 红 2 绿，红的是两条取消判据） |
 | 1 | `RunRecorder` + 4 表 + **双写** | 不删任何旧写 | parity 门禁：每 run 跑完自动比对 `runs`/`run_nodes` 与 `task_queue`/`deliveries`/内存三方，不一致**当场红**（默认开，CI 全量里跑） |
 | 2 | 读侧切换：`/tasks`、`/tasks/<id>`、`/api/dashboard`、`/api/cost` 作用域、MCP `list_tasks`/`get_task`、`_scoped_task` 存在性、SSE 重放改读 `events` | 内存退化为缓存（仅加速，不再作为存在性判据） | 双 token 真 HTTP：淘汰 100 条后仍查得到、越权仍 404 不泄露存在性；`/stream` 断线重连跨进程可重放 |
 | 3 | 摘写：`approvals` 行改为 `events` 的投影或保留但不再被 `open_decision` 单点依赖；`task_queue` 只保留"租约/抢占"职责 | **删除** Stage 1 的双写中已无读者的一侧 | 每个源有且只有一个写入者；`RunHandle` 五原语全部只读 RunStore |
