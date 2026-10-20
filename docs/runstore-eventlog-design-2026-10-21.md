@@ -1,8 +1,8 @@
 # RunStore + EventLog 设计（2026-10-21）
 
 > 承接 `docs/product-design-review-2026-10-20.md` §5。本文只解决一件事：**把"一次运行的事实"从 5 套写入 + 20 处直读，收敛成一个写入口、一个读接口。**
-> 行号基线：main @ `0f6090f`（PR #50 合并后），本仓 `fix/console-runtime-validation` 分支上取证的落点已逐条复核。
-> 本文是**待拍板的方案**，Stage 0 之外的表结构未经确认不得开工。
+> 行号基线：main @ `0f6090f`（PR #50 合并后），本仓 `fix/console-runtime-validation` 分支上取证的落点已逐条复核。**本文所有 `file:line` 是"当时那一行的原状"**，Stage 每落地一批就会让一批引用失效——`scripts/check_design_anchors.py` 按 `(文件, 行号, 锚文本)` 逐条核对，改了代码就要按新现实更新或退役对应条目。
+> 落地进度：§6 三件事已拍板；**Stage 0 已实现**（分支 `fix/async-run-parity`，独立 PR），Stage 1 的表结构在本文 §3.1 定稿后开工。
 
 ---
 
@@ -32,7 +32,9 @@
 
 后果实测口径：**从控制台流式发起的 run，在持久队列里没有行、在事件面里一条都不发**，只留下 checkpoint、deliveries 与总线消息。这解释了此前一类反复出现的现象——"UI 上看得见的运行，接口查不到"。
 
-**Stage 0（本批先做，独立成 PR）**：并轨。`run_plan_async` 补 `task_queue.submit` + `claim_direct` + 终态 `finish`，收尾补 `emit_event`；`run()` 与 `run_plan()` 的终态事件去重（同一 run 同一终态现在可发两次：`pipeline.py:465` 与 `882` 双路径 + `567`/`607` 的旁路）。判据：同步与异步各起一次同流水线，断言队列行形状、事件序列、账本行三者逐字段相等（parity 断言必须能变红——把 async 的 submit 注掉就该红）。
+**Stage 0（已实现，独立 PR）**：并轨。`run_plan_async` 补 `task_queue.submit` + `claim_direct` + 终态 `finish`，收尾补 `emit_event`；`run()` 与 `run_plan()` 的终态事件去重（同一 run 同一终态现在可发两次：`pipeline.py:465` 与 `882` 双路径 + `567`/`607` 的旁路）。判据：同步与异步各起一次同流水线，断言队列行形状、事件序列、账本行三者逐字段相等（parity 断言必须能变红——把 async 的 submit 注掉就该红）。
+
+实测落地形状与本文的差一处：暂停等待那半段本文原先没写，但它同属"两条引擎不同形"——异步循环原先只 `await asyncio.sleep` 观察不到他进程写下的审批决定（同步版有、异步版没有），挂在闸门前等一个永远不会来的信号。Stage 0 一并把暂停边界与外部决定观察抽成两条循环共用的 `_pause_boundary_snapshot` / `_observe_external_decision`。
 
 ## 3. 设计核心：一个写入口，事件与投影同事务
 
@@ -86,8 +88,8 @@
 - **淘汰语义变更**：`_max_task_history=100` 现在是"存在性"的事实源；Stage 2 后它只影响内存缓存。**这是行为变化**：老部署里"重启即查不到"会变成"查得到"——要写进 CHANGELOG 与 README，不是静默改。
 - **回退**：Stage 1 的双写用一个内部开关（非产品 feature flag，默认开、可显式关）；关掉即回到今天形状，读写两侧都不依赖新表。
 
-## 6. 需要你拍的三件事
+## 6. 三件事的结论（2026-10-21 已拍板）
 
-1. **顺序**：Stage 0 并轨先独立成 PR（推荐，它本身是缺陷修复且不依赖新表）；还是并进 RunStore 那条 PR？
-2. **PG 范围**：本批只立接口 + SQLite 实现（推荐，PG 留下一批）；还是同期把 `resolve_backend` 接到 RunStore 并补 `LOOM_TEST_PG_URL` 腿？
-3. **不 backfill**：接受"运行历史自本版本起"的边界（推荐）；还是要求提供一次性迁移命令（`loom admin migrate-history`）把 `task_queue`/`deliveries` 里能重建的老运行补进 `runs`？
+1. **顺序**：Stage 0 独立成 PR 先合——它本身是缺陷修复且不依赖新表。
+2. **PG 范围**：本批只立接口 + SQLite 实现，`resolve_backend` 接进 RunStore 与 `LOOM_TEST_PG_URL` 腿留下一批。
+3. **不 backfill**：接受"运行历史自本版本起"，并把这条边界写进对外文档（不是默默少数据）；老运行仍经 `deliveries` 回落读得到终态。
