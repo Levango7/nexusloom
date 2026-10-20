@@ -1,4 +1,4 @@
-"""审批跨重启 / 收件箱 / 租户作用域判据（2026-10-20 P0）。
+"""审批的持久边界判据（2026-10-20 P0）：跨重启、跨进程、跨租户。
 
 背景：审批此前只活在内存（`PipelineTask.awaiting_approval`），进程一重启
 `approve()` 就找不到任务——"人审"变成一次性演示。本文件钉住修复后的契约：
@@ -6,9 +6,14 @@
   1. 台账本身：请求复用、只有 pending 能被决策、决定消费、按 principal 过滤；
   2. **真重启**：子进程跑到闸门后 `os._exit`（无收尾、无内存），父进程用新
      orchestrator 批准 → 队列行回到 pending+resume → worker 从 checkpoint 续跑完成；
+  2b. **真双进程（owner 还活着）**：子进程停在闸门上不退出，父进程批准 → 决定只经
+     持久台账被观察，活 owner 的任务不被重排、已完成节点不重跑；
+  2c. 暂停边界必须是**完整**检查点（浅存档会丢已完成节点，续跑整条重跑）；
   3. 驳回同理：重启后驳回 → 队列行 cancelled、worker 不再执行；
   4. 真 HTTP：收件箱按 token 隔离、admin 看全量；越权审批 404（不泄露存在性）；
      日志/质量/告警这些跨租户聚合面对非 admin 403；dashboard 任务列表按 principal 过滤。
+
+边界：活/死 owner 的判定按 pid 存活，只在单机成立；跨主机接管同一队列未覆盖。
 """
 from __future__ import annotations
 
@@ -227,6 +232,155 @@ class TestDurableApprovalAcrossRestart:
             assert _worker(tmp_path, orch).run_once() is None, "驳回过的任务不能再被执行"
         finally:
             orch.shutdown()
+
+
+# ─── 3. 真双进程：owner 还活着时的外部批准 ──────────
+
+LIVE_CHILD_SCRIPT = textwrap.dedent("""
+    import json, os, sys, threading, time
+    from pathlib import Path
+
+    sys.path.insert(0, sys.argv[1])
+    from loom_core import PipelineOrchestrator
+    from loom_core.scheduler import Scheduler
+
+    yaml_path, agents_dir, ckpt, inp, task_id, out_path = sys.argv[2:8]
+    orch = PipelineOrchestrator(agents_dir=agents_dir, checkpoint_dir=ckpt)
+    orch.register_agents()
+    plan = Scheduler(agents_dir=agents_dir,
+                     pipeline_dir=str(Path(yaml_path).parent)
+                     ).parse_file(yaml_path, verify_lock=False)
+
+    # 计数探针挂在真实执行漏斗（dag_executor.execute_node_from_scheduler）上：
+    # 它记的是"本进程真的跑了这个节点几次"。重跑会让计数涨起来，
+    # 而挂在 checkpoint/内存状态上的断言看不见这件事。
+    counts = {}
+    lock = threading.Lock()
+    real = orch._executor.execute_node_from_scheduler
+
+    def counted(task, node, input_file, plan):
+        # 提交侧用的是关键字参数（dag_executor._submit_level_futures），
+        # 形参名必须对齐，否则探针在 future 里炸、断言变成空集自证失败
+        with lock:
+            key = node.agent_name
+            counts[key] = counts.get(key, 0) + 1
+        return real(task=task, node=node, input_file=input_file, plan=plan)
+
+    orch._executor.execute_node_from_scheduler = counted
+
+    task = orch.run_plan(plan, input_file=inp, task_id=task_id, wait=False)
+    deadline = time.time() + 60
+    while time.time() < deadline and not task.awaiting_approval \\
+            and task.status.value not in ("done", "failed", "cancelled"):
+        time.sleep(0.05)
+    if not task.awaiting_approval:
+        Path(out_path).write_text(json.dumps(
+            {"phase": "no_gate", "status": task.status.value, "error": task.error,
+             "counts": dict(counts)}, ensure_ascii=False, default=str), encoding="utf-8")
+        os._exit(9)
+
+    # 关键：不退出进程。这就是"暂停中的真 worker"——决定只能从持久台账被观察到
+    deadline = time.time() + 90
+    while time.time() < deadline and task.status.value not in ("done", "failed", "cancelled"):
+        time.sleep(0.05)
+    time.sleep(0.5)  # 等 finally 链把队列终态/账本写完（父进程仍按等待条件复核）
+    gate = task.dag_nodes.get("release_gate")
+    Path(out_path).write_text(json.dumps({
+        "phase": "finished",
+        "status": task.status.value,
+        "error": task.error,
+        "pid": os.getpid(),
+        "counts": dict(counts),
+        "gate_status": getattr(gate, "status", None),
+        "gate_result": gate.result if gate else None,
+    }, ensure_ascii=False, default=str), encoding="utf-8")
+    os._exit(0 if task.status.value == "done" else 8)
+""")
+
+
+class TestLiveWorkerObservesExternalApproval:
+    def test_paused_worker_resumes_on_other_process_decision(self, tmp_path):
+        """批准方在另一个进程、执行方还活着：台账是唯一通路，且不得重排活 owner。"""
+        task_id = "live_worker"
+        pipes = _pipeline_dir(tmp_path)
+        inp = tmp_path / "in.md"
+        inp.write_text("# 标题\n\n这是测试输入内容，用于触发摘要链路。\n", encoding="utf-8")
+        script = tmp_path / "child_live.py"
+        script.write_text(LIVE_CHILD_SCRIPT, encoding="utf-8")
+        out = tmp_path / "child_state.json"
+        logs = tmp_path / "child.log"
+
+        orch = _new_orch(tmp_path)
+        with logs.open("w", encoding="utf-8") as log_fh:
+            proc = subprocess.Popen(
+                [sys.executable, str(script), str(PROJECT), str(pipes / "gate_demo.yaml"),
+                 str(PROJECT / "agents"), str(tmp_path / "ckpt"), str(inp),
+                 task_id, str(out)],
+                stdout=log_fh, stderr=subprocess.STDOUT, text=True, cwd=str(tmp_path))
+        try:
+            # 握手用台账而不是 stdout：证明"闸门挂着、owner 还活着"这个前提。
+            # 超时按"父进程启动子进程"起算，含子进程的 import + 20 只 Agent 注册，
+            # 所以不能照搬子进程内部那几个 40s 判据（23:31 那次就是这么超时的）。
+            pending = _wait_for(lambda: None if proc.poll() is not None
+                                else orch.approvals.pending_for_run(task_id),
+                                timeout=150)
+            assert pending is not None, f"子进程没把闸门落到台账：{logs.read_text()[-800:]}"
+            assert pending["nodes"] == ["release_gate"]
+            assert proc.poll() is None, "前提：执行方进程还活着（不是重启后的续跑）"
+
+            # 决定还没写，子进程不可能自己走——此刻的行状态是稳定读数，
+            # 用它钉"外部批准不得重排活 owner"（批准之后行会很快转终态，那时再读就是竞态）
+            row = orch.task_queue.get(task_id)
+            assert row["status"] == "running", f"前提：活 owner 的行应在 running：{row}"
+            assert not row.get("resume"), f"活 owner 的行不该带续跑标记：{row}"
+            assert orch.task_queue.mark_for_resume(task_id) is False, \
+                "活 owner 被重排——同一任务会有两个执行者"
+            assert orch.task_queue.get(task_id)["status"] == "running"
+
+            ok, err = orch.approve(task_id, note="外部进程批准", by="ops")
+            assert ok and err == "", err
+
+            state = _wait_for(lambda: _read_json(out), timeout=180)
+            assert state is not None, f"子进程没跑完：{logs.read_text()[-800:]}"
+            assert state["phase"] == "finished", state
+            assert state["status"] == "done", f"外部批准后没继续执行：{state}"
+            assert state["counts"] == {"tldr": 1}, \
+                f"已完成节点被重跑：{state['counts']}"
+            assert state["gate_status"] == "success"
+            assert state["gate_result"]["note"] == "外部进程批准", state["gate_result"]
+
+            terminal = _wait_for(
+                lambda: (lambda r: r if r and r["status"] in ("done", "failed", "cancelled")
+                         else None)(orch.task_queue.get(task_id)), timeout=30)
+            assert terminal["status"] == "done", terminal
+            assert not terminal.get("resume"), \
+                f"终态行带续跑标记说明它被重排过：{terminal}"
+            assert orch.approvals.open_decision(task_id) is None, "决定没被消费（会被二次越闸）"
+            assert orch.approvals.list_for_run(task_id)[0]["status"] == APPROVED
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+            orch.shutdown()
+
+
+def _wait_for(probe, timeout: float = 60.0, interval: float = 0.1):
+    """按判据轮询（不是固定 sleep）：探到值即返回，超时返回 None。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        value = probe()
+        if value:
+            return value
+        time.sleep(interval)
+    return None
+
+
+def _read_json(path: Path) -> dict | None:
+    """读子进程落盘的终态；不存在或写了一半就继续等（由 _wait_for 重试）。"""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 # ─── 4. 真 HTTP：收件箱作用域与 admin 面 ───────────
