@@ -105,8 +105,8 @@
 | B6 | **配置 RMW 无 CAS** | `config.py:246-263` | revision 乐观锁：写回冲突即重读重试并如实报版本冲突 |
 | B7 | **四源运行态** | 内存任务 / task_queue / checkpoint / deliveries 各自为政 | 见 §5.1 单一 RunStore + EventLog |
 | B8 | **两套执行引擎、两套结果形状、两条配置路径** | `run` vs `run_plan`；`AgentResult` 零使用；`--config` 只进 legacy 路径 | 收敛为一条引擎、一个结果契约、一个配置入口；legacy 保留适配器并标注废弃 |
-| B9 | **文档过度声称** | README:976/979 "无头 Chrome 走查留证"（仓内无产物）；README:458 "无控制台界面"与 :84/:976 自相矛盾；spec §4.1 的体量数字过期 | 删/改声称；或补真浏览器冒烟（见 A/测试计划）后保留 |
-| B10 | **陈旧发布工作流** | `release-plugins.yml` 列 6 个插件目录（仅 `plugin-hello` 存在）且断言 `Requires-Dist: doc-pipeline` | 改为按存在目录发现 + 断言 `nexusloom`；否则 dispatch 必红 |
+| B9 | **文档过度声称** | README:976/979 "无头 Chrome 走查留证"（仓内无产物）；README:458 "无控制台界面"与 :84/:976 自相矛盾；spec §4.1 的体量数字过期 | 删/改声称；或补真浏览器冒烟（见 A/测试计划）后保留。**2026-10-21 又抓到同型两处**：README「可运行的参考实现共六个独立 pip 包 …`pip install ./examples/plugin-tldr`」与「`test_plugins_ecosystem` 一次真装六个包、数量不足 5 即红」——两者都随 2026-10-11 单发行物决策失效（`examples/` 只剩模板一支，实测该测试的三条判据是内置件 glob/模板形状/鬼魂目录/诚实计数，从不装六个包），已按测试真实内容改写 |
+| B10 | **陈旧发布工作流** | `release-plugins.yml` 列 6 个插件目录（仅 `plugin-hello` 存在）且断言 `Requires-Dist: doc-pipeline` | **2026-10-21 已删除**（原建议"改成按存在目录发现 + 断言 nexusloom"撤回）：README/spec 记的是单发行物决策——`examples/plugin-hello` 明示"不再单独发行"，给它留一条可用的发布链等于制造一个本仓不该存在的第二发布物。实测该 workflow `total_count: 0`（一次没跑过），四个候选插件名在 PyPI 全 404。改判据把"唯一发布面 = `release.yml`"钉住（`TestSinglePublishSurface` 双向） |
 
 ### 3.3 应该删（范围纪律）
 

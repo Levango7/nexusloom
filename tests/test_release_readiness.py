@@ -11,9 +11,15 @@ spec §3 P0 判据 2「外部 pip 包提供 Agent」的前置：本仓的发行�
    package-data（pack-docgen 拆出后不在顶层 pipelines/ 下）。两处都断言
    glob 零命中即红——setuptools 对空 glob 是静默放行的，声明漂移只能靠
    这里的判据抓（2026-10-11 实测：装出来的引擎没有 quality profile）；
-3. **插件包元数据**：六个 examples/plugin-* 的 pyproject 必须有
-   license/readme/依赖声明（宿主 doc-pipeline）与合法 trove classifiers
-   ——PyPI 对这些是上传期硬校验，错一个整个包发不出去。
+3. **插件模板元数据**：`examples/plugin-*` 的 pyproject 必须有
+   license/readme/依赖声明（宿主 `nexusloom`）与合法 trove classifiers
+   ——PyPI 对这些是上传期硬校验，错一个整个包发不出去。单发行物整合
+   （2026-10-11）后这里只剩 plugin-hello 一支外部作者模板，判据按 glob 自适应；
+4. **唯一发布面**：`pypa/gh-action-pypi-publish` 只许出现在 `release.yml`。
+   反例是 2026-10-21 删掉的 `release-plugins.yml`：它列 6 个插件目录（实际只剩 1）、
+   断言 `Requires-Dist: doc-pipeline`（宿主 10-11 已改名 nexusloom），且 workflow API
+   实测 `total_count: 0`——一次都没跑过。一个永远不可能成功、又指向不存在发行物的
+   发布器留在树里，等于给下一次误 dispatch 留着门。
 """
 import tomllib
 from pathlib import Path
@@ -110,7 +116,7 @@ class TestPipelineDataInDist:
 
 
 class TestPluginPackagesMetadata:
-    """六个插件包的 PyPI 元数据：上传期硬校验的字段必须齐全且合法。"""
+    """外部作者模板包（`examples/plugin-*`）的 PyPI 元数据：上传期硬校验字段必须齐全。"""
 
     @pytest.mark.parametrize("pkg_dir", sorted((PROJECT / "examples").glob("plugin-*")))
     def test_metadata_complete_and_valid(self, pkg_dir):
@@ -136,6 +142,42 @@ class TestPluginPackagesMetadata:
     def test_readme_exists(self, pkg_dir):
         assert (pkg_dir / "README.md").is_file(), (
             f"{pkg_dir.name}: readme 声明了但文件不存在")
+
+
+class TestSinglePublishSurface:
+    """PyPI 上传动作只能挂在 release.yml 上——第二发布面必须当场红。
+
+    两条是一对，缺一条判据就是空的：只断言"别的文件不许有"时，把
+    `release.yml` 里的 pypi-publish 删光也能全绿（发行链没了却没人报警）。
+    认的是解析出来的 `steps[].uses`，不是全文子串——注释里出现动作名不算发布面，
+    写了别的动作名也不算（变异实测：子串版会被 `...-MUTATED` 骗过去）。
+    """
+
+    ACTION = "gh-action-pypi-publish"
+
+    def _publishers(self) -> list[str]:
+        import yaml
+
+        found = []
+        for yml in sorted((PROJECT / ".github" / "workflows").glob("*.yml")):
+            doc = yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
+            for job in (doc.get("jobs") or {}).values():
+                for step in (job or {}).get("steps") or []:
+                    uses = str((step or {}).get("uses", "")).split("@")[0]
+                    if uses.rsplit("/", 1)[-1] == self.ACTION:
+                        found.append(yml.name)
+        return sorted(set(found))
+
+    def test_no_second_publisher(self):
+        offenders = [n for n in self._publishers() if n != "release.yml"]
+        assert not offenders, (
+            f"出现第二个 PyPI 发布面：{offenders}——单发行物（2026-10-11 决策）"
+            "之下插件不单独发行，要恢复多发布面得先推翻那条决策")
+
+    def test_release_yml_still_carries_the_publisher(self):
+        """反向半边：保证上一条不是空转。"""
+        assert self._publishers() == ["release.yml"], \
+            f"唯一的 PyPI 发布面不在了：{self._publishers()}"
 
 
 class TestReleaseWorkflow:

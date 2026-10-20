@@ -856,16 +856,18 @@ my_agent = "my_pkg.my_agent"
 
 **首个真第三方插件（生态轴 0→1，2026-10-12）**：[`loom-plugin-sqlite`](https://github.com/Levango7/loom-plugin-sqlite)——外部仓独立维护，补“只读 SQLite 取数 → 报表”取数面，含报表/审批闸门两条示例管线与双宿主版本 CI。它同时是外部作者的最佳参照（含过渡期双名/双组兼容范式）。
 
-可运行的参考实现共**六个独立 pip 包**，与完整契约说明见
-[`examples/README.md`](examples/README.md)：`char_stats`（字符统计）、
-`keyword_extract`（关键词抽取）、`readability`（可读性）、`link_check`（链接清单）、
-`fact_coverage`（证据密度）、`tldr`（离线摘要）。`pip install ./examples/plugin-tldr`
-后即可在 `loom plugin list` 里看到 `tldr`。
+可运行的外部作者模板是 **`examples/plugin-hello`** 一支（`char_stats` 字符统计）：
+声明 `loom.agents` group + 模块级 `AGENT_NAME` 与 `BaseAgent` 子类，用来证明"宿主零改动
+即可接入外部包"。原五支示例插件（keyword_extract / readability / link_check /
+fact_coverage / tldr）已随 2026-10-11 的单发行物决策**并入 `agents/` 成为内置件**，
+`pip install nexusloom` 后直接可用，不再单独发行（契约说明见
+[`examples/README.md`](examples/README.md)）。
 
 判据分两层：`tests/test_plugin_example.py` 盯**示例包契约**（真 venv + 真
 pip install，空 agents 目录下仍被发现/注册/执行——"本仓零改动"的可复现证明）；
-`tests/test_plugins_ecosystem.py` 盯**生态面**：一次真装六个包，逐个断言被发现、
-被注册、被真实执行、来源标记 `entry_point:<name>`，数量不足 5 即红。
+`tests/test_plugins_ecosystem.py` 盯**生态面**（五支内置件从 `agents/` glob 被发现、
+被注册、被真实执行；plugin-hello 模板形状合法；`examples/` 不许长出已并入目录的鬼魂；
+本机环境的第三方发行物计数诚实记 0——外部例证在仓外，见上）。
 
 ### 发布（PyPI）
 
@@ -888,6 +890,12 @@ pip install，空 agents 目录下仍被发现/注册/执行——"本仓零改�
 3. ~~六插件单独发行~~ **已随单发行物整合取消**（2026-10-11）：五支实用
    插件并入产品为内置件，随 `pip install nexusloom` 直接可用；
    examples/plugin-hello 留作外部作者模板，不再单独发行。
+   随之存在的 `release-plugins.yml` 已在 2026-10-21 删除——它仍列 6 个插件目录
+   （实际只剩模板 1 个）、断言 `Requires-Dist: doc-pipeline`（宿主早已改名），
+   workflow API 实测 `total_count: 0` 一次都没跑过。现在**全仓只有一个 PyPI 发布面**
+   （`release.yml` 的 `pypi-publish`），判据
+   `tests/test_release_readiness.py::TestSinglePublishSurface` 双向钉住：多一个发布器红，
+   把这唯一的一个弄没也红。
 
 `pypi-verify` / `pypi-publish` 只在 GitHub Release published 时触发；
 `workflow_dispatch`（dry_run=true 默认）只构建与校验、不上传。
