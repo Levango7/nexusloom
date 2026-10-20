@@ -825,24 +825,22 @@ def main():
             print(f"[run] ERROR: admin_api.port 配置非法: {admin_cfg.get('port')!r}",
                   file=sys.stderr)
             sys.exit(1)
-        if args.admin or args.dashboard:
-            dashboard_dir = str(project_root / "dashboard") if args.dashboard else None
-            ok = orch.start_admin_api(
-                host=host,
-                port=port,
-                serve_static=args.dashboard,
-                dashboard_dir=dashboard_dir,
-            )
-        else:
-            # --daemon / 纯服务模式未显式开启 admin 时自动补启
-            ok = orch.start_admin_api(host=host, port=port)
+        # 控制台随包发布（loom_core/dashboard/），管理 API 一律带上——
+        # 发行物里不再出现"装完打开 / 只有一行纯文本"的形态。
+        from loom_core.paths import dashboard_dir as _dashboard_dir
+
+        ok = orch.start_admin_api(
+            host=host,
+            port=port,
+            serve_static=True,
+            dashboard_dir=str(_dashboard_dir()),
+        )
         if not ok:
             print("[run] ERROR: Admin API 启动失败（详见上方日志；"
                   "非本机绑定需设置 ADMIN_API_KEY）", file=sys.stderr)
             sys.exit(1)
         print(f"[run] 管理 API: http://{host}:{port}")
-        if args.dashboard:
-            print(f"[run] 仪表盘:  http://{host}:{port}/index.html")
+        print(f"[run] 控制台:  http://{host}:{port}/")
         if args.daemon or service_only:
             _run_daemon(orch)
 

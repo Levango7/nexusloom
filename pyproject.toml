@@ -86,6 +86,7 @@ py-modules = ["run"]
 [tool.setuptools.package-data]
 scripts = ["checker_rules.yaml"]
 artesian = ["py.typed"]
+loom_core = ["dashboard/*"]
 "packs.docgen" = [
     "pipelines/*.yaml",
     "pipelines/*.lock",

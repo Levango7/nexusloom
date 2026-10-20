@@ -436,6 +436,26 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_dashboard_index(self) -> bool:
+        """`GET /` → 控制台入口页（`loom_core/dashboard/index.html`）。
+
+        没有 dashboard_dir 时返回 False，调用方退回纯文本 API 索引。
+        """
+        if not self.dashboard_dir:
+            return False
+        path = Path(self.dashboard_dir) / "index.html"
+        try:
+            body = path.read_bytes()
+        except OSError:
+            return False
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self._apply_cors_headers()
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return True
+
     def _serve_static(self, path: str) -> bool:
         """尝试从 dashboard_dir 提供静态文件"""
         if not self.dashboard_dir:
@@ -651,6 +671,10 @@ class AdminHandler(BaseHTTPRequestHandler):
             # 静态资源免鉴权
             if self._serve_static(self.path):
                 return
+            # 控制台入口 `/`：只发静态壳，数据端点各自鉴权
+            # （浏览器要先拿到页面才谈得上填 token；壳里没有任何租户数据）
+            if self.path == "/" and self._serve_dashboard_index():
+                return
             # 健康端点免鉴权（只读，供监控探针使用）
             if self.path == "/health":
                 self._handle_health()
@@ -752,7 +776,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             elif self.path.startswith("/api/logs"):
                 self._handle_logs()
             elif self.path == "/":
-                self._text("Doc-Pipeline Admin API v1\n"
+                self._text("Loom Admin API v1\n"
                            "Endpoints: /health /metrics /tasks /agents /dlq /api/dashboard /api/pipeline /stream")
             else:
                 self._json({"error": "not found"}, 404)

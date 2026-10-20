@@ -16,6 +16,10 @@ import contextlib
 import logging
 from typing import Any
 
+# 版本号在 `loom_core/__init__` 的子模块导入之前就已绑定（见该文件注释）；
+# 放在 try 之外：取不到版本要响亮地坏，而不是被 ImportError 吞成 no-op。
+from . import __version__ as _loom_version
+
 logger = logging.getLogger(__name__)
 
 # ── 可选依赖：未安装时降级为 no-op ──────────────────────────────
@@ -27,7 +31,7 @@ try:
     from opentelemetry.propagate import extract, inject
     from opentelemetry.trace import StatusCode
 
-    _TRACER = trace.get_tracer("doc-pipeline", "3.9.1")
+    _TRACER = trace.get_tracer("loom", _loom_version)
     logger.info("[Telemetry] OpenTelemetry 已启用")
 except ImportError:
     logger.debug("[Telemetry] opentelemetry 未安装，追踪降级为 no-op")
