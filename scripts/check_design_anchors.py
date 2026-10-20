@@ -37,17 +37,17 @@ ANCHORS = [
     # 4 行字段 + 61 行 helper，Stage 1 又插 7 行 init + 108 行写口。**偏移不是常数**
     # （+4 / +65 / +47 / +95 / +106 并存），所以 remap 只能按整行文本对齐，不能推算。
     ("loom_core/pipeline.py", 308, "_max_task_history"),
-    ("loom_core/pipeline.py", 761, "def cancel"),
-    ("loom_core/pipeline.py", 774, "def resume"),
+    ("loom_core/pipeline.py", 763, "def cancel"),
+    ("loom_core/pipeline.py", 776, "def resume"),
     # 原 1290「不更新 task_queue」那句 docstring 已被 Stage 0 改掉——退役它，改钉新增的
     # 共用写口：§2 那条裂缝的"已并轨"结论必须指向一个真实存在的函数。
     ("loom_core/pipeline.py", 506, "def _record_plan_terminal_state"),
-    ("loom_core/pipeline.py", 694, "pipeline.started"),
-    ("loom_core/pipeline.py", 1041, "pipeline.finished"),
-    ("loom_core/pipeline.py", 1477, "pipeline.finished"),
-    ("loom_core/pipeline.py", 1710, "record"),
-    ("loom_core/pipeline.py", 1808, "pipeline.audit"),
-    ("loom_core/pipeline.py", 1920, ".done"),
+    ("loom_core/pipeline.py", 696, "pipeline.started"),
+    ("loom_core/pipeline.py", 1043, "pipeline.finished"),
+    ("loom_core/pipeline.py", 1479, "pipeline.finished"),
+    ("loom_core/pipeline.py", 1712, "record"),
+    ("loom_core/pipeline.py", 1810, "pipeline.audit"),
+    ("loom_core/pipeline.py", 1922, ".done"),
     ("loom_core/admin_api.py", 604, "get_task"),
     ("loom_core/admin_api.py", 968, "list_tasks"),
     ("loom_core/admin_api.py", 983, "list_tasks"),

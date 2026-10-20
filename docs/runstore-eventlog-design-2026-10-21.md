@@ -42,7 +42,7 @@
 
 **Stage 0 实际交付的判据范围（对着上文那句"三者逐字段相等"要打的折扣）**：`tests/test_async_run_parity.py` 钉住的是**事件序列 + 队列行形状 + 暂停边界检查点形状**三项，`账本行（deliveries）比对挪到 Stage 1` —— 一则这批用例的流水线没声明 sink，两侧都没有 `deliveries` 行可比（比"都为空"是零射程断言）；二则 §4 给 Stage 1 定的门禁本来就是"每 run 跑完自动比对 `runs`/`run_nodes` 与 `task_queue`/`deliveries`/内存三方"，账本比对照那道门禁做才有承载体。
 
-**Stage 0 期间查实、但不属于并轨的一条写侧缺口**：`task_queue.submit` 的三个调用点（`pipeline.py:686/1415/1531`）**都没传 `principal`**，`admin_api` 里只有 `:1393` 一处传 `owner`，SSE 的 `:2113` 不传 ⇒ 队列行与内存任务的归属全是空串，`/tasks` 与 `/api/dashboard` 对具名 token 按"owner 空串不展示"处理（`admin_api.py:986` 的注释自己写了这条口径）。这不是异步并轨引入的（同步直跑同样为空），但 **§3.1 的 `runs.principal` 列不能假设上游已经填过**——列是先有的，身份是还没有的；Stage 1 要么让 `RunRecorder` 从调用方接住 Principal，要么就如实承认新表也是无主行。〔**Stage 1 落地时选了后者并写明**：`open_run` 如实带上引擎此刻知道的归属（`task.owner`，今天多为空串），身份贯穿属 Stage 2 读侧切换的活，不在双写这批偷偷改调用方语义。〕
+**Stage 0 期间查实、但不属于并轨的一条写侧缺口**：`task_queue.submit` 的三个调用点（`pipeline.py` 里 legacy / `run_plan` / `run_plan_async` 各一处——**这里刻意写符号不写行号**：行号会随每次引擎改动漂移，而"当前状态"类断言该按符号可核对，行号只留给 §1 那张"当时原状"基线表）**都没传 `principal`**，`admin_api` 里只有 `:1393` 一处传 `owner`，SSE 的 `:2113` 不传 ⇒ 队列行与内存任务的归属全是空串，`/tasks` 与 `/api/dashboard` 对具名 token 按"owner 空串不展示"处理（`admin_api.py:986` 的注释自己写了这条口径）。这不是异步并轨引入的（同步直跑同样为空），但 **§3.1 的 `runs.principal` 列不能假设上游已经填过**——列是先有的，身份是还没有的；Stage 1 要么让 `RunRecorder` 从调用方接住 Principal，要么就如实承认新表也是无主行。〔**Stage 1 落地时选了后者并写明**：`open_run` 如实带上引擎此刻知道的归属（`task.owner`，今天多为空串），身份贯穿属 Stage 2 读侧切换的活，不在双写这批偷偷改调用方语义。〕
 
 ## 3. 设计核心：一个写入口，事件与投影同事务
 
