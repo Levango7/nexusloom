@@ -51,7 +51,7 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
   的运行（本批的三方对账门禁实测抓到，见下）。**旧写面一个都没删**（Stage 3 才摘）。
 - **`LOOM_RUNSTORE=0` 是退路，不是特性开关**：关掉后旧三面照旧、新表零行，
   读写两侧都不依赖新表（§5 要求的回退，有判据钉住"退路本身没把观测面一起删掉"）。
-- **判据 `tests/test_runstore_parity.py` 8 条**：同/异步 × done/cancelled 的
+- **判据 `tests/test_runstore_parity.py` 9 条**：同/异步 × done/cancelled 的
   **四方对账**（`runs`+`run_nodes` vs `task_queue` 行 vs `deliveries` payload vs 内存
   `dag_nodes`，节点集合、逐节点状态与产物键、`last_seq == 事件尾部`、seq 连续），
   开关退路 1 条，「有事件必有投影行」不变式 2 条（含 `record()` 给陌生 run 也建行），
@@ -60,6 +60,12 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 - **门禁与写口各自独立才有射程**：`run_nodes` 刻意**不**借用 `_build_delivery_record`
   的形状，而是读层跑完那一刻的 `dag_node`。若改成抄那份记录，"投影 vs 账本"就成了
   自己比自己。
+- **层内合批（§5 写放大缓解落成判据）**：一层多个节点**共用一次事务**落投影与事件。
+  这条不是性能洁癖——`BEGIN IMMEDIATE` 拿的是整库写锁，逐节点各开一次就是一层 N 个节点
+  排队 N 回。`tests/test_runstore_parity.py::TestBatching` 数 `_Txn.__enter__` 的调用次数
+  钉住它（宽层 2 节点：建口/开局/一层/收尾＝4 次；退化成逐节点＝5 次当场红）。
+  **数据形状两种写法一模一样，只有事务边界不同**，所以对账判据对它完全无感——
+  这类"只有计数能抓"的性质必须自带判据，不能靠 review。
 - **两处由判据自己抓出来的缺陷**（都已在实现里修掉，不是事后补的说明）：
   ① 实例属性 `self._runstore` 遮蔽了同名方法 `_runstore()`（实例属性优先），
   于是每次运行都在 `TypeError: 'NoneType' object is not callable` 上炸——
