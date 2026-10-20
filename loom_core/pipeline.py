@@ -159,6 +159,10 @@ class PipelineTask:
     #: 已落定的审批决策流水：[{"nodes": [...], "decision": "approved"/"rejected",
     #: "note": ..., "reason": ..., "at": ts, "by": <客户端标识>}, ...]
     approvals: list = field(default_factory=list)
+    #: 已发过的终态事件名（空串 = 还没发）。`cancel()` 先把状态置 cancelled 并即时发事件，
+    #: 收尾链随后又按状态发一次 ⇒ 同一次运行出现两条 `task.cancelled`，钩子/审计看到两次收尾。
+    #: 有了这个字段，"每个运行至多一条终态事件"成为**属性**而不是调用顺序的运气。
+    terminal_event: str = ""
     # Per-task 取消事件（替代全局 _stop_event 实现精确取消）
     stop_event: threading.Event = field(default_factory=threading.Event)
     # Per-task 结果锁（保护 result dict 的多线程写入）
@@ -459,16 +463,77 @@ class PipelineOrchestrator:
 
     # ─── 流水线执行 ─────────────────────────────
 
+    def _claim_terminal_event(self, task: PipelineTask, name: str) -> bool:
+        """终态事件先到先得：同一次运行至多发一条收尾事件。
+
+        `cancel()` 在把状态置 cancelled 的当下就发事件，收尾链随后按状态再发一次 ⇒
+        钩子与审计看到两次收尾（谁先谁后取决于调用顺序）。各写入点保留自己的载荷，
+        只由这里裁决"是否还发"。
+        """
+        if task.terminal_event or not name:
+            return False
+        task.terminal_event = name
+        return True
+
+    @staticmethod
+    def _terminal_event_name(status: TaskStatus) -> str:
+        """终态 → 事件名；非终态给空串（空串不参与"至多一次"的裁决）。"""
+        return {TaskStatus.DONE: "task.completed",
+                TaskStatus.FAILED: "task.failed",
+                TaskStatus.CANCELLED: "task.cancelled"}.get(status, "")
+
     def _emit_task_events(self, task: PipelineTask, pipeline_name: str) -> None:
-        """触发任务终态事件钩子 + 总线发布。"""
-        if task.status == TaskStatus.DONE:
-            emit_event("task.completed", {"task_id": task.id, "pipeline": pipeline_name,
-                         "duration": task.finished_at - task.started_at, "result_keys": list(task.result.keys())})
-        elif task.status == TaskStatus.FAILED:
-            emit_event("task.failed", {"task_id": task.id, "pipeline": pipeline_name,
-                       "error": task.error, "duration": task.finished_at - task.started_at})
-        elif task.status == TaskStatus.CANCELLED:
-            emit_event("task.cancelled", {"task_id": task.id, "pipeline": pipeline_name})
+        """触发 legacy 路径的终态事件钩子（每个运行至多一条，见 `_claim_terminal_event`）。"""
+        name = self._terminal_event_name(task.status)
+        if not self._claim_terminal_event(task, name):
+            return
+        payload: dict = {"task_id": task.id, "pipeline": pipeline_name}
+        if name == "task.completed":
+            payload["duration"] = task.finished_at - task.started_at
+            payload["result_keys"] = list(task.result.keys())
+        elif name == "task.failed":
+            payload["error"] = task.error
+            payload["duration"] = task.finished_at - task.started_at
+        emit_event(name, payload)
+
+    def _record_plan_terminal_state(self, task: PipelineTask, plan: ExecutionPlan) -> None:
+        """声明式路径收尾里"运行事实"的两笔写入：队列终态 + 终态事件。
+
+        同步与异步两条收尾共用这一个口——这两笔正是历史上异步版整段缺掉的部分
+        （SSE 发起的运行因此在持久队列里查不到、事件面一条不发）。
+        """
+        # 用 finish 而不是 update_status：终态只应写一次。worker 化之后，API 取消
+        # （行已 cancelled）与流水线收尾会并发，无条件覆写会把取消洗成 done。
+        try:
+            self.task_queue.finish(
+                task.id,
+                task.status.value if hasattr(task.status, "value") else str(task.status),
+                result=dict(task.result) if task.result else None,
+                error=task.error,
+            )
+        except Exception as e:
+            self._logger.log("warning", "task_queue.finish 失败",
+                             task_id=task.id, error=str(e))
+
+        self._emit_plan_terminal(task, plan)
+
+    def _emit_plan_terminal(self, task: PipelineTask, plan: ExecutionPlan) -> None:
+        """声明式路径的终态事件——同步与异步收尾调同一个口，载荷逐字段一致。
+
+        载荷形状是既有对外契约（`completed`: task_id/pipeline/duration/plan_id；
+        `failed` 多一个 error；`cancelled` 无 duration/error），这里只做
+        "至多一次"的裁决，不扩键、不改名。
+        """
+        name = self._terminal_event_name(task.status)
+        if not self._claim_terminal_event(task, name):
+            return
+        payload: dict = {"task_id": task.id, "pipeline": plan.pipeline_name,
+                         "plan_id": plan.plan_id}
+        if name != "task.cancelled":
+            payload["duration"] = task.finished_at - task.started_at
+        if name == "task.failed":
+            payload["error"] = task.error
+        emit_event(name, payload)
 
     def _finalize_task_queue(self, task: PipelineTask, config: dict) -> None:
         """任务终态同步任务队列 + 清理临时文件 + 断点保留/删除。"""
@@ -564,8 +629,9 @@ class PipelineOrchestrator:
                 task.error = str(e)
                 task.finished_at = time.time()
                 self._logger.log("error", "任务执行异常", error=str(e))
-                emit_event("task.failed", {"task_id": task.id, "pipeline": pipeline_name,
-                           "error": str(e), "duration": task.finished_at - task.started_at})
+                if self._claim_terminal_event(task, "task.failed"):
+                    emit_event("task.failed", {"task_id": task.id, "pipeline": pipeline_name,
+                               "error": str(e), "duration": task.finished_at - task.started_at})
             finally:
                 self._finalize_task_queue(task, config or {})
                 with self._lock:
@@ -604,7 +670,9 @@ class PipelineOrchestrator:
             if task and task.status in [TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.PAUSED]:
                 task.status = TaskStatus.CANCELLED
                 task.stop_event.set()  # per-task 取消信号
-                emit_event("task.cancelled", {"task_id": task_id, "pipeline": task.pipeline_name})
+                if self._claim_terminal_event(task, "task.cancelled"):
+                    emit_event("task.cancelled", {"task_id": task_id,
+                                                   "pipeline": task.pipeline_name})
                 return True
         return False
 
@@ -864,28 +932,7 @@ class PipelineOrchestrator:
 
         # update_status 必须有异常保护：本方法在 execute() 的 finally 链中执行，
         # TaskQueue 异常若外抛会中断后续报告/回调/清理（对照 _finalize_task_queue 的同款防护）
-        # 用 finish 而不是 update_status：终态只应写一次。worker 化之后，API 取消
-        # （行已 cancelled）与流水线收尾会并发，无条件覆写会把取消洗成 done。
-        try:
-            self.task_queue.finish(
-                task.id,
-                task.status.value if hasattr(task.status, "value") else str(task.status),
-                result=dict(task.result) if task.result else None,
-                error=task.error,
-            )
-        except Exception as e:
-            self._logger.log("warning", "task_queue.finish 失败",
-                             task_id=task.id, error=str(e))
-
-        # ── 事件钩子 ──
-        if task.status == TaskStatus.DONE:
-            emit_event("task.completed", {"task_id": task.id, "pipeline": plan.pipeline_name,
-                         "duration": task.finished_at - task.started_at, "plan_id": plan.plan_id})
-        elif task.status == TaskStatus.FAILED:
-            emit_event("task.failed", {"task_id": task.id, "pipeline": plan.pipeline_name,
-                       "error": task.error, "duration": task.finished_at - task.started_at, "plan_id": plan.plan_id})
-        elif task.status == TaskStatus.CANCELLED:
-            emit_event("task.cancelled", {"task_id": task.id, "pipeline": plan.pipeline_name, "plan_id": plan.plan_id})
+        self._record_plan_terminal_state(task, plan)
 
         self._log("info", f"Pipeline {task.status.value}",
                   task_id=task.id, pipeline=plan.pipeline_name,
@@ -963,6 +1010,41 @@ class PipelineOrchestrator:
             return self.task_queue.get(task_id)
         except Exception:  # noqa: BLE001
             return None
+
+    # ─── 暂停边界与外部决定（同步/异步两条执行循环共用） ───────
+
+    def _pause_boundary_snapshot(self, task: PipelineTask) -> None:
+        """暂停边界必须是完整状态：浅检查点会覆盖掉 `_dag_nodes`/`_result`，
+        续跑时已完成节点全部重跑（2026-10-20 复核确认，判据
+        `tests/test_approvals.py::TestPauseCheckpointIsFullState`）。"""
+        try:
+            self._save_checkpoint(task, full_state=True)
+        except Exception as e:  # noqa: BLE001
+            self._log("warning", "暂停边界 checkpoint 保存失败",
+                      task_id=task.id, error=str(e))
+
+    def _observe_external_decision(self, task: PipelineTask) -> str:
+        """在暂停等待里观察**别的进程/别的调用方**写下的审批决定。
+
+        返回 "waiting"（还没决定）/ "running"（已放行，继续执行）/
+        "cancelled"（被驳回，终止）。两条执行循环都必须调它——只让线程版看到
+        外部决定，异步版（SSE 起的那条）就会挂在闸门前等一个永远不会来的信号。
+        """
+        gate_nodes = list((task.awaiting_approval or {}).get("nodes") or [])
+        decision = (self._consume_open_decision(task, gate_nodes)
+                    if gate_nodes else None)
+        if decision is None:
+            return "waiting"
+        if str(decision.get("status")) == "rejected":
+            reason = str(decision.get("reason") or "")
+            task.error = f"审批被驳回: {reason}" if reason else "审批被驳回"
+            task.status = TaskStatus.CANCELLED
+            task.stop_event.set()
+            return "cancelled"
+        task.awaiting_approval = None
+        task.status = TaskStatus.RUNNING
+        self._log("info", "审批放行（他进程批准）：继续执行", task_id=task.id)
+        return "running"
 
     def _arm_approval_gate(self, task: PipelineTask, plan: ExecutionPlan,
                            level: list) -> list:
@@ -1080,38 +1162,20 @@ class PipelineOrchestrator:
             # 语义、外部 pause、reject 取消都走同一条既有路径。
             level = self._arm_approval_gate(task, plan, level)
 
-            # 暂停检查点
+            # 暂停检查点（与异步版共用 `_pause_boundary_snapshot` + `_observe_external_decision`，
+            # 两条循环的差异只剩"怎么睡"）
             paused_saved = False
             while task.status == TaskStatus.PAUSED:
                 if not paused_saved:
-                    try:
-                        # 暂停边界必须是完整状态：浅检查点会覆盖掉 _dag_nodes/_result，
-                        # 续跑时已完成节点全部重跑（2026-10-20 复核确认）。
-                        self._save_checkpoint(task, full_state=True)
-                    except Exception as e:
-                        self._log("warning", "暂停边界 checkpoint 保存失败",
-                                  task_id=task.id, error=str(e))
+                    self._pause_boundary_snapshot(task)
                     paused_saved = True
                 if task.stop_event.is_set() or self._stop_event.is_set():
                     task.status = TaskStatus.CANCELLED
                     return
-                # 别的进程/API 可能已批：本进程要自己观察持久决定，
-                # 不能指望"批准方一定在同一个进程里"。
-                gate_nodes = list((task.awaiting_approval or {}).get("nodes") or [])
-                decision = (self._consume_open_decision(task, gate_nodes)
-                            if gate_nodes else None)
-                if decision is not None:
-                    if str(decision.get("status")) == "rejected":
-                        reason = str(decision.get("reason") or "")
-                        task.error = (f"审批被驳回: {reason}" if reason
-                                      else "审批被驳回")
-                        task.status = TaskStatus.CANCELLED
-                        task.stop_event.set()
-                        return
-                    task.awaiting_approval = None
-                    task.status = TaskStatus.RUNNING
-                    self._log("info", "审批放行（他进程批准）：继续执行",
-                              task_id=task.id)
+                outcome = self._observe_external_decision(task)
+                if outcome == "cancelled":
+                    return
+                if outcome == "running":
                     break
                 task.stop_event.wait(0.5)
             if task.status == TaskStatus.CANCELLED:
@@ -1287,9 +1351,14 @@ class PipelineOrchestrator:
         return task
 
     def _finalize_plan_task_async(self, task: PipelineTask, plan: ExecutionPlan) -> None:
-        """async 任务收尾：与 _finalize_plan_task 的差异是不更新 task_queue、不发事件钩子"""
+        """async 任务收尾：与 `_finalize_plan_task` 共用同一笔"队列终态 + 终态事件"写入。
+
+        2026-10-21 之前这里整段不写队列、不发事件，导致 SSE 发起的运行在持久队列里
+        没有行、事件面一条不发——"UI 看得见、接口查不到"的根因。
+        """
         task.progress = 100 if task.status == TaskStatus.DONE else task.progress
         task.finished_at = time.time()
+        self._record_plan_terminal_state(task, plan)
         self._log("info", f"Pipeline {task.status.value} (async)",
                   task_id=task.id, pipeline=plan.pipeline_name,
                   status=task.status.value, duration_sec=round(task.finished_at - task.started_at, 2),
@@ -1351,8 +1420,21 @@ class PipelineOrchestrator:
         with self._lock:
             self._running_tasks[task.id] = task
 
+        # 队列行与创建/启动事件：与同步版同一条登记（此前异步版什么都不写，
+        # 于是 SSE 发起的运行在持久队列里查不到、事件面一条不发）
+        self.task_queue.submit(task.id, plan.pipeline_name, input_file,
+                               plan.raw.get("pipeline", {}))
+        try:
+            self.task_queue.claim_direct(task.id)  # 直跑也占住行，防被 worker 重排
+        except Exception as e:  # noqa: BLE001
+            self._log("warning", "队列行占位失败", task_id=task.id, error=str(e))
+
         task.started_at = time.time()
         total_nodes = plan.node_count
+
+        emit_event("task.created", {"task_id": task.id, "pipeline": plan.pipeline_name,
+                     "input_file": input_file, "plan_id": plan.plan_id, "total_nodes": total_nodes})
+        emit_event("task.started", {"task_id": task.id, "pipeline": plan.pipeline_name, "started_at": task.started_at})
 
         self._log("info", "Pipeline started (async)",
                   task_id=task.id, pipeline=plan.pipeline_name,
@@ -1376,18 +1458,18 @@ class PipelineOrchestrator:
                 # 审批闸门：与同步版同一条机制（置 PAUSED → 走下面的暂停等待）
                 level = self._arm_approval_gate(task, plan, level)
 
-                # 暂停边界：与同步版一致，进入等待时保存无并发写入的边界快照
+                # 暂停边界：与同步版共用同一对判据——完整状态快照 + 观察他进程的决定。
+                # 缺后半段时，异步运行会挂在闸门前等一个"已经有人批了"的信号（无限等）。
                 paused_saved = False
                 while task.status == TaskStatus.PAUSED:
                     if not paused_saved:
-                        try:
-                            self._save_checkpoint(task)
-                        except Exception as e:
-                            self._log("warning", "暂停边界 checkpoint 保存失败",
-                                      task_id=task.id, error=str(e))
+                        self._pause_boundary_snapshot(task)
                         paused_saved = True
                     if task.stop_event.is_set() or self._stop_event.is_set():
                         task.status = TaskStatus.CANCELLED
+                        break
+                    outcome = self._observe_external_decision(task)
+                    if outcome != "waiting":
                         break
                     await asyncio.sleep(0.5)
                 if task.status == TaskStatus.CANCELLED:
