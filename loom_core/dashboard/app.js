@@ -189,10 +189,10 @@
       fetchJson(API_BASE + '/api/logs?limit=30&since=86400'),
       fetchJson(API_BASE + '/api/approvals'),
     ]);
-    const settle = (r, forbidden) => {
+    const settle = (r) => {
       if (r.status === 'fulfilled') return r.value;
-      if (forbidden && r.reason && r.reason.status === 403) return { __forbidden: true };
-      return null;
+      if (r.reason && r.reason.status === 403) return { __forbidden: true };
+      return { __error: r.reason && r.reason.message || '请求失败' };
     };
     const health = results[0].status === 'fulfilled' ? results[0].value : null;
     const dash = results[1].status === 'fulfilled' ? results[1].value : null;
@@ -200,11 +200,12 @@
       health,
       tasks: dash || null,           // /api/dashboard 含 tasks[].progress/steps 与 agents
       agents: dash || null,
-      cost: results[2].status === 'fulfilled' ? results[2].value : null,
-      quality: settle(results[3], true),
-      logs: settle(results[4], true),
-      approvals: results[5].status === 'fulfilled' ? results[5].value : null,
-      failedCount: results.filter(r => r.status === 'rejected').length,
+      cost: settle(results[2]),
+      quality: settle(results[3]),
+      logs: settle(results[4]),
+      approvals: settle(results[5]),
+      failedCount: results.filter(r => r.status === 'rejected'
+        && (!r.reason || r.reason.status !== 403)).length,
     };
   }
 
@@ -717,7 +718,7 @@
     b.addEventListener('click', async () => {
       let note = '';
       if (action === 'reject') {
-        note = window.prompt('驳回原因（可留空）：') || '';
+        note = window.prompt('驳回原因（可留空）：');
         if (note === null) return;
       }
       if (!window.confirm(action === 'approve' ? '确认放行该审批？' : '确认驳回并终止该任务？')) return;
@@ -851,13 +852,17 @@
     els.metricsPanel.replaceChildren(grid);
   }
 
+  function renderPanelError (data, panel, badge, icon) {
+    if (!data || (!data.__forbidden && !data.__error)) return false;
+    panel.replaceChildren(emptyState(icon,
+      data.__forbidden ? '需要 admin 权限' : '读取失败：' + data.__error));
+    if (badge) badge.textContent = '--';
+    return true;
+  }
+
   /* ---- Quality (bottom) ---- */
   function renderQuality (data) {
-    if (data && data.__forbidden) {
-      els.qualityPanel.replaceChildren(emptyState('i-quality', '需要 admin 权限'));
-      if (els.badgeQuality) els.badgeQuality.textContent = '--';
-      return;
-    }
+    if (renderPanelError(data, els.qualityPanel, els.badgeQuality, 'i-quality')) return;
     if (!data || data.total_records == null) {
       els.qualityPanel.replaceChildren(emptyState('i-quality', '暂无质量数据'));
       if (els.badgeQuality) els.badgeQuality.textContent = '--';
@@ -901,6 +906,7 @@
 
   /* ---- Cost (bottom) ---- */
   function renderCost (data) {
+    if (renderPanelError(data, els.costPanel, els.badgeCost, 'i-cost')) return;
     if (!data || data.total_cost == null) {
       els.costPanel.replaceChildren(emptyState('i-cost', '暂无成本数据'));
       if (els.badgeCost) els.badgeCost.textContent = '--';
@@ -954,11 +960,7 @@
 
   /* ---- Logs (full-width bottom) ---- */
   function renderLogs (data) {
-    if (data && data.__forbidden) {
-      els.logsPanel.replaceChildren(emptyState('i-logs', '需要 admin 权限'));
-      if (els.badgeLogs) els.badgeLogs.textContent = '--';
-      return;
-    }
+    if (renderPanelError(data, els.logsPanel, els.badgeLogs, 'i-logs')) return;
     const logs = (data && Array.isArray(data.logs)) ? data.logs : [];
     if (els.badgeLogs) els.badgeLogs.textContent = String(logs.length);
 
@@ -1179,6 +1181,9 @@
       state.health = data.health;
       state.tasks = data.tasks;
       state.agents = data.agents;
+      state.cost = data.cost;
+      state.quality = data.quality;
+      state.logs = data.logs;
       state.approvals = data.approvals;
       state.partialFail = data.failedCount > 0;
 
@@ -1216,6 +1221,7 @@
 
   /* ---- Approvals（跨运行待批收件箱） ---- */
   function renderApprovals (data) {
+    if (renderPanelError(data, els.approvalsPanel, els.badgeApprovals, 'i-check')) return;
     const items = (data && Array.isArray(data.approvals)) ? data.approvals : [];
     if (els.badgeApprovals) els.badgeApprovals.textContent = String(items.length);
     if (!items.length) {
@@ -1325,6 +1331,7 @@
         if (!v) return;
         sessionStorage.setItem(TOKEN_KEY, v);
         els.tokenPrompt.style.display = 'none';
+        loadPipelines();
         handleRetry();
       };
       els.tokenSave.addEventListener('click', saveToken);

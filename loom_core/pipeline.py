@@ -649,10 +649,14 @@ class PipelineOrchestrator:
                 decision = {"nodes": list(pending.get("nodes", [])),
                             "decision": "approved",
                             "note": note, "reason": "", "at": time.time(), "by": by}
+                # fail-closed：先落台账再唤醒。写不进去就不能声称已批准——
+                # 否则执行了却没有持久授权，重启后台账仍显示待批（复核确认）。
+                if not self._decide_in_store(task_id, "approved", note, "", by):
+                    return False, (f"task {task_id} 审批台账不可用或决定冲突，"
+                                   "拒绝放行")
                 task.approvals.append(decision)
                 task.awaiting_approval = None
                 task.status = TaskStatus.RUNNING
-                self._decide_in_store(task_id, "approved", note, "", by)
                 self._log("info", f"审批放行：{decision['nodes']}", task_id=task_id)
             else:
                 row = self._pending_row(task_id)
@@ -701,16 +705,18 @@ class PipelineOrchestrator:
                     return False, (f"task {task_id} 未在审批等待中"
                                    f"（status={task.status.value}）")
                 pending = dict(task.awaiting_approval)
-                decision = {"nodes": list(pending.get("nodes", [])),
+                decision = {"nodes": list(pending.get("nodes") or []),
                             "decision": "rejected",
                             "note": "", "reason": reason,
                             "at": time.time(), "by": by}
+                if not self._decide_in_store(task_id, "rejected", "", reason, by):
+                    return False, (f"task {task_id} 审批台账不可用或决定冲突，"
+                                   "拒绝驳回")
                 task.approvals.append(decision)
                 task.awaiting_approval = None
                 task.error = (f"审批被驳回: {reason}" if reason else "审批被驳回")
                 task.status = TaskStatus.CANCELLED
                 task.stop_event.set()  # 与 cancel() 同款：执行循环见 CANCELLED/事件即退出
-                self._decide_in_store(task_id, "rejected", "", reason, by)
                 self._log("warning",
                           f"审批驳回：{decision['nodes']} —— {reason or '无原因'}",
                           task_id=task_id)
@@ -909,10 +915,14 @@ class PipelineOrchestrator:
 
     # ─── 审批闸门（approval 节点，spec §9 决策 C 最小闭环）────────
 
-    def _consume_open_decision(self, task: PipelineTask) -> dict | None:
-        """取该运行已作出、尚未消费的审批决定（续跑用）；取到即标记已消费。"""
+    def _consume_open_decision(self, task: PipelineTask,
+                               nodes: list[str] | None = None) -> dict | None:
+        """取该运行已作出、尚未消费的审批决定（续跑用）；取到即标记已消费。
+
+        `nodes` 绑定当前闸门的节点集合：同一运行的多道闸门不能互借决定。
+        """
         try:
-            decision = self.approvals.open_decision(task.id)
+            decision = self.approvals.open_decision(task.id, nodes=nodes)
         except Exception as e:  # noqa: BLE001  台账读失败按"未决定"处理，闸门照常挂起
             self._log("warning", "审批台账读取失败（按未决定处理）",
                       task_id=task.id, error=str(e))
@@ -984,7 +994,7 @@ class PipelineOrchestrator:
             pending.append(node.agent_name)
             messages[node.agent_name] = str((node.approval or {}).get("message", ""))
         if pending:
-            decision = self._consume_open_decision(task)
+            decision = self._consume_open_decision(task, pending)
             if decision is not None:
                 # 进程重启后续跑：决定来自持久台账，闸门不再二次挂起
                 if str(decision.get("status")) == "rejected":
@@ -1075,7 +1085,9 @@ class PipelineOrchestrator:
             while task.status == TaskStatus.PAUSED:
                 if not paused_saved:
                     try:
-                        self._save_checkpoint(task)
+                        # 暂停边界必须是完整状态：浅检查点会覆盖掉 _dag_nodes/_result，
+                        # 续跑时已完成节点全部重跑（2026-10-20 复核确认）。
+                        self._save_checkpoint(task, full_state=True)
                     except Exception as e:
                         self._log("warning", "暂停边界 checkpoint 保存失败",
                                   task_id=task.id, error=str(e))
@@ -1083,6 +1095,24 @@ class PipelineOrchestrator:
                 if task.stop_event.is_set() or self._stop_event.is_set():
                     task.status = TaskStatus.CANCELLED
                     return
+                # 别的进程/API 可能已批：本进程要自己观察持久决定，
+                # 不能指望"批准方一定在同一个进程里"。
+                gate_nodes = list((task.awaiting_approval or {}).get("nodes") or [])
+                decision = (self._consume_open_decision(task, gate_nodes)
+                            if gate_nodes else None)
+                if decision is not None:
+                    if str(decision.get("status")) == "rejected":
+                        reason = str(decision.get("reason") or "")
+                        task.error = (f"审批被驳回: {reason}" if reason
+                                      else "审批被驳回")
+                        task.status = TaskStatus.CANCELLED
+                        task.stop_event.set()
+                        return
+                    task.awaiting_approval = None
+                    task.status = TaskStatus.RUNNING
+                    self._log("info", "审批放行（他进程批准）：继续执行",
+                              task_id=task.id)
+                    break
                 task.stop_event.wait(0.5)
             if task.status == TaskStatus.CANCELLED:
                 return
@@ -1216,6 +1246,10 @@ class PipelineOrchestrator:
 
         self.task_queue.submit(task.id, plan.pipeline_name, input_file,
                                plan.raw.get("pipeline", {}))
+        try:
+            self.task_queue.claim_direct(task.id)  # 直跑也占住行，防被 worker 重排
+        except Exception as e:  # noqa: BLE001
+            self._log("warning", "队列行占位失败", task_id=task.id, error=str(e))
 
         task.started_at = time.time()
         total_nodes = plan.node_count
