@@ -68,6 +68,22 @@ topology:
 
 INPUT = "# 标题\n\n这是测试输入内容，用于触发摘要链路。\n"
 
+#: 同一层里两个互不依赖的节点——专门用来数"一层开几次事务"
+WIDE_YAML = """
+name: rs_wide
+agents:
+  - name: tldr
+    version: "0.1"
+    dependencies: []
+    config: {max_sentences: 2}
+  - name: readability
+    version: "0.1"
+    dependencies: []
+topology:
+  levels: [["tldr", "readability"]]
+  edges: []
+"""
+
 
 def _state_dir(monkeypatch, tmp_path: Path) -> Path:
     """把 LOOM_STATE_DIR 指到 tmp：runs.db / deliveries.db / task_queue 都跟它走。"""
@@ -281,3 +297,39 @@ def test_projection_never_has_events_without_run_row(monkeypatch, tmp_path,
     assert run is not None, "事件写进去了，runs 里却没有这个运行——读侧会当成不存在"
     assert run["last_seq"] == 1
     assert json.dumps([e["type"] for e in store.events("stray_run")])
+
+
+class TestBatching:
+    def test_one_transaction_per_level_not_per_node(self, monkeypatch, tmp_path):
+        """§5 的写放大缓解是**有判据的**：同一层的多个节点必须共用一次事务。
+
+        `BEGIN IMMEDIATE` 拿的是整库写锁，逐节点各开一次 = 一层 N 个节点排队 N 回，
+        并发运行时纯付锁切换的钱。数 `_Txn.__enter__` 的调用次数才能抓这件事——
+        数据形状两种写法一模一样，只有事务边界不同，对账判据对它完全无感。
+        """
+        _state_dir(monkeypatch, tmp_path)
+        inp = tmp_path / "in.md"
+        inp.write_text(INPUT, encoding="utf-8")
+        orch = _orch(tmp_path)
+        counts = {"n": 0}
+        store = RunStore()          # 先建：建口自带一次 schema 事务，不该算进运行批次
+        real_enter = run_store._Txn.__enter__
+
+        def counting(self):
+            counts["n"] += 1
+            return real_enter(self)
+
+        monkeypatch.setattr(run_store._Txn, "__enter__", counting)
+        try:
+            orch.run_plan(_plan(tmp_path, "w", WIDE_YAML),
+                          input_file=str(inp), task_id="rs_wide")
+            nodes = store.nodes("rs_wide")
+            assert {n["node"] for n in nodes} == {"tldr", "readability"}, (
+                f"两个节点没都落进投影：{[n['node'] for n in nodes]}")
+            # 建口 1（orchestrator 惰性构造 RunStore 时的 schema 事务）+ 开局 1
+            # + 每层 1 + 收尾 1 = 4；退化成逐节点各开一次就是 5
+            assert counts["n"] == 4, (
+                f"层内合批的批次数对不上：宽层 2 个节点开了 {counts['n']} 次事务，"
+                f"预期 4＝建口/开局/一层/收尾（逐节点退化会是 5）")
+        finally:
+            orch.shutdown()

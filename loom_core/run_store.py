@@ -172,29 +172,51 @@ class RunStore:
             return self._append(conn, run_id, RUN_STARTED, {"started_at": ts},
                                 ts, txn)
 
+    def record_nodes(self, run_id: str, rows: list[dict]) -> int:
+        """一层节点一次事务（§5 的写放大缓解）。
+
+        逐节点各开一次事务是这个模块最容易写错的地方：事务本身没问题，问题在
+        `BEGIN IMMEDIATE` 是**整库写锁**——一层 3 个节点就排队 3 回，并发运行时
+        纯付锁切换的钱。这里把一批 upsert + 一批事件收进同一个事务。
+        """
+        if not rows:
+            return 0
+        with _Txn(self._pool, self._conn()) as txn:
+            conn = txn.conn
+            seq = 0
+            for row in rows:
+                cols = (str(row.get("status") or ""), int(row.get("attempts") or 1),
+                        float(row.get("started_at") or 0.0),
+                        float(row.get("finished_at") or 0.0),
+                        str(row.get("error") or ""),
+                        _fast_dumps(row.get("result") or {}),
+                        _fast_dumps(row.get("artifact_keys") or []))
+                conn.execute(
+                    "INSERT OR IGNORE INTO run_nodes (run_id, node, status, attempts, "
+                    "started_at, finished_at, error, result_json, artifact_keys_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (run_id, str(row.get("node") or "")) + cols)
+                conn.execute(
+                    "UPDATE run_nodes SET status = ?, attempts = ?, started_at = ?, "
+                    "finished_at = ?, error = ?, result_json = ?, artifact_keys_json = ? "
+                    "WHERE run_id = ? AND node = ?",
+                    cols + (run_id, str(row.get("node") or "")))
+                seq = self._append(conn, run_id, NODE_FINISHED,
+                                   {"node": row.get("node"), "status": cols[0],
+                                    "attempts": cols[1], "error": cols[4]},
+                                   cols[3] or time.time(), txn)
+            return seq
+
     def record_node(self, run_id: str, node: str, status: str, *,
                     attempts: int = 1, started_at: float = 0.0,
                     finished_at: float = 0.0, error: str = "",
                     result: Any = None,
                     artifact_keys: list | None = None) -> int:
-        """逐节点事实：投影 upsert + `node.finished` 事件，同一事务。"""
-        ts = finished_at or time.time()
-        cols = (status, int(attempts or 1), started_at, finished_at, error,
-                _fast_dumps(result or {}), _fast_dumps(artifact_keys or []))
-        with _Txn(self._pool, self._conn()) as txn:
-            conn = txn.conn
-            conn.execute(
-                "INSERT OR IGNORE INTO run_nodes (run_id, node, status, attempts, "
-                "started_at, finished_at, error, result_json, artifact_keys_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (run_id, node) + cols)
-            conn.execute(
-                "UPDATE run_nodes SET status = ?, attempts = ?, started_at = ?, "
-                "finished_at = ?, error = ?, result_json = ?, artifact_keys_json = ? "
-                "WHERE run_id = ? AND node = ?", cols + (run_id, node))
-            return self._append(conn, run_id, NODE_FINISHED,
-                                {"node": node, "status": status,
-                                 "attempts": int(attempts or 1), "error": error},
-                                ts, txn)
+        """单节点写法（`record_nodes` 的一元特例，留给非层循环的调用方）。"""
+        return self.record_nodes(run_id, [{
+            "node": node, "status": status, "attempts": attempts,
+            "started_at": started_at, "finished_at": finished_at, "error": error,
+            "result": result, "artifact_keys": artifact_keys}])
 
     def close_run(self, run_id: str, status: str, *, finished_at: float = 0.0,
                   error: str = "", cost_usd: float = 0.0,

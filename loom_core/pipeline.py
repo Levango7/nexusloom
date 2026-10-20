@@ -595,25 +595,27 @@ class PipelineOrchestrator:
         store = self._runstore()
         if store is None:
             return
+        rows: list[dict] = []
         for node in level:
             dag = task.dag_nodes.get(node.agent_name)
             if dag is None:
                 continue
-            try:
-                result = dag.result or {}
-                store.record_node(
-                    task.id, dag.name, str(dag.status or ""),
-                    attempts=int(dag.attempts or 1),
-                    started_at=float(dag.started_at or 0.0),
-                    finished_at=float(dag.finished_at or 0.0),
-                    error=dag.error or "",
-                    # 只存摘要，不存正文：整篇文档进 result_json 是 §5 警告的写放大
-                    result={"keys": sorted(str(k) for k in result),
-                            "chars": {str(k): len(str(v)) for k, v in result.items()}},
-                    artifact_keys=sorted(str(k) for k in result))
-            except Exception as e:  # noqa: BLE001
-                self._log("warning", "RunStore 节点投影失败",
-                          task_id=task.id, node=node.agent_name, error=str(e))
+            result = dag.result or {}
+            rows.append({
+                "node": dag.name, "status": str(dag.status or ""),
+                "attempts": int(dag.attempts or 1),
+                "started_at": float(dag.started_at or 0.0),
+                "finished_at": float(dag.finished_at or 0.0),
+                "error": dag.error or "",
+                # 只存摘要，不存正文：整篇文档进 result_json 是 §5 警告的写放大
+                "result": {"keys": sorted(str(k) for k in result),
+                           "chars": {str(k): len(str(v)) for k, v in result.items()}},
+                "artifact_keys": sorted(str(k) for k in result)})
+        try:
+            store.record_nodes(task.id, rows)
+        except Exception as e:  # noqa: BLE001
+            self._log("warning", "RunStore 节点投影失败",
+                      task_id=task.id, nodes=[r["node"] for r in rows], error=str(e))
 
     def _runstore_close(self, task: PipelineTask, plan: ExecutionPlan) -> None:
         store = self._runstore()
