@@ -70,6 +70,26 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
   新判据看**窗口重叠峰值**（同一时刻几个任务在跑）：`workers=4` 得 peak=4，
   变异 `workers=1` 当场红 `peak=1`（33 passed / 14.18s 复原）。负载只会拖慢 spawn，
   不会伪造重叠、也不会因慢而误红。顺手删掉失去使用者的 `_sleep_identity`。
+### Removed（2026-10-21·续52，死发布面清理）
+
+- **删掉 `.github/workflows/release-plugins.yml`**：它是 2026-10-11 单发行物决策的遗留物——
+  仍列 6 个 `examples/plugin-*` 目录（实际只剩 `plugin-hello` 模板）、仍断言
+  `Requires-Dist: doc-pipeline`（宿主发行名早已是 `nexusloom`），一 dispatch 就必红。
+  现场实测：workflow API `total_count: 0`（一次都没跑过），`loom-plugin-hello` /
+  `doc-pipeline-plugin-hello` / `doc-pipeline-plugin-tldr` / `nexusloom-plugin-tldr`
+  在 PyPI 全 404（没有任何已发行物被这次删除影响）。
+  **处置选删除而不是修**：README 第 3 条写明"examples/plugin-hello 留作外部作者模板，
+  不再单独发行"，把它修成可用等于凭空造一个本仓不该存在的第二发布物。
+- **新增唯一发布面判据** `tests/test_release_readiness.py::TestSinglePublishSurface`（2 条，双向）：
+  解析各 workflow 的 `steps[].uses` 而不是全文子串（注释里提到动作名不算发布面；
+  子串版实测会被 `…-MUTATED` 骗过去）。多一个发布器红、把唯一的那个弄没也红。
+  变异验证 5 组全部符合预期：加 ghost 发布器 / 改名 / 整步删除 → 红；
+  注释含动作名 / 还原后基线 → 绿。
+- **同批改掉 README 里两处同型过度声称**（复核 B9 的新实例）：「可运行的参考实现共六个独立
+  pip 包 …`pip install ./examples/plugin-tldr`」与「`test_plugins_ecosystem` 一次真装六个包、
+  数量不足 5 即红」都随单发行物决策失效；已按该测试的真实判据（内置件 glob / 模板形状 /
+  鬼魂目录 / 第三方诚实计数 0）改写。`test_release_readiness.py` 的"六个插件包""宿主
+  doc-pipeline"两处陈旧口径同步更正。
 
 ### Added（2026-10-20·续51，P0 落地：控制台随包 + 审批跨重启/收件箱 + 租户作用域）
 
