@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any
+from typing import Any, Literal
 
 from artesian.fast_json import dumps as _fast_dumps
 from artesian.fast_json import loads as _fast_loads
@@ -347,11 +347,18 @@ class _Txn:
             return
         self.conn.execute("SELECT 1 FROM runs WHERE run_id = ? FOR UPDATE", (run_id,))
 
-    def __exit__(self, *exc) -> bool:
+    def __exit__(self, *exc) -> Literal[False]:
+        """永远返回 False：本上下文管理器不吞异常。
+
+        标注成 `bool` 会让 mypy 认为"异常可能被咽掉、控制流落到 with 之后"，
+        于是每个 `with _Txn(...): return …` 的写口都报 Missing return——
+        而这里确实不该咽异常（提交失败必须让调用方看到）。
+        """
         if self._sqlite:
             if exc[0] is None:
                 self.conn.commit()
             else:
                 self.conn.rollback()
-            return False
-        return bool(self.conn.__exit__(*exc))
+        else:
+            self.conn.__exit__(*exc)
+        return False
