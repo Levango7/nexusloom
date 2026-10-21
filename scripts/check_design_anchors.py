@@ -48,14 +48,14 @@ ANCHORS = [
     ("loom_core/pipeline.py", 1712, "record"),
     ("loom_core/pipeline.py", 1810, "pipeline.audit"),
     ("loom_core/pipeline.py", 1922, ".done"),
-    ("loom_core/admin_api.py", 604, "get_task"),
-    ("loom_core/admin_api.py", 968, "list_tasks"),
-    ("loom_core/admin_api.py", 983, "list_tasks"),
-    ("loom_core/admin_api.py", 1232, "def _task_checkpoint_view"),
-    ("loom_core/admin_api.py", 1537, "list_tasks"),
-    ("loom_core/admin_api.py", 1850, "list_tasks"),
-    ("loom_core/admin_api.py", 2113, "run_plan_async"),
-    ("loom_core/admin_api.py", 2183, "get_callback"),
+    ("loom_core/admin_api.py", 650, "get_task"),
+    ("loom_core/admin_api.py", 1014, "list_tasks"),
+    ("loom_core/admin_api.py", 1029, "list_tasks"),
+    ("loom_core/admin_api.py", 1278, "def _task_checkpoint_view"),
+    ("loom_core/admin_api.py", 1583, "list_tasks"),
+    ("loom_core/admin_api.py", 1896, "list_tasks"),
+    ("loom_core/admin_api.py", 2159, "run_plan_async"),
+    ("loom_core/admin_api.py", 2229, "get_callback"),
 ]
 
 root = pathlib.Path(__file__).resolve().parent.parent
