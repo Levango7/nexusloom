@@ -1136,6 +1136,9 @@ class AdminHandler(BaseHTTPRequestHandler):
                 "nodes": [
                     {
                         "name": n.get("node"),
+                        # 投影不存节点→Agent 的绑定（agent_name 只在内存态有），
+                        # 这里给节点键本身——与 `_task_dag_view` 缺 agent_name 时的
+                        # 回退同形，不另编一个 Agent 名
                         "agent": n.get("node"),
                         "status": n.get("status") or "",
                         "retried": int(n.get("attempts") or 0) > 1
