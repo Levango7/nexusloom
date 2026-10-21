@@ -25,10 +25,10 @@ ANCHORS = [
     ("loom_core/task_queue.py", 117, "add_column_if_missing"),
     ("loom_core/checkpoint_manager.py", 38, "def save"),
     ("loom_core/checkpoint_manager.py", 87, "os.replace"),
-    ("loom_core/run_handle.py", 121, "def status"),
-    ("loom_core/run_handle.py", 175, "def artifacts"),
-    ("loom_core/run_handle.py", 233, "def _ledger_record"),
-    ("loom_core/run_handle.py", 278, "def to_dict"),
+    ("loom_core/run_handle.py", 124, "def status"),
+    ("loom_core/run_handle.py", 178, "def artifacts"),
+    ("loom_core/run_handle.py", 236, "def _ledger_record"),
+    ("loom_core/run_handle.py", 281, "def to_dict"),
     ("loom_core/db_backend.py", 81, "add_column_if_missing"),
     ("loom_core/dag_executor.py", 821, "def _merge_resumed_nodes"),
     ("loom_core/dag_executor.py", 952, "def _reuse_completed_node"),
@@ -54,11 +54,11 @@ ANCHORS = [
     # `list_runs`（内存缓存 ∪ 投影）——锚点跟着换而不是删，否则"读侧已并轨"
     # 这句话在表里就没有对应物了。
     ("loom_core/admin_api.py", 1056, "list_runs"),
-    ("loom_core/admin_api.py", 1352, "def _task_checkpoint_view"),
+    ("loom_core/admin_api.py", 1355, "def _task_checkpoint_view"),
     ("loom_core/admin_api.py", 1660, "list_runs"),
-    ("loom_core/admin_api.py", 1969, "list_runs"),
-    ("loom_core/admin_api.py", 2232, "run_plan_async"),
-    ("loom_core/admin_api.py", 2302, "get_callback"),
+    ("loom_core/admin_api.py", 1972, "list_runs"),
+    ("loom_core/admin_api.py", 2235, "run_plan_async"),
+    ("loom_core/admin_api.py", 2305, "get_callback"),
 ]
 
 root = pathlib.Path(__file__).resolve().parent.parent
