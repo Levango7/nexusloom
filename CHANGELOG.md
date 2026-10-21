@@ -64,7 +64,9 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 - **本机实测**（Python 3.14.3、本机相对空闲）：`TestBoundedConcurrency` 全类 5 条最终头
   10 轮 0 红（去掉 blocking 恢复前另测 20 轮 0 红；缺陷原样时同一批 20 轮红 9 轮，且
   那 9 轮全部落在两条真 HTTP 用例上）；变异 M1 ⇒ 2 红、M2 ⇒ 恰 1 红、M3 ⇒ 恰 1 红，
-  三者均 3/3 轮一致，还原后 17 passed。
+  三者均 3/3 轮一致，还原后 17 passed。全量在 `90e4892` 上 **2857 passed, 7 skipped,
+  6 deselected in 753.83s**（收集 2864，`LOOM_TEST_PG_URL` 未设 ⇒ 5 条真 PG 判据跳过）；
+  该头之后只有本行与 README 的口径数字在动，测试集合未变。
 
 ### Added（2026-10-21·续56，RunStore Stage 1：事件 + 投影同事务的双写口）
 

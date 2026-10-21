@@ -950,7 +950,7 @@ python -m pytest tests/ -v
 收集 2864，护栏按 `collected − declared ≤ 10` 判；本行原先写 2854 而那轮全量唯一一条红是
 依赖闭合护栏——`_reject_saturated` 新 import 的 stdlib `select` 没进 `verify_dist` 的标准库
 名单，补进名单后按最终头重跑取到上面这组数；
-口径条件：`Python 3.14.3`、机器相对静默时全量 777.50s，同机有并行会话时同一批要 2453s；
+口径条件：`Python 3.14.3`、机器相对静默时全量 753.83s，同机有并行会话时同一批要 2453s；
 `tests/test_admin_concurrency.py::TestBoundedConcurrency` 原先在满载轮里错位红，**这里旧写的
 "属时序窗口争用不是产品缺陷"是错的**——根因是池满拒答带着未读请求字节 close ⇒ 内核发 RST
 把 503 吞了（WinError 10053，缺陷原样时 20 轮红 9 轮），续57 已修并把等待条件换成
