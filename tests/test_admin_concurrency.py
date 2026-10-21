@@ -56,6 +56,21 @@ def _start(orch, **env):
             os.environ.pop(k, None)
 
 
+def _wait_inflight(api, expected: int, timeout: float = 10.0) -> bool:
+    """轮询服务端自己的占用计数，直到池里确有 `expected` 个请求。
+
+    这类用例的前提是"池已被占满"，而前提只能由被观测方证实：`_inflight` 在
+    accept 线程派发时递增，是服务端的真实状态。调用方必须对返回值判红，
+    不能只等——否则后面"几条 200"就成了没有前提的代理指标。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if api._server.inflight >= expected:
+            return True
+        time.sleep(0.02)
+    return False
+
+
 @pytest.fixture(autouse=True)
 def reset_handler_state():
     yield
@@ -156,42 +171,57 @@ class TestKeepAliveAndContentLength:
 
 class TestBoundedConcurrency:
     def test_pool_full_returns_503_with_retry_after(self, orch_mock):
-        """max_workers=2 + 3 个并发慢请求 → 第 3 个拿到 503 + Retry-After。"""
+        """max_workers=2：两个请求占满池，第三个必须当场拿到 503 + Retry-After。
+
+        "池满"这一步用服务端的占用计数确认，不是 `time.sleep(0.6)` 猜窗口：
+        同机有并行负载时线程起步慢，第三个请求会在前两个还没派发时到达 ⇒
+        池没满 ⇒ 三条全 200，红得像是并发上限本身失效（本轮实测正是这样错位的）。
+        """
         gate = threading.Event()
 
         def _slow(self, *a, **kw):
-            gate.wait(timeout=5)
+            # 挂到 gate 被显式放行（`finally` 一定 set），不给占位请求设短超时：
+            # 超时自动放行会让"池满"这个前提在断言中途自己消失。
+            gate.wait(timeout=30)
             self._json({"ok": True})
 
         port, api = _start(orch_mock, LOOM_ADMIN_MAX_CONCURRENCY=2)
         assert api.max_concurrency == 2
         try:
             with patch.object(AdminHandler, "_handle_list_tasks", _slow):
-                results: list[int] = []
+                held: list[int] = []
                 lock = threading.Lock()
 
                 def _hit():
                     try:
-                        c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+                        c = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
                         c.request("GET", "/tasks")
                         r = c.getresponse()
                         r.read()
                         with lock:
-                            results.append(r.status)
+                            held.append(r.status)
                         c.close()
                     except Exception:  # noqa: BLE001
                         with lock:
-                            results.append(0)
+                            held.append(0)
 
-                threads = [threading.Thread(target=_hit) for _ in range(3)]
-                for t in threads:
+                holders = [threading.Thread(target=_hit) for _ in range(2)]
+                for t in holders:
                     t.start()
-                time.sleep(0.6)  # 让前两个占住池子
+                assert _wait_inflight(api, 2), "两个请求没能占满池，前提不成立"
+
+                third = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+                third.request("GET", "/tasks")
+                r = third.getresponse()
+                r.read()
+                assert r.status == 503, f"池满没有拒绝：{r.status}"
+                assert r.getheader("Retry-After") == "1", "503 没带 Retry-After"
+                third.close()
+
                 gate.set()
-                for t in threads:
-                    t.join(timeout=15)
-            assert results.count(200) == 2, f"200 的数量不对: {results}"
-            assert 503 in results, f"池满没有拒绝: {results}"
+                for t in holders:
+                    t.join(timeout=30)
+                assert held == [200, 200], f"占位的两条不该被拒：{held}"
         finally:
             gate.set()
             api.stop()
@@ -200,27 +230,29 @@ class TestBoundedConcurrency:
         gate = threading.Event()
 
         def _slow(self, *a, **kw):
-            gate.wait(timeout=5)
+            gate.wait(timeout=30)
             self._json({"ok": True})  # 放行后照常回应，别让读取线程干等
 
         port, api = _start(orch_mock, LOOM_ADMIN_MAX_CONCURRENCY=1)
         try:
             with patch.object(AdminHandler, "_handle_health", _slow):
-                c2 = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+                c2 = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
                 c2.request("GET", "/health")  # 健康端点免鉴权，先占住唯一工位
                 t = threading.Thread(target=lambda: c2.getresponse().read())
                 t.start()
-                time.sleep(0.4)
-                rejected = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+                assert _wait_inflight(api, 1), "唯一工位没被占住，前提不成立"
+                rejected = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
                 rejected.request("GET", "/tasks")
                 r = rejected.getresponse()
                 body = r.read()
                 assert r.status == 503
                 assert r.getheader("Retry-After") == "1"
                 assert json.loads(body) == {"error": "server busy"}
+                rejected.close()
                 # 先放行占着工位的慢请求，再等它的读取线程收尾
                 gate.set()
-                t.join(timeout=10)
+                t.join(timeout=30)
+                c2.close()
         finally:
             gate.set()
             api.stop()
@@ -236,8 +268,7 @@ class TestBoundedConcurrency:
             conn.request("GET", "/tasks")
             r = conn.getresponse()
             r.read()
-            time.sleep(0.3)
-            assert api._server.inflight == 1, "keep-alive 下连接应仍占一个工位"
+            assert _wait_inflight(api, 1), "keep-alive 下连接应仍占一个工位"
             conn.close()
             deadline = time.time() + 5
             while api._server.inflight and time.time() < deadline:
