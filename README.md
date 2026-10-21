@@ -950,11 +950,15 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**2857 个测试本机全绿**（`2857 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
-收集 2864，护栏按 `collected − declared ≤ 10` 判；本行原先写 2854 而那轮全量唯一一条红是
-依赖闭合护栏——`_reject_saturated` 新 import 的 stdlib `select` 没进 `verify_dist` 的标准库
-名单，补进名单后按最终头重跑取到上面这组数；
-口径条件：`Python 3.14.3`、机器相对静默时全量 753.83s，同机有并行会话时同一批要 2453s；
+**2875 个测试本机全绿**（`2875 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
+收集 2882，护栏按 `collected − declared ≤ 10` 判；本行原先写 2857，Stage 2 那轮全量有两条红：
+本行还没改数，以及一条真回归——`RunHandle.exists()` 把替身自动生成的 `task_queue.get()`
+当成"队列里有这行"，一个不存在的 id 会一路走到拼载荷、序列化时炸成 JSON-RPC internal error；
+两处都修完后按最终头重跑，取到上面这组数；
+口径条件：`Python 3.14.3`、**同机有并行会话**（本轮全量 2534.08s ≈ 42 分钟；静默基线
+753.83s ≈ 12.5 分钟）。负载轮里先后暴露过两条时序判据：`test_runstore_parity` 的
+"账本行还没落地就断言"（已改成有界等待，见续58）、`test_p2_infra_fixes` 的队列排空竞态
+（与本批无因果，单跑 3 次各绿，另立待办）；两处处理完后本轮 2875 条全绿；
 `tests/test_admin_concurrency.py::TestBoundedConcurrency` 原先在满载轮里错位红，**这里旧写的
 "属时序窗口争用不是产品缺陷"是错的**——根因是池满拒答带着未读请求字节 close ⇒ 内核发 RST
 把 503 吞了（WinError 10053，缺陷原样时 20 轮红 9 轮），续57 已修并把等待条件换成
