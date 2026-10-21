@@ -8,7 +8,8 @@ spec 点名的两个缺陷——HTTP/1.0 无连接复用、线程-per-连接无�
 - **Content-Length 全家**：JSON / 文本 / Prometheus / OPTIONS 403 分支 /
   静态文件，一个都不能漏；
 - **并发上限**：池满即 **503 + Retry-After**，不排队、不无限起线程
-  （`LOOM_ADMIN_MAX_CONCURRENCY` 可调）；
+  （`LOOM_ADMIN_MAX_CONCURRENCY` 可调）；拒答的连接还要**优雅关闭**——
+  接收队列里没回收的请求字节会让内核发 RST，把刚写的 503 一起吞掉；
 - **socket 超时**：半开连接（只发请求行不发完）在超时后由服务端关闭，
   不再永久占着一条（有界）线程（`LOOM_ADMIN_SOCKET_TIMEOUT` 可调）；
 - **SSE 不参与连接复用**：`_handle_stream` 置 `close_connection`。
@@ -29,6 +30,7 @@ from loom_core.admin_api import (
     DEFAULT_SOCKET_TIMEOUT,
     AdminAPI,
     AdminHandler,
+    BoundedThreadingHTTPServer,
 )
 
 
@@ -259,6 +261,88 @@ class TestBoundedConcurrency:
 
     def test_default_concurrency_is_sane(self):
         assert DEFAULT_MAX_CONCURRENCY >= 16
+
+    def test_saturated_reject_waits_for_the_bytes_it_must_not_leave_behind(self):
+        """拒答要等到请求字节落地再关：关早了内核发 RST，写好的 503 客户端读不到。
+
+        构造是确定的，不靠碰运气：客户端先连着**不发**，等服务端进入回收步骤
+        （`_drain_received` 入口）后 5ms 才发。缺陷版从回收到关闭约 0.1ms ⇒ 发送时
+        连接已关 ⇒ 客户端 recv 报 10053/10054 ⇒ 判红；修复版的窗口是 50ms ⇒ 这 5ms
+        到达的字节被回收 ⇒ 503 完整可读并以 FIN 收尾 ⇒ 判绿。两侧余量 10~50 倍，
+        所以 5ms 是夹在两个已知时长之间，不是"睡一下看看"。
+        """
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        server = BoundedThreadingHTTPServer(("127.0.0.1", 0), AdminHandler, max_workers=1)
+        client = socket.create_connection(listener.getsockname(), timeout=10)
+        client.settimeout(10)
+        entered = threading.Event()
+        real_drain = BoundedThreadingHTTPServer._drain_received
+
+        def _spy(self, request, wait):  # noqa: ANN001
+            entered.set()
+            return real_drain(self, request, wait)
+
+        srv, _addr = listener.accept()
+        try:
+            with patch.object(BoundedThreadingHTTPServer, "_drain_received",
+                              autospec=True, side_effect=_spy):
+                worker = threading.Thread(target=lambda: server._reject_saturated(srv))
+                worker.start()
+                assert entered.wait(5), "拒答路径没进入请求字节回收，前提不成立"
+                time.sleep(0.005)
+                try:
+                    client.sendall(b"GET /tasks HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                except OSError as exc:
+                    pytest.fail(f"请求发不出去（连接已被服务端中止：{exc}），503 也读不到")
+                worker.join(timeout=10)
+                assert not worker.is_alive(), "拒答线程没收尾，服务端还挂在这条连接上"
+
+            try:
+                head = client.recv(4096)
+                tail = client.recv(1)  # 期望 b''：FIN 收尾
+            except OSError as exc:  # 10053/10054：RST 把 503 一起吞了
+                pytest.fail(f"拒答连接被 RST 中止（{exc}），客户端读不到 503")
+            assert head.startswith(b"HTTP/1.1 503"), head[:64]
+            assert b"Retry-After: 1" in head, head[:256]
+            assert tail == b"", "关闭不是优雅 FIN：接收队列里还有没回收的请求字节"
+        finally:
+            client.close()
+            listener.close()
+            server.server_close()
+
+    def test_reject_wait_degrades_to_instant_shed_once_budget_is_gone(self):
+        """那点等待是给真客户端的，不是给刷连接者的：配额耗尽后必须立刻硬关。
+
+        去掉配额闸门（每条拒答都等满窗口）时，第二条静默连接也会等 50ms ⇒ 判红。
+        这条钉的是"修复没顺手把拒答路径变成 accept 线程的新 DoS 面"：静默连接最多
+        让 accept 线程每秒牺牲一个窗口（50ms），其余连接照旧即时 shed。
+        """
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        server = BoundedThreadingHTTPServer(("127.0.0.1", 0), AdminHandler, max_workers=1)
+        silent = [socket.create_connection(listener.getsockname(), timeout=10)
+                  for _ in range(2)]
+        held = [listener.accept() for _ in range(2)]
+        try:
+            t0 = time.perf_counter()
+            server._reject_saturated(held[0][0])
+            first = time.perf_counter() - t0
+            assert 0.04 <= first < 0.5, f"第一条静默连接没等满窗口：{first:.3f}s"
+
+            t0 = time.perf_counter()
+            server._reject_saturated(held[1][0])
+            second = time.perf_counter() - t0
+            assert second < 0.02, f"配额耗尽后仍在等（{second:.3f}s）：accept 线程可被刷连接拖死"
+        finally:
+            for sock in silent:
+                sock.close()
+            for conn, _addr in held:
+                conn.close()
+            listener.close()
+            server.server_close()
 
     def test_inflight_returns_to_zero_after_close(self, orch_mock):
         """keep-alive 语义：连接开着工位就占着；客户端关连接后工位必须归还。"""

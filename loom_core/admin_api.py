@@ -45,6 +45,7 @@ import logging
 import mimetypes
 import os
 import re
+import select
 import sys
 import threading
 import time
@@ -280,6 +281,13 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     allow_reuse_address = True
     request_queue_size = 128
 
+    #: 拒答时回收接收队列的字节上限（只取已在队列里的，不为读全请求体而等）
+    DRAIN_LIMIT = 65536
+    #: 单次拒答允许等待请求字节落地的上限（秒）
+    REJECT_WAIT = 0.05
+    #: 等待配额的重置周期（秒）：每周期 accept 线程总共只允许牺牲 REJECT_WAIT
+    REJECT_BUDGET_WINDOW = 1.0
+
     def __init__(self, *args, max_workers: int = DEFAULT_MAX_CONCURRENCY, **kwargs):
         super().__init__(*args, **kwargs)
         self.max_workers = max(1, int(max_workers))
@@ -287,6 +295,8 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
                                         thread_name_prefix="admin-api")
         self._inflight = 0
         self._inflight_lock = threading.Lock()
+        self._budget_left = self.REJECT_WAIT
+        self._budget_at = time.monotonic()
 
     # ── 有界派发 ──────────────────────────────────────
 
@@ -313,9 +323,43 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
             with self._inflight_lock:
                 self._inflight -= 1
 
+    def _budget_now(self) -> float:
+        """本次拒答最多可以等多久（秒）——accept 线程的等待配额。
+
+        只在 accept 线程里调用（`serve_forever` 单线程派发），无需加锁。
+        """
+        now = time.monotonic()
+        if now - self._budget_at >= self.REJECT_BUDGET_WINDOW:
+            self._budget_left = self.REJECT_WAIT
+            self._budget_at = now
+        return min(self._budget_left, self.REJECT_WAIT)
+
+    def _drain_received(self, request, wait: float) -> float:
+        """收回即将随 close 一起被 RST 掉的请求字节，返回实际等待秒数。
+
+        TCP 通则（Windows/Linux 一致）：close 时接收队列非空 ⇒ 内核发 RST ⇒ 刚写进去的
+        503 在客户端被丢弃，`recv` 报 10053/10054。池满时这条连接压根没被服务，客户端
+        的请求字节要么还在路上、要么就躺在队列里，所以回收是"503 能送达"的前提而非收尾。
+        先等 `wait` 让字节落地（本机实测正常客户端 8µs~24ms），再非阻塞取空。
+        """
+        t0 = time.perf_counter()
+        with contextlib.suppress(OSError):
+            if wait > 0:
+                select.select([request], [], [], wait)
+            request.setblocking(False)
+            drained = 0
+            while drained < self.DRAIN_LIMIT:
+                chunk = request.recv(4096)
+                if not chunk:
+                    break
+                drained += len(chunk)
+        return time.perf_counter() - t0
+
     def _reject_saturated(self, request):
-        """池满：回 503 就关（不读请求体——帮攻击者读体没有意义）。"""
+        """池满：回收请求字节 → 写 503 → 补收一次 → 优雅关闭。"""
         body = b'{"error": "server busy"}'
+        spent = self._drain_received(request, self._budget_now())
+        self._budget_left = max(0.0, self._budget_left - spent)
         with contextlib.suppress(OSError):
             request.sendall(
                 b"HTTP/1.1 503 Service Unavailable\r\n"
@@ -323,6 +367,8 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
                 b"Content-Length: " + str(len(body)).encode() + b"\r\n"
                 b"Retry-After: 1\r\n"
                 b"Connection: close\r\n\r\n" + body)
+        # sendall 期间可能又有字节落地，再补收一次（非阻塞，配额已用掉）
+        self._drain_received(request, 0.0)
         self.shutdown_request(request)
 
     def server_close(self):
