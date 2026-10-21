@@ -272,7 +272,7 @@
 | **插件 group（新增）** | 无 | **`loom.agents` / `loom.packs`**〔2026-10-12 已落地；旧名 `doc_pipeline.agents`/`doc_pipeline.packs` 过渡期回退可读（命中记一次迁移提示）〕 | 20x 的开关 |
 | MCP `serverInfo.name` | `doc-pipeline` | `loom` | `mcp_server.py:52` |
 | 观测 namespace | `docpipeline` | `loom` | `observability.py:161` |
-| **API 原语（新增）** | 裸 `task_id` 字符串 | **`RunHandle`**：`status / wait / cancel / resume / artifacts`〔2026-10-15 落地：`loom_core/run_handle.py` + `PipelineOrchestrator.run_handle(task_id)`；spec 原写的 `await` 是 Python 关键字，落地名 `wait()`，语义不变〕 | **已接线**：MCP `get_task` 与 Admin `GET /tasks/<id>` 的 `artifacts` 字段由它产出（同源，判据 `tests/test_run_handle.py`）；POST 提交类响应仍以 `task_id` 为凭据——句柄是"读一次运行"的入口，不是收据。产物**不因内存窗口失效**：任务历史只留最近 100 个（`_trim_task_history`），被淘汰的运行改从 `deliveries.db` 账本按同一形状重建（2026-10-15；边界=本改动之前落账的运行没有 `artifact_keys` 字段，其清单为空，不回填） |
+| **API 原语（新增）** | 裸 `task_id` 字符串 | **`RunHandle`**：`status / wait / cancel / resume / artifacts`〔2026-10-15 落地：`loom_core/run_handle.py` + `PipelineOrchestrator.run_handle(task_id)`；spec 原写的 `await` 是 Python 关键字，落地名 `wait()`，语义不变〕 | **已接线**：MCP `get_task` 与 Admin `GET /tasks/<id>` 的 `artifacts` 字段由它产出（同源，判据 `tests/test_run_handle.py`）；POST 提交类响应仍以 `task_id` 为凭据——句柄是"读一次运行"的入口，不是收据。产物**不因内存窗口失效**：任务历史只留最近 100 个（`_trim_task_history`），被淘汰的运行由 RunStore 投影重建（`runs`/`run_nodes`，2026-10-21 Stage 2），投影没有才回落到 `deliveries.db` 账本（2026-10-15；边界=Stage 1 之前落账的老运行没有 `artifact_keys` 字段，其清单为空，不回填） |
 
 > **命名已确认（2026-10-07）**：产品名 **Loom**；`handle` 这个词留给 API 原语 `RunHandle`
 > ——运行时交给调用方的本来就是一个句柄，而现在 HTTP/MCP 传的是裸 `task_id` 字符串。

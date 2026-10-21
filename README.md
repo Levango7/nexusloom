@@ -713,13 +713,17 @@ handle.cancel(); handle.resume()      # 引擎拒绝（已完成 / 停在审批�
 产物只报引擎确实记下的东西，不按节点名造伪 ID。判据 `tests/test_run_handle.py`。
 
 任务内存历史只留最近 100 个（`pipeline._trim_task_history`），更早的运行会被淘汰。
-产物清单不跟着丢：每次运行收尾时（`DONE` 与 `FAILED` 都记）逐节点产物键与交付物路径
-一并写进交付账本 `deliveries.db`，句柄在内存里没有这一运行时**按同一形状**从账本重建，
-MCP `get_task` 与 `GET /tasks/<id>` 因此拿到同一份清单。三条边界：
+**淘汰不等于查不到**（2026-10-21 Stage 2 起）：内存只是缓存，`RunHandle` 与
+`PipelineOrchestrator.list_runs` 先读 RunStore 的 `runs` / `run_nodes` 投影——
+`/tasks`、`/tasks/<id>`、`/api/dashboard`、`/api/cost` 的作用域集合、MCP
+`list_tasks` / `get_task` 在内存淘汰后仍答得出来，载荷里的 `source` 字段标明这一行
+来自 `memory` / `runstore` / `deliveries`。投影里没有这条运行（`LOOM_RUNSTORE=0`，
+或 Stage 1 之前没有投影的老运行）时才回落到交付账本。四条边界：
 ①本改动（2026-10-15）之前落账的运行没有 `artifact_keys` 这批字段，其 `artifacts` 是空表——
-**不回填、不猜**；②读路径只读，账本文件不存在就返回空，绝不因为"查一下"而创建数据库；
-③被淘汰运行的 `to_dict()` 给出 `pipeline` / `error` / `artifacts`，但不给 `result`
-（账本存的是产物键与路径，不是整份结构化结果）。
+**不回填、不猜**；②读路径只读，账本/投影文件不存在就返回空，绝不因为"查一下"而创建数据库；
+③淘汰后的详情给 `pipeline` / `error` / `artifacts` / 逐节点摘要（status、attempts、耗时、
+artifact_keys），但**不给 `result` 正文本**——它从不落盘（投影只存摘要），不编空值冒充；
+④`cancel` / `resume` / 审批仍只读内存：**动作**只有内存态才有意义，淘汰后照旧 404。
 
 ### 定时触发（Cron）
 

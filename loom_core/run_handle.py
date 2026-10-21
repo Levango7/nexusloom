@@ -112,9 +112,12 @@ class RunHandle:
         if queue is None:
             return False
         try:
-            return bool(queue.get(self._task_id))
+            row = queue.get(self._task_id)
         except Exception:  # noqa: BLE001
             return False
+        # 只认队列真给出来的 dict：与 `status()` 同一条判法。替身/损坏的 store
+        # 返回别的东西时不能当成"存在"，否则某个不存在的 id 会一路走到拼载荷。
+        return isinstance(row, dict)
 
     # ─── status ────────────────────────────────────────
 
