@@ -361,6 +361,9 @@ class BoundedThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         spent = self._drain_received(request, self._budget_now())
         self._budget_left = max(0.0, self._budget_left - spent)
         with contextlib.suppress(OSError):
+            # 回收步骤把套接字调成了非阻塞；写 503 必须恢复阻塞写，否则发送缓冲
+            # 一满就 BlockingIOError，被上面的 suppress 咽掉 ⇒ 又变成"响应送不到"。
+            request.setblocking(True)
             request.sendall(
                 b"HTTP/1.1 503 Service Unavailable\r\n"
                 b"Content-Type: application/json\r\n"

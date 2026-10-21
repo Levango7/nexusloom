@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import select
 import socket
 import threading
 import time
@@ -308,6 +309,67 @@ class TestBoundedConcurrency:
             assert b"Retry-After: 1" in head, head[:256]
             assert tail == b"", "关闭不是优雅 FIN：接收队列里还有没回收的请求字节"
         finally:
+            client.close()
+            listener.close()
+            server.server_close()
+
+    def test_reject_writes_the_503_in_blocking_mode(self):
+        """写 503 必须是阻塞写：回收步骤把套接字设成了非阻塞，一满就静默丢响应。
+
+        判的是**写下那一刻套接字的模式**（不是"有没有调用 sendall"）。端到端版构造
+        不出来：Windows 对 `SO_RCVBUF` 有下限，150 字节的 503 塞不满任何接收窗口，
+        "发送缓冲满 ⇒ BlockingIOError"没法用真 socket 稳定复现；而 `socket` 实例带
+        `__slots__`，也挂不了表笔 ⇒ 用一层只记录模式的代理转发到真 socket。
+        摘掉 `setblocking(True)` 那行 ⇒ 记到 False ⇒ 判红。
+        """
+        class _ModeSpy:
+            """把拒答路径用到的那几个方法转给真 socket，并记录写那一刻的阻塞模式。"""
+
+            def __init__(self, sock: socket.socket) -> None:
+                self._sock = sock
+                self.blocking_at_write: bool | None = None
+
+            def fileno(self) -> int:
+                return self._sock.fileno()
+
+            def setblocking(self, flag: bool) -> None:
+                self._sock.setblocking(flag)
+
+            def recv(self, n: int) -> bytes:
+                return self._sock.recv(n)
+
+            def sendall(self, data: bytes) -> None:
+                self.blocking_at_write = self._sock.getblocking()
+                self._sock.sendall(data)
+
+            def shutdown(self, how: int) -> None:
+                self._sock.shutdown(how)
+
+            def close(self) -> None:
+                pass  # 由测试自己关，好让后面还能读到服务端的 FIN
+
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        server = BoundedThreadingHTTPServer(("127.0.0.1", 0), AdminHandler, max_workers=1)
+        client = socket.create_connection(listener.getsockname(), timeout=10)
+        client.settimeout(10)
+        srv, _addr = listener.accept()
+        spy = _ModeSpy(srv)
+        try:
+            client.sendall(b"GET /tasks HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            readable, _, _ = select.select([srv], [], [], 5)
+            assert readable, "请求字节没进服务端接收队列，前提不成立"
+
+            server._reject_saturated(spy)
+
+            assert spy.blocking_at_write is True, \
+                "写 503 时套接字是非阻塞：发送缓冲一满就悄悄丢响应"
+            head = client.recv(4096)
+            assert head.startswith(b"HTTP/1.1 503"), head[:64]
+            assert b"Retry-After: 1" in head, head[:256]
+        finally:
+            srv.close()
             client.close()
             listener.close()
             server.server_close()
