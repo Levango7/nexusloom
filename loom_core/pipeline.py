@@ -1866,7 +1866,7 @@ class PipelineOrchestrator:
                         "started_at": rec.get("started_at") or 0.0,
                         "created_at": rec.get("started_at") or None,
                         "finished_at": rec.get("finished_at") or None,
-                        "error": None,
+                        "error": rec.get("error") or None,
                         "progress": 0,
                         "steps": 0,
                         "source": "runstore",

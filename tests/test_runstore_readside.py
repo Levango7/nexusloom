@@ -116,6 +116,20 @@ class TestListRunsMerge:
         finally:
             orch.shutdown()
 
+    def test_evicted_failed_run_keeps_its_error(self, tmp_path, monkeypatch):
+        """列表里的 error 不能在淘汰后消失：失败原因本来就是运维第一眼要看的东西。"""
+        _state_dir(monkeypatch, tmp_path)
+        orch = _orch(tmp_path)
+        try:
+            store = RunStore()
+            store.open_run("rs-failed", workflow="w")
+            store.close_run("rs-failed", "failed", error="boom")
+            row = {r["id"]: r for r in orch.list_runs()}["rs-failed"]
+            assert row["status"] == "failed"
+            assert row["error"] == "boom"
+        finally:
+            orch.shutdown()
+
     def test_principal_filter_applies_to_both_sources(self, tmp_path, monkeypatch):
         _state_dir(monkeypatch, tmp_path)
         orch = _run_once(tmp_path, "rs-alice", owner="alice")

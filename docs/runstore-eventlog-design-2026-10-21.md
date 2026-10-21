@@ -2,7 +2,7 @@
 
 > 承接 `docs/product-design-review-2026-10-20.md` §5。本文只解决一件事：**把"一次运行的事实"从 5 套写入 + 20 处直读，收敛成一个写入口、一个读接口。**
 > 行号基线：main @ `0f6090f`（PR #50 合并后），本仓 `fix/console-runtime-validation` 分支上取证的落点已逐条复核。**本文所有 `file:line` 是"当时那一行的原状"**，Stage 每落地一批就会让一批引用失效——`scripts/check_design_anchors.py` 按 `(文件, 行号, 锚文本)` 逐条核对，改了代码就要按新现实更新或退役对应条目。
-> 落地进度：§6 三件事已拍板；**Stage 0 已实现**（分支 `fix/async-run-parity`，独立 PR），Stage 1 的表结构在本文 §3.1 定稿后开工。
+> 落地进度：§6 三件事已拍板；**Stage 0 / Stage 1 已合并**（PR #54 / #55），**Stage 2 读侧已交付**（PR：本批），SSE 重放拆到 Stage 2b（见 §4 末）。
 
 ---
 
@@ -83,10 +83,21 @@
 |---|---|---|---|
 | 0 | 两条引擎并轨（§2）**已交付** | 终态事件去重 | 同/异步 parity 断言逐字段相等（**实交付=事件序列+队列行+检查点形状；账本行比对挪 Stage 1**，见 §2 末）；parity 变异可红（最终头实测：还原 `pipeline.py` ⇒ 4 条全红，只摘"已发过"闸门 ⇒ 恰好 2 红 2 绿，红的是两条取消判据） |
 | 1 | `RunStore`（落地时的类名，本文原写作 `RunRecorder`）+ 4 表 + **双写** 已交付 | 不删任何旧写；写口全部 fail-soft | 三方对账：`runs`/`run_nodes` vs `task_queue`/`deliveries`/内存，不一致当场红（`tests/test_runstore_parity.py` 8 条，随 CI 全量跑）。**两处与本文原设想不同，照实记**：① 门禁是**显式用例**覆盖两引擎 × done/cancelled，不是"每条用例跑完自动后置检查"——后者现在挂上去只会把每个既有用例都拖一遍库盘，等 Stage 2 读侧切完再谈；② `runs.cost_usd`/`quality_score` **本批不填**（来源未定，不拿猜测当事实），`principal` 沿用调用方归属（今天 SSE/直跑都传不出 owner ⇒ 列有、值多空串，见 §2 末） |
-| 2 | 读侧切换：`/tasks`、`/tasks/<id>`、`/api/dashboard`、`/api/cost` 作用域、MCP `list_tasks`/`get_task`、`_scoped_task` 存在性、SSE 重放改读 `events` | 内存退化为缓存（仅加速，不再作为存在性判据） | 双 token 真 HTTP：淘汰 100 条后仍查得到、越权仍 404 不泄露存在性；`/stream` 断线重连跨进程可重放 |
+| 2 | 读侧切换：`/tasks`、`/tasks/<id>`、`/api/dashboard`、`/api/cost` 作用域、MCP `list_tasks`/`get_task`、`_scoped_task` 存在性 **已交付**；SSE 重放改读 `events` **拆到 Stage 2b** | 内存退化为缓存（仅加速，不再作为存在性判据）**已交付**：`RunHandle` 与 `list_runs` 依次回落到投影 | 双 token 真 HTTP：淘汰 100 条后仍查得到、越权仍 404 不泄露存在性（`tests/test_runstore_readside.py` 17 条，五组窄变异各只红预期用例）；`/stream` 断线重连跨进程可重放 **未交付（2b）** |
 | 3 | 摘写：`approvals` 行改为 `events` 的投影或保留但不再被 `open_decision` 单点依赖；`task_queue` 只保留"租约/抢占"职责 | **删除** Stage 1 的双写中已无读者的一侧 | 每个源有且只有一个写入者；`RunHandle` 五原语全部只读 RunStore |
 
 双写窗口的长度用门禁约束：Stage 1 起，"两套口径漂移"不是靠人盯，而是被 parity 断言钉在 CI 里；Stage 3 才允许删写。
+
+**Stage 2 实际交付的三条边界（照实记）**：
+
+- **`/stream` 重放没进这一批**：它要先把"RunStore 事件 → SSE 帧"的映射定成契约（现有 SSE 事件是
+  `progress/section/complete`，RunStore 事件是 `run.opened/node.finished/run.completed`）。混进读侧切换
+  会让"存在性改由投影回答"和"新增一种帧"互相污染，判据也另有一份（断线重连跨进程），所以拆成 2b。
+- **淘汰后的详情是降级但诚实的**：`/tasks/<id>` 从投影回答状态/流水线/时间/错误/产物/逐节点摘要；
+  节点 `result` 正文本从不落盘（Stage 1 只存摘要），所以那些键不出现、不编空值。
+  `cancel/resume/审批` 仍只读内存——**动作**只在内存态才有意义，淘汰后它们照旧 404。
+- **身份贯穿只覆盖新运行**：三处 `task_queue.submit` 与 SSE 调用的 `owner` 已带上；Stage 1 之前
+  没有投影的老运行不在 `runs` 里（不 backfill），仍按原路径从 `deliveries` 读终态。
 
 ## 5. 风险清单（动共享状态前）
 

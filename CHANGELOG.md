@@ -35,6 +35,33 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Changed（2026-10-21·续58，RunStore Stage 2：读侧切到投影、内存降为缓存 + 身份贯穿）
+
+- **`/tasks` / `/api/dashboard` / MCP `list_tasks` 共用 `list_runs`**：内存缓存 ∪ `runs` 投影，
+  按开始时间倒序；同一 run_id 两边都有时以内存为准（它更新），但**投影里有而内存淘汰了的
+  照样列出来**——`_trim_task_history` 的 100 条边界不再决定"查不查得到"。
+- **`/tasks/<id>` 未命中内存时从投影回答**：状态 / 流水线 / 起止时间 / 错误 / 产物清单 /
+  逐节点摘要（status、attempts、duration、artifact_keys）。**给不出的不编**：节点 `result`
+  正文本就从不落盘（Stage 1 只存摘要），于是那些键不出现；`cancel/resume/审批` 仍只读内存
+  ——动作只有内存态才有意义，淘汰后照旧 404（不假装能操作）。
+- **`/api/cost` 的作用域集合**由投影补上（"成本归因随淘汰丢"是设计 §1 点名的三条之一）。
+- **MCP `get_task` 的存在性改由 `RunHandle.exists()` 回答**（内存 → 投影 → 持久队列），
+  不再先看内存；`list_tasks` 与 Admin 同一条读口径。
+- **身份贯穿**：`task_queue.submit` 三处调用点传 `principal`（列早有、写侧恒空）；
+  SSE 的 worker 把 `Principal.id` 交给 `run_plan_async`（此前 SSE 发起的运行 owner 恒空）。
+- **`RunHandle` 的读方法能说出"这一行是谁答的"**：载荷新增 `source`
+  （memory / runstore / deliveries / none），淘汰后的数据不会假装自己来自内存。
+
+判据：`tests/test_runstore_readside.py` 17 条（真流水线 + 真 HTTP + 两个 token）；
+五组窄变异各只红预期用例（列表不并投影 ⇒ 7 红、详情不读投影 ⇒ 2 红、
+`exists` 只看内存 ⇒ 1 红、同步 submit 丢 principal ⇒ 1 红、SSE 丢 owner ⇒ 1 红）。
+§5.4 的两 token 旧判据改为把真的 `PipelineOrchestrator.list_runs` 挂到替身上——
+原先替身直接返回"已过滤好的行"，过滤逻辑本身一次都没被执行过。
+
+边界（写清，别读成"全切完了"）：`/stream` 重放改读 `events` 拆到 Stage 2b
+（事件 → SSE 帧的映射要单独定契约）；Stage 1 之前的运行不 backfill，
+仍按原路径从 `deliveries` 读终态。
+
 ### Fixed（2026-10-21·续57，池满拒答的 503 送达 + 「池满」判据不再靠猜窗口）
 
 - **503 送不到客户端**：`_reject_saturated` 原来"写 503 就不读请求直接关"。close 时
