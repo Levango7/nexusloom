@@ -686,7 +686,8 @@ class PipelineOrchestrator:
             self._running_tasks[task.id] = task
 
         self.task_queue.submit(task.id, pipeline_name, input_file,
-                               (config or {}).get("pipeline", {}))
+                               (config or {}).get("pipeline", {}),
+                               principal=str(getattr(task, "owner", "") or ""))
 
         task.started_at = time.time()
 
@@ -1415,7 +1416,8 @@ class PipelineOrchestrator:
             self._running_tasks[task.id] = task
 
         self.task_queue.submit(task.id, plan.pipeline_name, input_file,
-                               plan.raw.get("pipeline", {}))
+                               plan.raw.get("pipeline", {}),
+                               principal=str(getattr(task, "owner", "") or ""))
         try:
             self.task_queue.claim_direct(task.id)  # 直跑也占住行，防被 worker 重排
         except Exception as e:  # noqa: BLE001
@@ -1531,7 +1533,8 @@ class PipelineOrchestrator:
         # 队列行与创建/启动事件：与同步版同一条登记（此前异步版什么都不写，
         # 于是 SSE 发起的运行在持久队列里查不到、事件面一条不发）
         self.task_queue.submit(task.id, plan.pipeline_name, input_file,
-                               plan.raw.get("pipeline", {}))
+                               plan.raw.get("pipeline", {}),
+                               principal=str(getattr(task, "owner", "") or ""))
         try:
             self.task_queue.claim_direct(task.id)  # 直跑也占住行，防被 worker 重排
         except Exception as e:  # noqa: BLE001
@@ -1834,6 +1837,61 @@ class PipelineOrchestrator:
         """
         from .run_handle import RunHandle
         return RunHandle(self, task_id)
+
+    def run_store(self):
+        """RunStore 读口（与写侧同一个实例；开关关掉/建不起来给 None）。"""
+        return self._runstore()
+
+    def list_runs(self, principal: str | None = None,
+                  limit: int = 100) -> list[dict]:
+        """运行列表：内存缓存 ∪ RunStore 投影，按开始时间倒序。
+
+        合并规则是"缓存补字段、投影保存在"：同一 run_id 以内存的为准（它比投影新
+        ——比如刚取消、终态还没落完的那一瞬），但**投影里有而内存淘汰了的运行照样
+        列出来**——这正是 Stage 2 要拆掉的旧前提（"内存里没有 = 不存在"）。
+
+        `principal=None` 给全量（admin 面）；给了就只留自己名下。空串归属的行
+        （无身份世界/历史遗留）对具名 principal 不可见，与 `/tasks` 既有口径一致。
+        """
+        rows: dict[str, dict] = {}
+        store = self._runstore()
+        if store is not None:
+            try:
+                for rec in store.list_runs(principal=principal, limit=max(limit, 100)):
+                    rows[rec["run_id"]] = {
+                        "id": rec["run_id"],
+                        "status": rec["status"],
+                        "pipeline": rec["workflow"],
+                        "principal": rec.get("principal") or "",
+                        "started_at": rec.get("started_at") or 0.0,
+                        "created_at": rec.get("started_at") or None,
+                        "finished_at": rec.get("finished_at") or None,
+                        "error": None,
+                        "progress": 0,
+                        "steps": 0,
+                        "source": "runstore",
+                    }
+            except Exception as e:  # noqa: BLE001 —— 投影读不动不该让列表接口整页 500
+                self._log("warning", "RunStore 列表读取失败", error=str(e))
+        for task in list(self._running_tasks.values()):
+            owner = str(getattr(task, "owner", "") or "")
+            if principal is not None and owner != principal:
+                continue
+            rows[task.id] = {
+                "id": task.id,
+                "status": task.status.value if hasattr(task.status, "value") else str(task.status),
+                "pipeline": task.pipeline_name,
+                "principal": owner,
+                "started_at": float(task.started_at or 0.0),
+                "created_at": getattr(task, "created_at", None) or task.started_at or None,
+                "finished_at": getattr(task, "finished_at", None) or None,
+                "error": getattr(task, "error", None) or None,
+                "progress": int(getattr(task, "progress", 0) or 0),
+                "steps": len(getattr(task, "steps", None) or []),
+                "source": "memory",
+            }
+        ordered = sorted(rows.values(), key=lambda r: r["started_at"] or 0.0, reverse=True)
+        return ordered[:int(limit)]
 
     def recover_tasks(self) -> list[dict]:
         """恢复中断的任务：重启时把 running 状态改回 pending。
