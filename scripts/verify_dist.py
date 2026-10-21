@@ -200,7 +200,7 @@ def check_dependency_closure() -> None:
         "difflib", "enum", "errno", "functools", "glob", "hashlib", "hmac", "html",
         "http", "importlib", "inspect", "io", "itertools", "json", "logging",
         "math", "mimetypes", "multiprocessing", "os", "pathlib", "pickle", "platform",
-        "pprint", "queue", "random", "re", "secrets", "shlex", "shutil", "signal",
+        "pprint", "queue", "random", "re", "select", "secrets", "shlex", "shutil", "signal",
         "socket", "sqlite3", "stat", "string", "subprocess", "sys", "tarfile",
         "tempfile", "textwrap", "threading", "time", "tokenize", "traceback", "types",
         "typing", "unicodedata", "unittest", "urllib", "uuid", "warnings",

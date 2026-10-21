@@ -946,12 +946,15 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**2854 个测试本机全绿**（`2854 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
-其中 2853 条是直接观测，第 2854 条就是读这一行的那条护栏——本轮全量唯一一条红正是本行还写着 2845
-（收集 2861，护栏按 `collected − declared ≤ 10` 判），改数后单跑该文件绿；
-口径条件：`Python 3.14.3`、机器相对静默时全量 797.73s，同机有并行会话时同一批要 2453s 且
-`tests/test_admin_concurrency.py::TestBoundedConcurrency` 那三条（靠 0.6s 窗口 + 真 socket 制造"池满"）
-会错位红——两轮红的不是同一条，单跑该文件 3 次各 14 passed，属时序窗口争用不是产品缺陷；
+**2857 个测试本机全绿**（`2857 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
+收集 2864，护栏按 `collected − declared ≤ 10` 判；本行原先写 2854 而那轮全量唯一一条红是
+依赖闭合护栏——`_reject_saturated` 新 import 的 stdlib `select` 没进 `verify_dist` 的标准库
+名单，补进名单后按最终头重跑取到上面这组数；
+口径条件：`Python 3.14.3`、机器相对静默时全量 777.50s，同机有并行会话时同一批要 2453s；
+`tests/test_admin_concurrency.py::TestBoundedConcurrency` 原先在满载轮里错位红，**这里旧写的
+"属时序窗口争用不是产品缺陷"是错的**——根因是池满拒答带着未读请求字节 close ⇒ 内核发 RST
+把 503 吞了（WinError 10053，缺陷原样时 20 轮红 9 轮），续57 已修并把等待条件换成
+`_server.inflight` 探针，最终头该全类 10 轮 0 红；
 本轮 `LOOM_TEST_PG_URL` 未设置 ⇒ 5 条真 Postgres 判据按 `requires_pg` 跳过；
 设了该变量的口径应比本行数多出那 5 条执行（2026-10-14 那次 2801 passed / 2 skipped 含真 PG）；
 工具层迁出 artesian 后 19 条 fast_json 用例随库走，等价判据在新库加强至 35 条；
