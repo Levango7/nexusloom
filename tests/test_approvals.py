@@ -491,12 +491,20 @@ class TestApprovalHTTP:
             return SimpleNamespace(
                 id=tid, owner=owner, pipeline_name="gate_demo",
                 status=SimpleNamespace(value="done"),
-                created_at=0, finished_at=0, error=None,
+                created_at=0, finished_at=0, started_at=0, error=None,
                 result={}, output_path="", progress=100, steps=[],
             )
 
         orch = MagicMock()
-        orch.list_tasks.return_value = [_task("t_a", "alice"), _task("t_b", "bob")]
+        # 作用域过滤已收进引擎的 list_runs（内存缓存 ∪ 投影）；替身若直接返回
+        # 过滤好的行，这条判据就没跑过被测逻辑——挂真实现，只伪造数据底座。
+        from types import MethodType
+
+        from loom_core.pipeline import PipelineOrchestrator
+        tasks = {"t_a": _task("t_a", "alice"), "t_b": _task("t_b", "bob")}
+        orch._running_tasks = dict(tasks)
+        orch._runstore = lambda: None
+        orch.list_runs = MethodType(PipelineOrchestrator.list_runs, orch)
         orch.registry.list.return_value = []
         base, api = _start(orch, _tokens_yaml(tmp_path))
         try:
