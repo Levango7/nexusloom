@@ -33,21 +33,21 @@ ANCHORS = [
     ("loom_core/dag_executor.py", 821, "def _merge_resumed_nodes"),
     ("loom_core/dag_executor.py", 952, "def _reuse_completed_node"),
     ("loom_core/streaming.py", 154, "_history"),
-    # pipeline.py 这一批随 Stage 0（异步并轨）整体下移：插入 4 行字段 + 61 行 helper，
-    # 中段又把 `_finalize_plan_task` 的内联收尾换成一次调用（净 −19 行），所以**偏移不是
-    # 常数**（+4 / +65 / +47 三种并存）。remap 靠整行文本对齐，不靠推算。
-    ("loom_core/pipeline.py", 301, "_max_task_history"),
-    ("loom_core/pipeline.py", 666, "def cancel"),
-    ("loom_core/pipeline.py", 679, "def resume"),
-    # 原 1290「不更新 task_queue」这句 docstring 已被 Stage 0 改掉——退役它，改钉新增的
+    # pipeline.py 这一批随 Stage 0（异步并轨）+ Stage 1（双写口）整体下移：Stage 0 插了
+    # 4 行字段 + 61 行 helper，Stage 1 又插 7 行 init + 108 行写口。**偏移不是常数**
+    # （+4 / +65 / +47 / +95 / +106 并存），所以 remap 只能按整行文本对齐，不能推算。
+    ("loom_core/pipeline.py", 308, "_max_task_history"),
+    ("loom_core/pipeline.py", 763, "def cancel"),
+    ("loom_core/pipeline.py", 776, "def resume"),
+    # 原 1290「不更新 task_queue」那句 docstring 已被 Stage 0 改掉——退役它，改钉新增的
     # 共用写口：§2 那条裂缝的"已并轨"结论必须指向一个真实存在的函数。
-    ("loom_core/pipeline.py", 499, "def _record_plan_terminal_state"),
-    ("loom_core/pipeline.py", 599, "pipeline.started"),
-    ("loom_core/pipeline.py", 946, "pipeline.finished"),
-    ("loom_core/pipeline.py", 1371, "pipeline.finished"),
-    ("loom_core/pipeline.py", 1599, "record"),
-    ("loom_core/pipeline.py", 1697, "pipeline.audit"),
-    ("loom_core/pipeline.py", 1809, ".done"),
+    ("loom_core/pipeline.py", 506, "def _record_plan_terminal_state"),
+    ("loom_core/pipeline.py", 696, "pipeline.started"),
+    ("loom_core/pipeline.py", 1043, "pipeline.finished"),
+    ("loom_core/pipeline.py", 1479, "pipeline.finished"),
+    ("loom_core/pipeline.py", 1712, "record"),
+    ("loom_core/pipeline.py", 1810, "pipeline.audit"),
+    ("loom_core/pipeline.py", 1922, ".done"),
     ("loom_core/admin_api.py", 604, "get_task"),
     ("loom_core/admin_api.py", 968, "list_tasks"),
     ("loom_core/admin_api.py", 983, "list_tasks"),

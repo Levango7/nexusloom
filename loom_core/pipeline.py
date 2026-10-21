@@ -296,6 +296,13 @@ class PipelineOrchestrator:
         from .approvals import ApprovalStore
         self.approvals = ApprovalStore()
 
+        # RunStore 双写口（Stage 1）：默认开，`LOOM_RUNSTORE=0` 退回 Stage 0 形状。
+        # 建口是惰性的，且失败只让本运行少一个观测面——新表不是运行前提。
+        # 属性名带下划线后缀区别（`_run_store`）：早先叫 `_runstore` 时它把同名方法
+        # 遮住了，实例属性优先于类方法 ⇒ 每次调用都是 `'NoneType' object is not callable`。
+        self._run_store: Any = None
+        self._run_store_failed = False
+
         # 性能统计
         self._execution_stats: list[dict] = []
         self._max_task_history: int = 100
@@ -516,6 +523,7 @@ class PipelineOrchestrator:
                              task_id=task.id, error=str(e))
 
         self._emit_plan_terminal(task, plan)
+        self._runstore_close(task, plan)
 
     def _emit_plan_terminal(self, task: PipelineTask, plan: ExecutionPlan) -> None:
         """声明式路径的终态事件——同步与异步收尾调同一个口，载荷逐字段一致。
@@ -534,6 +542,95 @@ class PipelineOrchestrator:
         if name == "task.failed":
             payload["error"] = task.error
         emit_event(name, payload)
+
+    # ─── RunStore 双写（Stage 1：事件 + 投影同事务，旧写面一律不动） ───
+
+    def _runstore(self):
+        """惰性拿双写口；关掉、建不起、或此前已失败都返回 None。
+
+        本方法**自己兜住一切异常**：调用点在 try 之外，如果它能抛，"新观测面写坏就
+        只降级不判红"这条承诺就成了空话（第一轮就撞在 `'NoneType' object is not callable`
+        上——属性遮蔽同名方法，8 条用例直接 ERROR、6 条 FAILED）。
+        每个降级出口都留一条 warning，不是沉默跳过：Stage 1 的门禁要能区分"没写"与"写错"。
+        """
+        try:
+            from . import run_store
+
+            if not run_store.enabled():
+                return None
+            if self._run_store_failed:
+                return None
+            if self._run_store is None:
+                self._run_store = run_store.RunStore()
+            return self._run_store
+        except Exception as e:  # noqa: BLE001
+            if not self._run_store_failed:
+                self._run_store_failed = True
+                self._log("warning", "RunStore 建口失败：本运行只写旧面", error=str(e))
+            return None
+
+    def _runstore_open(self, task: PipelineTask, plan: ExecutionPlan,
+                       input_file: str, trigger: str) -> None:
+        store = self._runstore()
+        if store is None:
+            return
+        try:
+            store.open_run(
+                task.id, workflow=plan.pipeline_name,
+                # principal 取引擎当前知道的归属：SSE 与直跑今天传不出 owner，
+                # 于是这里就是空串——列先有，身份由调用方补（设计 §2 末记的账）。
+                principal=str(getattr(task, "owner", "") or ""),
+                trigger=trigger,
+                inputs={"input_file": input_file, "plan_id": plan.plan_id},
+                started_at=task.started_at or None)
+        except Exception as e:  # noqa: BLE001
+            self._log("warning", "RunStore open 失败", task_id=task.id, error=str(e))
+
+    def _runstore_nodes(self, task: PipelineTask, level: list) -> None:
+        """层跑完就落该层节点的投影。
+
+        读的是**当时**的 `dag_node`，不借 `_build_delivery_record` 的形状——那样
+        Stage 1 的 parity 门禁就变成"拿一份抄来的数据跟自己比"，射程为零。
+        """
+        store = self._runstore()
+        if store is None:
+            return
+        rows: list[dict] = []
+        for node in level:
+            dag = task.dag_nodes.get(node.agent_name)
+            if dag is None:
+                continue
+            result = dag.result or {}
+            rows.append({
+                "node": dag.name, "status": str(dag.status or ""),
+                "attempts": int(dag.attempts or 1),
+                "started_at": float(dag.started_at or 0.0),
+                "finished_at": float(dag.finished_at or 0.0),
+                "error": dag.error or "",
+                # 只存摘要，不存正文：整篇文档进 result_json 是 §5 警告的写放大
+                "result": {"keys": sorted(str(k) for k in result),
+                           "chars": {str(k): len(str(v)) for k, v in result.items()}},
+                "artifact_keys": sorted(str(k) for k in result)})
+        try:
+            store.record_nodes(task.id, rows)
+        except Exception as e:  # noqa: BLE001
+            self._log("warning", "RunStore 节点投影失败",
+                      task_id=task.id, nodes=[r["node"] for r in rows], error=str(e))
+
+    def _runstore_close(self, task: PipelineTask, plan: ExecutionPlan) -> None:
+        store = self._runstore()
+        if store is None:
+            return
+        status = task.status.value if hasattr(task.status, "value") else str(task.status)
+        keys: set[str] = set()
+        for dag in task.dag_nodes.values():
+            keys.update(str(k) for k in (dag.result or {}))
+        try:
+            store.close_run(task.id, status,
+                            finished_at=task.finished_at or None,
+                            error=task.error or "", artifacts=sorted(keys))
+        except Exception as e:  # noqa: BLE001
+            self._log("warning", "RunStore 终态投影失败", task_id=task.id, error=str(e))
 
     def _finalize_task_queue(self, task: PipelineTask, config: dict) -> None:
         """任务终态同步任务队列 + 清理临时文件 + 断点保留/删除。"""
@@ -1075,6 +1172,10 @@ class PipelineOrchestrator:
                 continue
             pending.append(node.agent_name)
             messages[node.agent_name] = str((node.approval or {}).get("message", ""))
+        # 闸门节点从"挂起"那一刻起就是运行事实的一部分。只在放行后的层尾登记的话，
+        # 停在闸门上就被取消的运行会留下"账本有这一行、投影没有"的缺行
+        # ——Stage 1 的三方对账门禁实测抓到过一次（run_nodes=['tldr'] vs 账本 ['release_gate','tldr']）。
+        self._runstore_nodes(task, gates)
         if pending:
             decision = self._consume_open_decision(task, pending)
             if decision is not None:
@@ -1183,13 +1284,17 @@ class PipelineOrchestrator:
 
             # 闸门放行后结算（标记闸门节点），并把闸门从待执行集合里滤掉。
             # 计数仍按本层**原始**节点数推进（闸门也是节点，放行即算完成）。
+            # `level_all` 同样按原始集合留档：RunStore 的节点投影必须覆盖闸门，
+            # 否则"整层都是闸门"那一层一个节点都不会落，三方对账必然缺行。
             level_total = len(level)
+            level_all = list(level)
             level = self._settle_approval_gate(task, plan, level)
             if not level:
                 # 整层都是闸门（已放行）：本层无事可执行，直接推进
                 completed += level_total
                 task.current_step = completed
                 task.progress = int((completed / total_nodes) * 100)
+                self._runstore_nodes(task, level_all)
                 self._save_checkpoint(task, full_state=True)
                 continue
 
@@ -1217,6 +1322,7 @@ class PipelineOrchestrator:
             task.current_step = completed
             task.progress = int((completed / total_nodes) * 100)
             self._merge_pooled_results(task)
+            self._runstore_nodes(task, level_all)
             self._save_checkpoint(task, full_state=True)
 
             if task.status == TaskStatus.FAILED:
@@ -1317,6 +1423,8 @@ class PipelineOrchestrator:
 
         task.started_at = time.time()
         total_nodes = plan.node_count
+        self._runstore_open(task, plan, input_file,
+                            trigger="resume" if resume else "direct")
 
         emit_event("task.created", {"task_id": task.id, "pipeline": plan.pipeline_name,
                      "input_file": input_file, "plan_id": plan.plan_id, "total_nodes": total_nodes})
@@ -1431,6 +1539,8 @@ class PipelineOrchestrator:
 
         task.started_at = time.time()
         total_nodes = plan.node_count
+        self._runstore_open(task, plan, input_file,
+                            trigger="stream-resume" if resume else "stream")
 
         emit_event("task.created", {"task_id": task.id, "pipeline": plan.pipeline_name,
                      "input_file": input_file, "plan_id": plan.plan_id, "total_nodes": total_nodes})
@@ -1477,11 +1587,13 @@ class PipelineOrchestrator:
 
                 # 闸门放行后结算（计数按本层原始节点数推进）
                 level_total = len(level)
+                level_all = list(level)
                 level = self._settle_approval_gate(task, plan, level)
                 if not level:
                     completed += level_total
                     task.current_step = completed
                     task.progress = int((completed / total_nodes) * 100)
+                    self._runstore_nodes(task, level_all)
                     self._save_checkpoint(task, full_state=True)
                     continue
 
@@ -1505,6 +1617,7 @@ class PipelineOrchestrator:
 
                 # 池化节点结果合并（与 run_plan 共用同一实现）
                 self._merge_pooled_results(task)
+                self._runstore_nodes(task, level_all)
 
                 self._save_checkpoint(task, full_state=True)
 

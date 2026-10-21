@@ -946,10 +946,10 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**2845 个测试本机全绿**（`2845 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
-其中 2844 条是直接观测，第 2845 条就是读这一行的那条护栏——本轮全量唯一一条红正是本行还写着 2839
-（收集 2852，护栏按 `collected − declared ≤ 10` 判），改数后单跑该用例绿；
-口径条件：`Python 3.14.3`、机器相对静默时全量 873s，同机有并行会话时同一批要 2453s 且
+**2854 个测试本机全绿**（`2854 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
+其中 2853 条是直接观测，第 2854 条就是读这一行的那条护栏——本轮全量唯一一条红正是本行还写着 2845
+（收集 2861，护栏按 `collected − declared ≤ 10` 判），改数后单跑该文件绿；
+口径条件：`Python 3.14.3`、机器相对静默时全量 797.73s，同机有并行会话时同一批要 2453s 且
 `tests/test_admin_concurrency.py::TestBoundedConcurrency` 那三条（靠 0.6s 窗口 + 真 socket 制造"池满"）
 会错位红——两轮红的不是同一条，单跑该文件 3 次各 14 passed，属时序窗口争用不是产品缺陷；
 本轮 `LOOM_TEST_PG_URL` 未设置 ⇒ 5 条真 Postgres 判据按 `requires_pg` 跳过；

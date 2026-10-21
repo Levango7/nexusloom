@@ -31,7 +31,7 @@
 > `pipeline.py:1290`：「async 任务收尾：与 `_finalize_plan_task` 的差异是不更新 task_queue、不发事件钩子」
 >
 > ——这句 docstring 已被 Stage 0 改掉。并轨后的形状是同步与异步收尾共用同一个写口
-> `pipeline.py:499 _record_plan_terminal_state`（队列 `finish` + 终态事件一次做完），锚点表已从"钉那句裂缝"
+> `pipeline.py:506 _record_plan_terminal_state`（队列 `finish` + 终态事件一次做完），锚点表已从"钉那句裂缝"
 > 改成"钉这个共用写口"——**"裂缝已补"这件事本身也要可核对**。
 
 后果实测口径：**从控制台流式发起的 run，在持久队列里没有行、在事件面里一条都不发**，只留下 checkpoint、deliveries 与总线消息。这解释了此前一类反复出现的现象——"UI 上看得见的运行，接口查不到"。
@@ -42,7 +42,7 @@
 
 **Stage 0 实际交付的判据范围（对着上文那句"三者逐字段相等"要打的折扣）**：`tests/test_async_run_parity.py` 钉住的是**事件序列 + 队列行形状 + 暂停边界检查点形状**三项，`账本行（deliveries）比对挪到 Stage 1` —— 一则这批用例的流水线没声明 sink，两侧都没有 `deliveries` 行可比（比"都为空"是零射程断言）；二则 §4 给 Stage 1 定的门禁本来就是"每 run 跑完自动比对 `runs`/`run_nodes` 与 `task_queue`/`deliveries`/内存三方"，账本比对照那道门禁做才有承载体。
 
-**Stage 0 期间查实、但不属于并轨的一条写侧缺口**：`task_queue.submit` 的三个调用点（`pipeline.py:591/1311/1425`）**都没传 `principal`**，`admin_api` 里只有 `:1393` 一处传 `owner`，SSE 的 `:2113` 不传 ⇒ 队列行与内存任务的归属全是空串，`/tasks` 与 `/api/dashboard` 对具名 token 按"owner 空串不展示"处理（`admin_api.py:986` 的注释自己写了这条口径）。这不是异步并轨引入的（同步直跑同样为空），但 **§3.1 的 `runs.principal` 列不能假设上游已经填过**——列是先有的，身份是还没有的；Stage 1 要么让 `RunRecorder` 从调用方接住 Principal，要么就如实承认新表也是无主行。
+**Stage 0 期间查实、但不属于并轨的一条写侧缺口**：`task_queue.submit` 的三个调用点（`pipeline.py` 里 legacy / `run_plan` / `run_plan_async` 各一处——**这里刻意写符号不写行号**：行号会随每次引擎改动漂移，而"当前状态"类断言该按符号可核对，行号只留给 §1 那张"当时原状"基线表）**都没传 `principal`**，`admin_api` 里只有 `:1393` 一处传 `owner`，SSE 的 `:2113` 不传 ⇒ 队列行与内存任务的归属全是空串，`/tasks` 与 `/api/dashboard` 对具名 token 按"owner 空串不展示"处理（`admin_api.py:986` 的注释自己写了这条口径）。这不是异步并轨引入的（同步直跑同样为空），但 **§3.1 的 `runs.principal` 列不能假设上游已经填过**——列是先有的，身份是还没有的；Stage 1 要么让 `RunRecorder` 从调用方接住 Principal，要么就如实承认新表也是无主行。〔**Stage 1 落地时选了后者并写明**：`open_run` 如实带上引擎此刻知道的归属（`task.owner`，今天多为空串），身份贯穿属 Stage 2 读侧切换的活，不在双写这批偷偷改调用方语义。〕
 
 ## 3. 设计核心：一个写入口，事件与投影同事务
 
@@ -82,7 +82,7 @@
 | Stage | 交付 | 旧写入点处置 | 退出判据 |
 |---|---|---|---|
 | 0 | 两条引擎并轨（§2）**已交付** | 终态事件去重 | 同/异步 parity 断言逐字段相等（**实交付=事件序列+队列行+检查点形状；账本行比对挪 Stage 1**，见 §2 末）；parity 变异可红（最终头实测：还原 `pipeline.py` ⇒ 4 条全红，只摘"已发过"闸门 ⇒ 恰好 2 红 2 绿，红的是两条取消判据） |
-| 1 | `RunRecorder` + 4 表 + **双写** | 不删任何旧写 | parity 门禁：每 run 跑完自动比对 `runs`/`run_nodes` 与 `task_queue`/`deliveries`/内存三方，不一致**当场红**（默认开，CI 全量里跑） |
+| 1 | `RunStore`（落地时的类名，本文原写作 `RunRecorder`）+ 4 表 + **双写** 已交付 | 不删任何旧写；写口全部 fail-soft | 三方对账：`runs`/`run_nodes` vs `task_queue`/`deliveries`/内存，不一致当场红（`tests/test_runstore_parity.py` 8 条，随 CI 全量跑）。**两处与本文原设想不同，照实记**：① 门禁是**显式用例**覆盖两引擎 × done/cancelled，不是"每条用例跑完自动后置检查"——后者现在挂上去只会把每个既有用例都拖一遍库盘，等 Stage 2 读侧切完再谈；② `runs.cost_usd`/`quality_score` **本批不填**（来源未定，不拿猜测当事实），`principal` 沿用调用方归属（今天 SSE/直跑都传不出 owner ⇒ 列有、值多空串，见 §2 末） |
 | 2 | 读侧切换：`/tasks`、`/tasks/<id>`、`/api/dashboard`、`/api/cost` 作用域、MCP `list_tasks`/`get_task`、`_scoped_task` 存在性、SSE 重放改读 `events` | 内存退化为缓存（仅加速，不再作为存在性判据） | 双 token 真 HTTP：淘汰 100 条后仍查得到、越权仍 404 不泄露存在性；`/stream` 断线重连跨进程可重放 |
 | 3 | 摘写：`approvals` 行改为 `events` 的投影或保留但不再被 `open_decision` 单点依赖；`task_queue` 只保留"租约/抢占"职责 | **删除** Stage 1 的双写中已无读者的一侧 | 每个源有且只有一个写入者；`RunHandle` 五原语全部只读 RunStore |
 
