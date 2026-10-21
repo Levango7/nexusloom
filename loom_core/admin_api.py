@@ -645,10 +645,11 @@ class AdminHandler(BaseHTTPRequestHandler):
         return self.principal or LOCAL_PRINCIPAL
 
     def _scoped_task(self, task_id: str):
-        """按作用域取任务；不可见（不存在或属他人）返回 None。
+        """按作用域取**内存里**的任务；不可见（不存在或属他人）返回 None。
 
         **越权统一 404 而不是 403**：403 会泄露"这个任务存在、只是不给你"——
         跨租户场景里存在性本身就是信息。非 admin 且 owner 不匹配 → 视同不存在。
+        内存只是缓存：要判"这次运行是否存在"请用 `_scoped_run`（投影层）。
         """
         task = self.orch.get_task(task_id) if self.orch else None
         if task is None:
@@ -659,6 +660,26 @@ class AdminHandler(BaseHTTPRequestHandler):
         if str(getattr(task, "owner", "") or "") == p.id:
             return task
         return None
+
+    def _scoped_run(self, task_id: str) -> dict | None:
+        """按作用域取 RunStore 投影；不可见（不存在或属他人）返回 None。
+
+        与 `_scoped_task` 同一条口径：非 admin 且 principal 不匹配 ⇒ 视同不存在。
+        空串归属的行（无身份世界/历史遗留）只对 admin 可见——与 `/tasks` 的过滤
+        规则一致，否则"具名 token 看不到空串任务"会在列表与详情之间自相矛盾。
+        """
+        if not self.orch:
+            return None
+        try:
+            rec = self.orch.run_handle(task_id).record()
+        except Exception:  # noqa: BLE001 —— 投影读不动按不存在处理，不打 500
+            return None
+        if not isinstance(rec, dict):
+            return None
+        p = self._principal()
+        if p.admin:
+            return rec
+        return rec if str(rec.get("principal") or "") == p.id else None
 
     def _require_admin(self) -> bool:
         """运维级只读面（日志/质量/告警）只对 admin 开放：跨租户聚合会泄露任务内容。"""
@@ -1029,23 +1050,20 @@ class AdminHandler(BaseHTTPRequestHandler):
     def _handle_list_tasks(self):
         if not self.orch:
             return self._json({"error": "orchestrator not set"}, 500)
-        tasks = self.orch.list_tasks()
         p = self._principal()
-        if not p.admin:
-            # 作用域：非 admin 只见自己名下的任务（owner 空串的任务——无身份
-            # 世界/历史遗留——同样不展示给具名 Principal）
-            tasks = [t for t in tasks
-                     if str(getattr(t, "owner", "") or "") == p.id]
+        # 内存缓存 ∪ RunStore 投影：被 _trim_task_history 淘汰的运行照样列出来。
+        # 作用域在 list_runs 里按 principal 过滤（空串归属对具名 token 不可见）。
+        runs = self.orch.list_runs(principal=None if p.admin else p.id)
         tasks_data = [
             {
-                "id": t.id,
-                "status": t.status.value if hasattr(t.status, "value") else str(t.status),
-                "pipeline": t.pipeline_name,
-                "created_at": getattr(t, "created_at", None),
-                "finished_at": getattr(t, "finished_at", None),
-                "error": getattr(t, "error", None),
+                "id": r["id"],
+                "status": r["status"],
+                "pipeline": r["pipeline"],
+                "created_at": r.get("created_at"),
+                "finished_at": r.get("finished_at"),
+                "error": r.get("error"),
             }
-            for t in tasks
+            for r in runs
         ]
         self._json({"tasks": tasks_data, "count": len(tasks_data)})
 
@@ -1054,7 +1072,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             return self._json({"error": "orchestrator not set"}, 500)
         task = self._scoped_task(task_id)
         if not task:
-            return self._json({"error": "task not found"}, 404)
+            # 内存只是缓存：淘汰后仍从 RunStore 投影答（越权同样 404）
+            return self._get_task_from_projection(task_id)
         result = dict(getattr(task, "result", {}))
         # 交付物由声明 WRITES_OUTPUT 的节点挂在任务上，接口层不再猜节点名
         output_path_found, output_content = task_output(task)
@@ -1082,6 +1101,58 @@ class AdminHandler(BaseHTTPRequestHandler):
             # 产物清单（RunHandle.artifacts）：作用域已在上一步 _scoped_task 判过 404，
             # 这里读的是同一个已授权任务对象
             "artifacts": self.orch.run_handle(task_id).artifacts(),
+        })
+
+    def _get_task_from_projection(self, task_id: str):
+        """内存里没有（被淘汰 / 别的进程跑完）时，从 RunStore 投影给出可读事实。
+
+        能给的：状态 / 流水线 / 起止时间 / 错误 / 产物清单 / 逐节点摘要（status、
+        attempts、duration、artifact_keys）。**给不出的**：节点 result 正文本、
+        output_content、审批等待态、checkpoint 视图——这些从不落进投影（Stage 1
+        只存摘要），所以对应键要么不出现、要么显式给 None，不编空值冒充"没有内容"。
+        """
+        run = self._scoped_run(task_id)
+        if run is None:
+            return self._json({"error": "task not found"}, 404)
+        handle = self.orch.run_handle(task_id)
+        nodes = handle.nodes()
+
+        def _duration_ms(n: dict) -> float | None:
+            n_started = float(n.get("started_at") or 0.0)
+            n_finished = float(n.get("finished_at") or 0.0)
+            return round((n_finished - n_started) * 1000, 1) if n_finished > n_started else None
+
+        self._json({
+            "id": run.get("run_id"),
+            "status": run.get("status"),
+            "pipeline": run.get("workflow") or "",
+            "created_at": run.get("started_at") or None,
+            "finished_at": run.get("finished_at") or None,
+            "error": run.get("error") or None,
+            "artifacts": handle.artifacts(),
+            # 前端 S2 屏只依赖 nodes/layers/checkpoint 三个键；投影没有拓扑层级，
+            # 逐节点一层是既有 _task_dag_view 在缺 layers 时的同一降级形态。
+            "dag": {
+                "nodes": [
+                    {
+                        "name": n.get("node"),
+                        "agent": n.get("node"),
+                        "status": n.get("status") or "",
+                        "retried": int(n.get("attempts") or 0) > 1
+                                   and str(n.get("status")) == "success",
+                        "attempts": int(n.get("attempts") or 1),
+                        "duration_ms": _duration_ms(n),
+                        "skip_reason": "",
+                        "error": n.get("error") or "",
+                        "dependencies": [],
+                        "artifact_keys": list(n.get("artifact_keys") or []),
+                    }
+                    for n in nodes
+                ],
+                "layers": [[n.get("node")] for n in nodes],
+                "checkpoint": None,
+            },
+            "source": "runstore",
         })
 
     def _task_dag_view(self, task) -> dict:
@@ -1583,25 +1654,22 @@ class AdminHandler(BaseHTTPRequestHandler):
         if not self.orch:
             return self._json({"error": "orchestrator not set"}, 500)
         orch = self.orch
-        tasks = orch.list_tasks()
-        # 非 admin 只看自己的任务（2026-10-20：此前这里不隔离，普通 token
-        # 能看到全仓任务列表——与 /tasks 的作用域口径自相矛盾）
+        # 与 /tasks 共用同一条读口径（内存缓存 ∪ 投影）；作用域在 list_runs 里过滤。
+        # 2026-10-20 之前这里不隔离，普通 token 能看到全仓任务列表。
         p = self._principal()
-        if not p.admin:
-            tasks = [t for t in tasks
-                     if str(getattr(t, "owner", "") or "") == p.id]
+        runs = orch.list_runs(principal=None if p.admin else p.id)
         tasks_data = [
             {
-                "id": t.id,
-                "status": t.status.value if hasattr(t.status, "value") else str(t.status),
-                "pipeline": t.pipeline_name,
-                "progress": getattr(t, "progress", 0),
-                "steps": len(getattr(t, "steps", [])),
-                "created_at": getattr(t, "created_at", None),
-                "finished_at": getattr(t, "finished_at", None),
-                "error": getattr(t, "error", None),
+                "id": r["id"],
+                "status": r["status"],
+                "pipeline": r["pipeline"],
+                "progress": r.get("progress", 0),
+                "steps": r.get("steps", 0),
+                "created_at": r.get("created_at"),
+                "finished_at": r.get("finished_at"),
+                "error": r.get("error"),
             }
-            for t in tasks
+            for r in runs
         ]
         agents_list = orch.registry.list()
         agents = []
@@ -1896,8 +1964,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             p = self._principal()
             if p.admin or not self.orch:
                 return self._json(tracker.summary())
-            own_ids = {t.id for t in self.orch.list_tasks()
-                       if str(getattr(t, "owner", "") or "") == p.id}
+            # 作用域集合同样不能只取内存：淘汰/别的进程跑完的运行也属于这个
+            # principal 的成本归因（这是设计 §1 点名"随淘汰丢"的那条）
+            own_ids = {r["id"] for r in self.orch.list_runs(principal=p.id, limit=1000)}
             self._json(tracker.summary(task_ids=own_ids))
         except Exception as e:
             self._json({"error": str(e)}, 500)
@@ -2140,7 +2209,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         return None
 
     def _start_stream_worker(self, writer_agent, task_id: str,
-                             input_file: Path, callback) -> threading.Thread:
+                             input_file: Path, callback,
+                             owner: str = "") -> threading.Thread:
         """后台线程执行完整流水线（fetcher/researcher/writer 走 run_plan_async 真异步，
         替代旧的 writer_agent.handle_streaming 单 Agent 方式），完成后回调 complete/error"""
         orch = self.orch
@@ -2160,7 +2230,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 # 按 task_id 注册回调，writer 的 _restructure_document 会按 task_id 拾取
                 writer_agent._register_stream_callback(task_id, callback)
                 task = _aio.run(orch.run_plan_async(
-                    plan, input_file=str(input_file), task_id=task_id
+                    plan, input_file=str(input_file), task_id=task_id, owner=owner
                 ))
                 # 流水线完成后发送 complete 事件
                 content = str(getattr(task, "output_content", "") or "") if task else ""
@@ -2282,7 +2352,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                 f"# {title}\n\n## 查询\n\n{query}\n", encoding="utf-8")
 
             worker = self._start_stream_worker(
-                writer_agent, task_id, input_file, callback)
+                writer_agent, task_id, input_file, callback,
+                owner=self._principal().id)
 
             # 流式推送事件（心跳 + 断管止损），直到 complete/error
             self._pump_sse(callback, task_id)
