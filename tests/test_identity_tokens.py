@@ -15,7 +15,7 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -151,13 +151,28 @@ tokens:
     return f
 
 
-def _task(task_id, owner):
+def _task(task_id, owner, status="done"):
     return SimpleNamespace(
         id=task_id, owner=owner, pipeline_name="docgen",
-        status=SimpleNamespace(value="done"),
-        created_at=0, finished_at=0, error=None,
+        status=SimpleNamespace(value=status),
+        created_at=0, finished_at=0, started_at=0, error=None,
         result={}, output_path="", output_content="",
+        progress=0, steps=[],
     )
+
+
+def _with_real_listing(orch, tasks):
+    """把真正的 `PipelineOrchestrator.list_runs` 挂到替身上。
+
+    Stage 2 把"内存缓存 ∪ RunStore 投影"和 principal 过滤收进了引擎的列表读口。
+    替身若直接返回"已经过滤好的行"，这层过滤就一次都没被执行——§5.4 的
+    「两个 token 互不可见」会退化成自己证明自己。
+    """
+    from loom_core.pipeline import PipelineOrchestrator
+    orch._running_tasks = dict(tasks)
+    orch._runstore = lambda: None
+    orch.list_runs = MethodType(PipelineOrchestrator.list_runs, orch)
+    return orch
 
 
 class TestAuthMatrixHTTP:
@@ -210,7 +225,7 @@ class TestTaskScopeHTTP:
         bob_task = _task("t-bob", "bob")
         tasks = {"t-alice": alice_task, "t-bob": bob_task}
         orch.get_task.side_effect = lambda tid: tasks.get(tid)
-        orch.list_tasks.return_value = [alice_task, bob_task]
+        _with_real_listing(orch, tasks)
         orch.cancel.return_value = True
         orch.pause.return_value = True
         base, api = _start(tokens_file=str(_tokens_yaml(tmp_path)), orch=orch)
@@ -269,10 +284,10 @@ class TestCostScopeHTTP:
 
         orch = MagicMock()
         alice_task = _task("t-cost-alice", "alice")
-        # as_list 只给 alice 可见的（引擎层 list_tasks 全量、作用域在接口层——
-        # 这里给全量，验证接口层自己的过滤）
+        # 引擎层给全量、作用域过滤在 list_runs 里——这里挂真实现，验证过滤本身
         bob_task = _task("t-cost-bob", "bob")
-        orch.list_tasks.return_value = [alice_task, bob_task]
+        _with_real_listing(orch, {"t-cost-alice": alice_task,
+                                  "t-cost-bob": bob_task})
         base, api = _start(tokens_file=str(_tokens_yaml(tmp_path)), orch=orch)
         try:
             code, body = _req("GET", f"{base}/api/cost", token=TOK_A)

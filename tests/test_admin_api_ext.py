@@ -433,14 +433,16 @@ class TestBasicHandlers:
         handler._text.assert_called_once()
 
     def test_handle_list_tasks(self, handler):
-        t = MagicMock()
-        t.id = "t1"
-        t.status.value = "done"
-        t.pipeline_name = "docgen"
-        handler.orch.list_tasks.return_value = [t]
+        # Stage 2 起 /tasks 读的是引擎列表读口（内存缓存 ∪ RunStore 投影），
+        # 行是 dict 而不是 PipelineTask——这里判 handler 把行映射成既有载荷形状。
+        handler.orch.list_runs.return_value = [{
+            "id": "t1", "status": "done", "pipeline": "docgen",
+            "created_at": 0, "finished_at": 0, "error": None,
+        }]
         handler._handle_list_tasks()
         data = handler._json.call_args[0][0]
         assert data["count"] == 1 and data["tasks"][0]["id"] == "t1"
+        assert data["tasks"][0]["pipeline"] == "docgen"
 
     def test_handle_get_task_with_output_file(self, handler, tmp_path):
         out_file = tmp_path / "doc.md"
@@ -503,13 +505,11 @@ class TestBasicHandlers:
 
 class TestDashboardAndPipeline:
     def test_handle_dashboard(self, handler):
-        t = MagicMock()
-        t.id = "t1"
-        t.status.value = "running"
-        t.pipeline_name = "docgen"
-        t.progress = 50
-        t.steps = [1, 2]
-        handler.orch.list_tasks.return_value = [t]
+        handler.orch.list_runs.return_value = [{
+            "id": "t1", "status": "running", "pipeline": "docgen",
+            "progress": 50, "steps": 2, "created_at": 0, "finished_at": None,
+            "error": None,
+        }]
         handler.orch.registry.list.return_value = [
             {"name": "writer", "version": "2.0", "status": "idle"}]
         handler._handle_dashboard()
