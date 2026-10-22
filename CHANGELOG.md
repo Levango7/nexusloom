@@ -56,9 +56,9 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
   `http.client`/`urllib` 这类等 EOF 的客户端只能超时。改发 `Connection: close` 并在
   `end_headers()` 后重新置位。
 
-判据 `tests/test_sse_replay.py` 10 条（真 HTTP + 真 RunStore，不跑流水线）：整段重放、
+判据 `tests/test_sse_replay.py` 11 条（真 HTTP + 真 RunStore，不跑流水线）：整段重放、
 从 `r<seq>` 续传、进度帧由节点投影合成、失败运行以 error 帧收尾、**带 query 的重连
-不产生第二条运行**、运行中尾随到终态、跨租户 404 与不存在同形、admin 可重放。
+不产生第二条运行**、运行中尾随到终态、**另一个真进程写的运行照样重放**、跨租户 404 与不存在同形、admin 可重放。
 三组变异：忽略游标 ⇒ 只红续传那条；摘掉作用域检查 ⇒ 只红跨租户那条；
 把连接收尾还原成旧写法 ⇒ 等 EOF 的客户端超时（整段重放那条红）。
 

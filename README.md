@@ -955,8 +955,8 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**2885 个测试本机全绿**（`2885 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
-收集 2892，护栏按 `collected − declared ≤ 10` 判；本行原先写 2875，Stage 2b 那批 +10 条
+**2886 个测试本机全绿**（`2886 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
+收集 2893，护栏按 `collected − declared ≤ 10` 判；本行原先写 2875，Stage 2b 那批 +11 条
 SSE 重放判据（`tests/test_sse_replay.py`），按最终头重跑取到上面这组数；
 更早一批（Stage 2）里全量曾抓到一条真回归——`RunHandle.exists()` 把替身自动生成的
 `task_queue.get()` 当成"队列里有这行"，一个不存在的 id 会一路走到拼载荷、序列化时炸成

@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -289,3 +292,31 @@ class TestTenantScope:
         port, _api, _orch = served
         frames = _read_frames(port, "/stream?task_id=sse-alice", token=TOK_OPS)
         assert any(p["type"] == "run_event" for _f, p in frames), frames
+
+
+class TestCrossProcess:
+    def test_events_written_by_another_process_are_replayable(self, tmp_path, monkeypatch):
+        """真正跨进程：写事件的是另一个 Python 进程，本进程的编排器从没见过这条运行。"""
+        state = _state_dir(monkeypatch, tmp_path)
+        script = chr(10).join([
+            "from loom_core.run_store import RunStore",
+            "s = RunStore()",
+            "s.open_run('sse-xproc', workflow='rs_read_plain', principal='alice')",
+            "s.record_node('sse-xproc', 'tldr', 'success', artifact_keys=['k'])",
+            "s.close_run('sse-xproc', 'done')",
+        ])
+        subprocess.run([sys.executable, "-c", script], check=True, cwd=str(PROJECT),
+                       env={**os.environ, "LOOM_STATE_DIR": str(state)}, timeout=180)
+        orch = _orch(tmp_path)
+        port, api = _start(orch, tmp_path)
+        try:
+            assert orch.get_task("sse-xproc") is None, "本进程不该有这条运行的内存态"
+            frames = _read_frames(port, "/stream?task_id=sse-xproc")
+            run_events = [p for _f, p in frames if p["type"] == "run_event"]
+            assert [e["data"]["event"] for e in run_events] == [
+                "run.opened", "run.started", "node.finished", "run.completed"], run_events
+            assert frames[-1][1]["type"] == "complete", frames[-1]
+        finally:
+            api.stop()
+            orch.shutdown()
+            _reset_handler()
