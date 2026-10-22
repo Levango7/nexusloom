@@ -963,7 +963,7 @@ python -m pytest tests/ -v
 更早一批（Stage 2）里全量曾抓到一条真回归——`RunHandle.exists()` 把替身自动生成的
 `task_queue.get()` 当成"队列里有这行"，一个不存在的 id 会一路走到拼载荷、序列化时炸成
 JSON-RPC internal error，已收紧成 `isinstance(row, dict)`；
-口径条件：`Python 3.14.3`、**同机有并行会话**（本轮全量 2576.84s ≈ 43 分钟；静默基线
+口径条件：`Python 3.14.3`、**同机有并行会话**（本轮全量 1226.74s ≈ 20.5 分钟；静默基线
 753.83s ≈ 12.5 分钟）。负载轮里先后暴露过两条时序判据：`test_runstore_parity` 的
 "账本行还没落地就断言"（已改成有界等待，见续58）、`test_p2_infra_fixes` 的队列排空竞态
 （与本批无因果，单跑 3 次各绿，另立待办）；两处处理完后本轮 2875 条全绿；
