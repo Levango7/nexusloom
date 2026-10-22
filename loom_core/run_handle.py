@@ -50,7 +50,7 @@ class RunHandle:
     # ─── RunStore 投影（Stage 2：内存只是缓存） ─────────
 
     def _store(self):
-        """RunStore 读口；`LOOM_RUNSTORE=0`、建不起来或读故障都给 None。
+        """RunStore 读口；建不起来或读故障都给 None（没有开关，失败由健康检查报）。
 
         走 `orch.run_store()` 而不是自己 new：写侧那个实例已经建好，读侧另建一份
         会把"双写"变成"双读各连一个库文件"。

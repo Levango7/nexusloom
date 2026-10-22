@@ -65,6 +65,20 @@ class TestCalcCost:
 
 
 class TestCostTracker:
+    def test_survives_db_file_removed_after_init(self, tmp_path):
+        """库文件在 init 之后被删（state 目录迁移/清理）时，下次写要能自愈。
+
+        `_init_db` 只在构造时建表；同进程内文件被换掉后，每个操作都会撞
+        `no such table: cost_log`。2026-10-21 在测试隔离场景里实测到这条，
+        生产侧的同类场景是"服务在跑、状态目录被清"。
+        """
+        db = tmp_path / "wiped.db"
+        tracker = CostTracker(db_path=str(db))
+        tracker.record("cloudflare", 10, 5, cost=0.01)
+        db.unlink()
+        tracker.record("cloudflare", 10, 5, cost=0.02)
+        assert tracker.total_cost() == pytest.approx(0.02)
+
     def test_record_and_total(self, tracker):
         tracker.record("cloudflare", 500, 200, cost=0.01)
         tracker.record("glm", 300, 100, cost=0.005)

@@ -250,26 +250,47 @@ class TestThreeWayReconcile:
             orch.shutdown()
 
 
-class TestSwitchAndInvariants:
-    def test_switch_off_writes_nothing_new_but_leaves_old_surfaces_intact(
+class TestStoreUnavailable:
+    def test_store_unavailable_keeps_old_surfaces_and_is_loud(
             self, monkeypatch, tmp_path):
-        """`LOOM_RUNSTORE=0` 是 §5 要求的退路：关掉后旧三面照旧，新表一行没有。"""
+        """没有开关了：Store 建不起来时旧三面照旧，**且失败必须报出来**（不静默）。
+
+        注入"建口就抛"的替身（而不是环境变量）：开关删掉之后，能造出这条降级路径的
+        只剩真实的故障，判据也要按故障来造，否则测的是已经不存在的东西。
+        """
         _state_dir(monkeypatch, tmp_path)
-        monkeypatch.setenv("LOOM_RUNSTORE", "0")
-        assert run_store.enabled() is False, "开关 env 没生效——退路是假的"
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("runs.db 不可写（注入）")
+
+        monkeypatch.setattr("loom_core.run_store.RunStore", _boom)
         inp = tmp_path / "in.md"
         inp.write_text(INPUT, encoding="utf-8")
         orch = _orch(tmp_path)
         try:
             orch.run_plan(_plan(tmp_path, "off", PLAIN_YAML),
-                          input_file=str(inp), task_id="rs_off")
-            store = RunStore()
-            assert store.get_run("rs_off") is None, "开关关着还写了投影"
-            assert store.events("rs_off") == []
-            # 旧面必须照旧，否则"退路"其实是把观测面一起删了
-            row = orch.task_queue.get("rs_off")
+                          input_file=str(inp), task_id="rs_nostore")
+            # 旧面必须照旧：投影写不出来不该把运行本身拖下水
+            row = orch.task_queue.get("rs_nostore")
             assert row and row["status"] == "done", row
-            assert DeliveryLedger().get("rs_off") is not None
+            assert DeliveryLedger().get("rs_nostore") is not None
+            # 失败可见：健康检查要能把"这次进程写不出投影"报出来
+            health = orch.run_store_health()
+            assert health["status"] == "degraded", health
+            assert health["available"] is False
+            assert "注入" in health["error"], health
+        finally:
+            orch.shutdown()
+
+    def test_health_reports_schema_version(self, tmp_path, monkeypatch):
+        _state_dir(monkeypatch, tmp_path)
+        orch = _orch(tmp_path)
+        try:
+            health = orch.run_store_health()
+            assert health["status"] == "healthy", health
+            assert health["available"] is True
+            assert health["dialect"] == "sqlite"
+            assert health["schema_version"] == run_store.SCHEMA_VERSION
         finally:
             orch.shutdown()
 

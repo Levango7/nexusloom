@@ -99,35 +99,44 @@ class CostTracker:
         contextmanager 包一层确保用完即关，避免连接泄漏
         （ResourceWarning: unclosed database）。
         """
+        # 文件在 `_init_db` 之后被删/换过（state 目录迁移、清理、测试隔离）时，
+        # 新连接拿到的是一个空库 —— 不补建表的话每个操作都报 "no such table: cost_log"。
+        created = not Path(self._db_path).exists()
         conn = sqlite3.connect(self._db_path, timeout=5, check_same_thread=False)
         try:
             # 并发首建同一库时 SQLite 切 WAL 不走 busy handler，
             # 直接抛 "database is locked"，必须自带重试（见 sqlite_util 模块头）。
             enable_wal(conn)
             conn.execute("PRAGMA busy_timeout=3000")
+            if created:
+                self._ensure_schema(conn)
             with conn:
                 yield conn
         finally:
             conn.close()
 
+    @staticmethod
+    def _ensure_schema(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cost_log (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp       REAL NOT NULL,
+                provider        TEXT NOT NULL,
+                prompt_tokens   INTEGER NOT NULL,
+                completion_tokens INTEGER NOT NULL,
+                cost            REAL NOT NULL,
+                task_id         TEXT DEFAULT '',
+                model           TEXT DEFAULT ''
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cost_provider ON cost_log(provider)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cost_task ON cost_log(task_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cost_ts ON cost_log(timestamp)")
+
     def _init_db(self):
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS cost_log (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp       REAL NOT NULL,
-                    provider        TEXT NOT NULL,
-                    prompt_tokens   INTEGER NOT NULL,
-                    completion_tokens INTEGER NOT NULL,
-                    cost            REAL NOT NULL,
-                    task_id         TEXT DEFAULT '',
-                    model           TEXT DEFAULT ''
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_cost_provider ON cost_log(provider)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_cost_task ON cost_log(task_id)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_cost_ts ON cost_log(timestamp)")
+            self._ensure_schema(conn)
 
     def set_budget(self, max_cost: float):
         """设置预算上限（USD）。0 = 无限制"""

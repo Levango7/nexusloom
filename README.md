@@ -717,8 +717,10 @@ handle.cancel(); handle.resume()      # 引擎拒绝（已完成 / 停在审批�
 `PipelineOrchestrator.list_runs` 先读 RunStore 的 `runs` / `run_nodes` 投影——
 `/tasks`、`/tasks/<id>`、`/api/dashboard`、`/api/cost` 的作用域集合、MCP
 `list_tasks` / `get_task` 在内存淘汰后仍答得出来，载荷里的 `source` 字段标明这一行
-来自 `memory` / `runstore` / `deliveries`。投影里没有这条运行（`LOOM_RUNSTORE=0`，
-或 Stage 1 之前没有投影的老运行）时才回落到交付账本。四条边界：
+来自 `memory` / `runstore` / `deliveries`。投影里没有这条运行（投影写失败，
+或 Stage 1 之前没有投影的老运行）时才回落到交付账本——这是**数据边界**，不是开关：
+`LOOM_RUNSTORE=0` 那条退路已在 2026-10-21 移除，写侧恒开、失败由
+`/api/health/deep` 的 `runstore` 组件报出来。四条边界：
 ①本改动（2026-10-15）之前落账的运行没有 `artifact_keys` 这批字段，其 `artifacts` 是空表——
 **不回填、不猜**；②读路径只读，账本/投影文件不存在就返回空，绝不因为"查一下"而创建数据库；
 ③淘汰后的详情给 `pipeline` / `error` / `artifacts` / 逐节点摘要（status、attempts、耗时、
@@ -955,9 +957,9 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**2886 个测试本机全绿**（`2886 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
-收集 2893，护栏按 `collected − declared ≤ 10` 判；本行原先写 2875，Stage 2b 那批 +11 条
-SSE 重放判据（`tests/test_sse_replay.py`），按最终头重跑取到上面这组数；
+**2889 个测试本机全绿**（`2889 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
+收集 2896，护栏按 `collected − declared ≤ 10` 判；本行原先写 2886，移除 RunStore 退路那批
++3 条判据（降级注入 / 健康位 / cost 自愈），按最终头重跑取到上面这组数；
 更早一批（Stage 2）里全量曾抓到一条真回归——`RunHandle.exists()` 把替身自动生成的
 `task_queue.get()` 当成"队列里有这行"，一个不存在的 id 会一路走到拼载荷、序列化时炸成
 JSON-RPC internal error，已收紧成 `isinstance(row, dict)`；

@@ -36,18 +36,18 @@ ANCHORS = [
     # pipeline.py 这一批随 Stage 0（异步并轨）+ Stage 1（双写口）整体下移：Stage 0 插了
     # 4 行字段 + 61 行 helper，Stage 1 又插 7 行 init + 108 行写口。**偏移不是常数**
     # （+4 / +65 / +47 / +95 / +106 并存），所以 remap 只能按整行文本对齐，不能推算。
-    ("loom_core/pipeline.py", 308, "_max_task_history"),
-    ("loom_core/pipeline.py", 764, "def cancel"),
-    ("loom_core/pipeline.py", 777, "def resume"),
+    ("loom_core/pipeline.py", 310, "_max_task_history"),
+    ("loom_core/pipeline.py", 781, "def cancel"),
+    ("loom_core/pipeline.py", 794, "def resume"),
     # 原 1290「不更新 task_queue」那句 docstring 已被 Stage 0 改掉——退役它，改钉新增的
     # 共用写口：§2 那条裂缝的"已并轨"结论必须指向一个真实存在的函数。
-    ("loom_core/pipeline.py", 506, "def _record_plan_terminal_state"),
-    ("loom_core/pipeline.py", 697, "pipeline.started"),
-    ("loom_core/pipeline.py", 1044, "pipeline.finished"),
-    ("loom_core/pipeline.py", 1481, "pipeline.finished"),
-    ("loom_core/pipeline.py", 1715, "record"),
-    ("loom_core/pipeline.py", 1813, "pipeline.audit"),
-    ("loom_core/pipeline.py", 1980, ".done"),
+    ("loom_core/pipeline.py", 508, "def _record_plan_terminal_state"),
+    ("loom_core/pipeline.py", 714, "pipeline.started"),
+    ("loom_core/pipeline.py", 1061, "pipeline.finished"),
+    ("loom_core/pipeline.py", 1498, "pipeline.finished"),
+    ("loom_core/pipeline.py", 1732, "record"),
+    ("loom_core/pipeline.py", 1830, "pipeline.audit"),
+    ("loom_core/pipeline.py", 1997, ".done"),
     ("loom_core/admin_api.py", 654, "get_task"),
     ("loom_core/admin_api.py", 1038, "list_tasks"),
     # Stage 2：/tasks、dashboard、cost 三处读口从 `list_tasks`（内存）换成
@@ -56,9 +56,9 @@ ANCHORS = [
     ("loom_core/admin_api.py", 1056, "list_runs"),
     ("loom_core/admin_api.py", 1355, "def _task_checkpoint_view"),
     ("loom_core/admin_api.py", 1660, "list_runs"),
-    ("loom_core/admin_api.py", 1972, "list_runs"),
-    ("loom_core/admin_api.py", 2336, "run_plan_async"),
-    ("loom_core/admin_api.py", 2405, "get_callback"),
+    ("loom_core/admin_api.py", 1988, "list_runs"),
+    ("loom_core/admin_api.py", 2352, "run_plan_async"),
+    ("loom_core/admin_api.py", 2421, "get_callback"),
 ]
 
 root = pathlib.Path(__file__).resolve().parent.parent

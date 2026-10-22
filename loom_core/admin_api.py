@@ -1935,12 +1935,28 @@ class AdminHandler(BaseHTTPRequestHandler):
             "dir": str(ckpt_dir),
         }
 
-        # 7. 熔断器
-        cb_list = orch._cb_registry.list() if hasattr(orch, "_cb_registry") else []
-        open_cbs = [c for c in cb_list if getattr(c, "state", None) and c.state.name == "OPEN"]
+        # 7. RunStore（Stage 1 起恒开，没有开关）：库能不能开、结构版本、最近一次失败
+        store_h = (orch.run_store_health()
+                   if callable(getattr(orch, "run_store_health", None)) else None)
+        if not isinstance(store_h, dict):
+            store_h = {"status": "unknown", "reason": "orchestrator 未提供 run_store_health"}
+        result["components"]["runstore"] = {
+            "status": store_h.get("status", "unknown"),
+            "details": store_h,
+        }
+
+        # 8. 熔断器
+        # `CircuitBreakerRegistry` 的读法是 `all() -> {name: to_dict()}`（没有 `list()`）：
+        # 原写法在真编排器上恒抛 AttributeError ⇒ `/api/health/deep` 整个 500，
+        # 而单测用的是 MagicMock（`hasattr` 恒真、`.list()` 随便返回），所以一直没暴露。
+        cb_all = orch._cb_registry.all() if hasattr(orch, "_cb_registry") else {}
+        if not isinstance(cb_all, dict):  # 替身/损坏的 registry：当成"没有熔断器"
+            cb_all = {}
+        open_cbs = [name for name, info in cb_all.items()
+                    if str((info or {}).get("state", "")).upper() == "OPEN"]
         result["components"]["circuit_breakers"] = {
             "status": "healthy" if not open_cbs else "degraded",
-            "total": len(cb_list),
+            "total": len(cb_all),
             "open": len(open_cbs),
         }
 
@@ -2444,7 +2460,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             # 有运行、但没有可重放的事件（RunStore 被关掉 / 投影没写成功）：
             # 如实说"重放不了"，同样不回退到"再跑一遍"。
             self._send_sse(StreamEvent("error", {
-                "error": "run has no replayable events (is LOOM_RUNSTORE off?)",
+                "error": "run has no replayable events "
+                         "(RunStore unavailable? see /api/health/deep)",
                 "task_id": task_id}))
             return
 
