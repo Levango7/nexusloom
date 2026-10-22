@@ -35,6 +35,33 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Added（2026-10-21·续59，RunStore Stage 2b：`/stream` 重放改读 `events`，跨进程可重放）
+
+- **重放改由投影回答**：进程内没有 `StreamCallback`（发起流的那条进程退出了 / 换了
+  进程）时，从 `events` 按 `after_seq` 逐页重放运行级事实（`run.opened` /
+  `node.finished` / `run.completed` …），运行还没到终态就**尾随**（0.5s 轮询 +
+  心跳），到终态发 `complete` / `error` 收流。逐 chunk 的正文流从不落盘，因此不在
+  重放范围内——边界照实写。
+- **游标分两套命名空间**：`r<seq>` = 投影事件游标（跨进程有意义）；纯数字 =
+  进程内 `StreamEvent` 计数器（跨进程没有意义）。不能都 `int()` 掉——把计数器当 seq
+  用会从错误的断点续传。
+- **重连不再起第二条流水线**：旧行为是"查不到进程内回调就再跑一遍"，把一次重连变成
+  第二次运行。现在投影里有这条运行就只重放/尾随；有运行但没有可重放事件
+  （`LOOM_RUNSTORE=0`）时如实回一条 error 帧，同样不回退到"再跑一遍"。
+- **重放前过作用域**：`_scoped_run` 判租户，越权与"不存在"同形 404——SSE 不能成为
+  存在性旁路。
+- **修 `/stream` 的连接收尾**（顺带发现）：原代码在开头置 `close_connection = True`，
+  随后又发 `Connection: keep-alive` 头——CPython 的 `send_header` 会把这个标志**翻回
+  False** ⇒ 流推完后连接一直挂着；`EventSource` 因为自己会重连所以看不出来，而
+  `http.client`/`urllib` 这类等 EOF 的客户端只能超时。改发 `Connection: close` 并在
+  `end_headers()` 后重新置位。
+
+判据 `tests/test_sse_replay.py` 10 条（真 HTTP + 真 RunStore，不跑流水线）：整段重放、
+从 `r<seq>` 续传、进度帧由节点投影合成、失败运行以 error 帧收尾、**带 query 的重连
+不产生第二条运行**、运行中尾随到终态、跨租户 404 与不存在同形、admin 可重放。
+三组变异：忽略游标 ⇒ 只红续传那条；摘掉作用域检查 ⇒ 只红跨租户那条；
+把连接收尾还原成旧写法 ⇒ 等 EOF 的客户端超时（整段重放那条红）。
+
 ### Changed（2026-10-21·续58，RunStore Stage 2：读侧切到投影、内存降为缓存 + 身份贯穿）
 
 - **`/tasks` / `/api/dashboard` / MCP `list_tasks` 共用 `list_runs`**：内存缓存 ∪ `runs` 投影，

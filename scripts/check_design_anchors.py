@@ -57,8 +57,8 @@ ANCHORS = [
     ("loom_core/admin_api.py", 1355, "def _task_checkpoint_view"),
     ("loom_core/admin_api.py", 1660, "list_runs"),
     ("loom_core/admin_api.py", 1972, "list_runs"),
-    ("loom_core/admin_api.py", 2235, "run_plan_async"),
-    ("loom_core/admin_api.py", 2305, "get_callback"),
+    ("loom_core/admin_api.py", 2336, "run_plan_async"),
+    ("loom_core/admin_api.py", 2405, "get_callback"),
 ]
 
 root = pathlib.Path(__file__).resolve().parent.parent
