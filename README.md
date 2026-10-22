@@ -725,6 +725,11 @@ handle.cancel(); handle.resume()      # 引擎拒绝（已完成 / 停在审批�
 artifact_keys），但**不给 `result` 正文本**——它从不落盘（投影只存摘要），不编空值冒充；
 ④`cancel` / `resume` / 审批仍只读内存：**动作**只有内存态才有意义，淘汰后照旧 404。
 
+`/stream` 的重连也走同一份投影（2026-10-21 Stage 2b）：没有进程内回调时按 `events`
+重放运行级事实，帧 id 是运行级游标 `r<seq>`（`Last-Event-ID: r<seq>` 可续传），
+运行没结束就尾随到终态；**重连不会重新起一条流水线**。逐 chunk 的正文流从不落盘，
+不在重放范围内——重放给的是"这次运行发生过什么"，不是正文。
+
 ### 定时触发（Cron）
 
 按 `triggers.yaml` 的 cron 常驻调度（本地时间；**错过不补跑**，跳过窗口会打印出来）：
@@ -950,12 +955,13 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**2875 个测试本机全绿**（`2875 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
-收集 2882，护栏按 `collected − declared ≤ 10` 判；本行原先写 2857，Stage 2 那轮全量有两条红：
-本行还没改数，以及一条真回归——`RunHandle.exists()` 把替身自动生成的 `task_queue.get()`
-当成"队列里有这行"，一个不存在的 id 会一路走到拼载荷、序列化时炸成 JSON-RPC internal error；
-两处都修完后按最终头重跑，取到上面这组数；
-口径条件：`Python 3.14.3`、**同机有并行会话**（本轮全量 2534.08s ≈ 42 分钟；静默基线
+**2886 个测试本机全绿**（`2886 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
+收集 2893，护栏按 `collected − declared ≤ 10` 判；本行原先写 2875，Stage 2b 那批 +11 条
+SSE 重放判据（`tests/test_sse_replay.py`），按最终头重跑取到上面这组数；
+更早一批（Stage 2）里全量曾抓到一条真回归——`RunHandle.exists()` 把替身自动生成的
+`task_queue.get()` 当成"队列里有这行"，一个不存在的 id 会一路走到拼载荷、序列化时炸成
+JSON-RPC internal error，已收紧成 `isinstance(row, dict)`；
+口径条件：`Python 3.14.3`、**同机有并行会话**（本轮全量 2576.84s ≈ 43 分钟；静默基线
 753.83s ≈ 12.5 分钟）。负载轮里先后暴露过两条时序判据：`test_runstore_parity` 的
 "账本行还没落地就断言"（已改成有界等待，见续58）、`test_p2_infra_fixes` 的队列排空竞态
 （与本批无因果，单跑 3 次各绿，另立待办）；两处处理完后本轮 2875 条全绿；
