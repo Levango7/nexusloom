@@ -47,10 +47,82 @@ class RunHandle:
         getter = getattr(self._orch, "get_task", None)
         return getter(self._task_id) if callable(getter) else None
 
+    # ─── RunStore 投影（Stage 2：内存只是缓存） ─────────
+
+    def _store(self):
+        """RunStore 读口；`LOOM_RUNSTORE=0`、建不起来或读故障都给 None。
+
+        走 `orch.run_store()` 而不是自己 new：写侧那个实例已经建好，读侧另建一份
+        会把"双写"变成"双读各连一个库文件"。
+        """
+        getter = getattr(self._orch, "run_store", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:  # noqa: BLE001 —— 读口坏掉只降级，不把接口请求打 500
+            return None
+
+    def record(self) -> dict | None:
+        """RunStore 里的运行投影；没有这条运行（或读不到）给 None。"""
+        store = self._store()
+        if store is None:
+            return None
+        try:
+            rec = store.get_run(self._task_id)
+        except Exception:  # noqa: BLE001
+            return None
+        return rec if isinstance(rec, dict) else None
+
+    def nodes(self) -> list[dict]:
+        """投影里的逐节点行；没有投影（或读不到）给空表。"""
+        store = self._store()
+        if store is None:
+            return []
+        try:
+            rows = store.nodes(self._task_id)
+        except Exception:  # noqa: BLE001
+            return []
+        return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+    @property
+    def principal(self) -> str:
+        """这次运行的归属：内存 owner → 投影 principal → 空串。
+
+        队列行的 `get()` 不出 principal（SELECT 里没有这列），所以不在这条链上；
+        空串的语义与内存侧一致——"无身份世界/历史遗留"，具名 token 不可见。
+        """
+        task = self.task
+        if task is not None:
+            return str(getattr(task, "owner", "") or "")
+        rec = self.record()
+        return str((rec or {}).get("principal") or "")
+
+    def exists(self) -> bool:
+        """是否存在**可读的运行事实**：内存 / RunStore / 持久队列任一。
+
+        刻意不把 `deliveries` 算进来：账本没有归属列，拿它判存在性再按 owner 过滤
+        等于给越权探测留一条"有/无"的旁路；Stage 1 之前的老运行本来就不 backfill。
+        """
+        if self.task is not None:
+            return True
+        if self.record() is not None:
+            return True
+        queue = getattr(self._orch, "task_queue", None)
+        if queue is None:
+            return False
+        try:
+            row = queue.get(self._task_id)
+        except Exception:  # noqa: BLE001
+            return False
+        # 只认队列真给出来的 dict：与 `status()` 同一条判法。替身/损坏的 store
+        # 返回别的东西时不能当成"存在"，否则某个不存在的 id 会一路走到拼载荷。
+        return isinstance(row, dict)
+
     # ─── status ────────────────────────────────────────
 
     def status(self) -> str:
-        """状态字符串；内存缺失时读持久队列，两边都没有则 "unknown"。
+        """状态字符串；内存缺失时依次读 RunStore、持久队列，都没有则 "unknown"。
 
         `task.status` 只读一次：并行腿随时可能推进它，读两遍就可能拿 A 的 `.value`
         判空、拿 B 的值返回。
@@ -59,6 +131,9 @@ class RunHandle:
         if task is not None:
             state = task.status
             return state.value if hasattr(state, "value") else str(state)
+        rec = self.record()
+        if rec is not None:
+            return str(rec.get("status") or "unknown")
         queue = getattr(self._orch, "task_queue", None)
         row = queue.get(self._task_id) if queue is not None else None
         if isinstance(row, dict):
@@ -107,12 +182,12 @@ class RunHandle:
         的键），以及声明 `WRITES_OUTPUT` 的节点挂到任务上的交付物路径。
         不猜节点名、不造伪 ID——那正是本原语要替掉的旧做法。
 
-        内存里没有这一运行（被 `_trim_task_history` 淘汰的老任务）时，
-        从交付账本 `deliveries.db` 重建**同一形状**的清单，见 `_ledger_record`。
+        内存里没有这一运行（被 `_trim_task_history` 淘汰的老任务）时，先读 RunStore
+        的逐节点投影；投影也没有才回落到交付账本，见 `_artifacts_without_task`。
         """
         task = self.task
         if task is None:
-            return self._artifacts_from(self._ledger_record())
+            return self._artifacts_without_task()
         items: list[dict] = []
         for name, node in (getattr(task, "dag_nodes", None) or {}).items():
             result = getattr(node, "result", None)
@@ -125,6 +200,34 @@ class RunHandle:
                 "status": str(getattr(node, "status", "") or ""),
             })
         path = str(getattr(task, "output_path", "") or "")
+        if path:
+            items.append({"kind": "deliverable", "node": "", "path": path,
+                          "bytes": _size_of(path)})
+        return items
+
+    def _artifacts_without_task(self) -> list[dict]:
+        """淘汰后的产物清单：逐节点键读投影，交付物路径仍只有账本有。
+
+        两处取的都是"引擎确实记过的东西"：投影的 `artifact_keys_json` 与账本的
+        `output_path`。投影里没有这条运行（RunStore 关掉 / Stage 1 之前的老运行）
+        时整体退回账本——与 Stage 1 之前的降级形态一致。
+        """
+        nodes = self.nodes()
+        if not nodes:
+            return self._artifacts_from(self._ledger_record())
+        items: list[dict] = []
+        for node in nodes:
+            keys = node.get("artifact_keys") or []
+            if not keys:
+                continue
+            items.append({
+                "kind": "artifact",
+                "node": str(node.get("node", "")),
+                "keys": sorted(str(k) for k in keys),
+                "status": str(node.get("status", "") or ""),
+            })
+        rec = self._ledger_record()
+        path = str((rec or {}).get("output_path") or "")
         if path:
             items.append({"kind": "deliverable", "node": "", "path": path,
                           "bytes": _size_of(path)})
@@ -185,12 +288,29 @@ class RunHandle:
             "terminal": self.is_terminal(),
         }
         if task is None:
-            # 被 _trim_task_history 淘汰的老运行：账本里有的（pipeline / error /
-            # 产物清单）照原样给，账本没有的（result 明细）不编。
+            # 内存只是缓存：先由 RunStore 投影回答；投影里没有（关掉开关 / Stage 1
+            # 之前的老运行）才回落到交付账本。两边都没有的（节点 result 正文本就
+            # 从不落盘，见 Stage 1 的边界）不编。
+            run = self.record()
+            if run is not None:
+                out.update({
+                    "pipeline": str(run.get("workflow") or ""),
+                    "principal": str(run.get("principal") or ""),
+                    "started_at": run.get("started_at") or None,
+                    "finished_at": run.get("finished_at") or None,
+                    "error": str(run.get("error") or "") or None,
+                    "cost_usd": float(run.get("cost_usd") or 0.0),
+                    "quality_score": float(run.get("quality_score") or 0.0),
+                    "artifacts": self.artifacts(),
+                    "nodes": self.nodes(),
+                    "source": "runstore",
+                })
+                return out
             rec = self._ledger_record()
             out["pipeline"] = str((rec or {}).get("pipeline") or "")
             out["error"] = str((rec or {}).get("error") or "") or None
             out["artifacts"] = self._artifacts_from(rec)
+            out["source"] = "deliveries" if rec is not None else "none"
             return out
         out["pipeline"] = getattr(task, "pipeline_name", "")
         out["progress"] = int(getattr(task, "progress", 0) or 0)
@@ -200,6 +320,7 @@ class RunHandle:
         out["awaiting_approval"] = (dict(task.awaiting_approval)
                                     if getattr(task, "awaiting_approval", None) else None)
         out["approvals"] = [dict(a) for a in (getattr(task, "approvals", None) or [])]
+        out["source"] = "memory"
         return out
 
     @staticmethod

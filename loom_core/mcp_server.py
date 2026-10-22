@@ -445,11 +445,13 @@ class MCPServer:
         if not self.orch:
             return self._error(req_id, -32603, "Orchestrator not initialized")
 
-        task = self.orch.get_task(task_id)
-        if not task:
+        # 存在性改由句柄回答（内存 → RunStore 投影 → 持久队列）：内存淘汰不再
+        # 等于"查不到"，这是 Stage 2 要拆掉的那条旧前提。
+        handle = self.orch.run_handle(task_id)
+        if not handle.exists():
             return self._tool_error(req_id, f"Task not found: {task_id}")
 
-        payload = self.orch.run_handle(task_id).to_dict()
+        payload = handle.to_dict()
         # 用 .get 而不是下标：_trim_task_history 会淘汰超窗口的已完成任务，
         # 存在性检查与 to_dict() 之间被清掉时，载荷会退化成"只有身份与状态"，
         # 那种情况下也不能抛 KeyError 把整条 JSON-RPC 帧打飞。
@@ -469,18 +471,19 @@ class MCPServer:
         if not self.orch:
             return self._error(req_id, -32603, "Orchestrator not initialized")
 
-        tasks = self.orch.list_tasks()
+        # 与 Admin /tasks 同一条读口径：内存缓存 ∪ RunStore 投影（淘汰后仍列得出）
+        runs = self.orch.list_runs()
         result = {
             "tasks": [
                 {
-                    "id": t.id,
-                    "status": t.status.value if hasattr(t.status, "value") else str(t.status),
-                    "pipeline": t.pipeline_name,
-                    "progress": getattr(t, "progress", 0),
+                    "id": r["id"],
+                    "status": r["status"],
+                    "pipeline": r["pipeline"],
+                    "progress": r.get("progress", 0),
                 }
-                for t in tasks
+                for r in runs
             ],
-            "count": len(tasks),
+            "count": len(runs),
         }
         return self._tool_result(req_id, result)
 

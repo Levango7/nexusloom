@@ -303,7 +303,8 @@ class RunStore:
     def list_runs(self, principal: str | None = None,
                   limit: int = 100) -> list[dict]:
         """作用域读法：`principal=None` 给全量（admin 面），给了只回自己名下。"""
-        cols = "SELECT run_id, workflow, principal, status, started_at, finished_at "
+        cols = ("SELECT run_id, workflow, principal, status, started_at, finished_at, "
+                "error ")
         conn = self._conn()
         if principal is None:
             rows = conn.execute(cols + "FROM runs ORDER BY started_at DESC LIMIT ?",
@@ -313,7 +314,8 @@ class RunStore:
                                 "ORDER BY started_at DESC LIMIT ?",
                                 (principal, int(limit))).fetchall()
         return [{"run_id": r[0], "workflow": r[1], "principal": r[2],
-                 "status": r[3], "started_at": r[4], "finished_at": r[5]}
+                 "status": r[3], "started_at": r[4], "finished_at": r[5],
+                 "error": r[6] or ""}
                 for r in rows]
 
 

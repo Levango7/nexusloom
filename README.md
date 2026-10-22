@@ -713,13 +713,17 @@ handle.cancel(); handle.resume()      # 引擎拒绝（已完成 / 停在审批�
 产物只报引擎确实记下的东西，不按节点名造伪 ID。判据 `tests/test_run_handle.py`。
 
 任务内存历史只留最近 100 个（`pipeline._trim_task_history`），更早的运行会被淘汰。
-产物清单不跟着丢：每次运行收尾时（`DONE` 与 `FAILED` 都记）逐节点产物键与交付物路径
-一并写进交付账本 `deliveries.db`，句柄在内存里没有这一运行时**按同一形状**从账本重建，
-MCP `get_task` 与 `GET /tasks/<id>` 因此拿到同一份清单。三条边界：
+**淘汰不等于查不到**（2026-10-21 Stage 2 起）：内存只是缓存，`RunHandle` 与
+`PipelineOrchestrator.list_runs` 先读 RunStore 的 `runs` / `run_nodes` 投影——
+`/tasks`、`/tasks/<id>`、`/api/dashboard`、`/api/cost` 的作用域集合、MCP
+`list_tasks` / `get_task` 在内存淘汰后仍答得出来，载荷里的 `source` 字段标明这一行
+来自 `memory` / `runstore` / `deliveries`。投影里没有这条运行（`LOOM_RUNSTORE=0`，
+或 Stage 1 之前没有投影的老运行）时才回落到交付账本。四条边界：
 ①本改动（2026-10-15）之前落账的运行没有 `artifact_keys` 这批字段，其 `artifacts` 是空表——
-**不回填、不猜**；②读路径只读，账本文件不存在就返回空，绝不因为"查一下"而创建数据库；
-③被淘汰运行的 `to_dict()` 给出 `pipeline` / `error` / `artifacts`，但不给 `result`
-（账本存的是产物键与路径，不是整份结构化结果）。
+**不回填、不猜**；②读路径只读，账本/投影文件不存在就返回空，绝不因为"查一下"而创建数据库；
+③淘汰后的详情给 `pipeline` / `error` / `artifacts` / 逐节点摘要（status、attempts、耗时、
+artifact_keys），但**不给 `result` 正文本**——它从不落盘（投影只存摘要），不编空值冒充；
+④`cancel` / `resume` / 审批仍只读内存：**动作**只有内存态才有意义，淘汰后照旧 404。
 
 ### 定时触发（Cron）
 
@@ -946,11 +950,15 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**2857 个测试本机全绿**（`2857 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
-收集 2864，护栏按 `collected − declared ≤ 10` 判；本行原先写 2854 而那轮全量唯一一条红是
-依赖闭合护栏——`_reject_saturated` 新 import 的 stdlib `select` 没进 `verify_dist` 的标准库
-名单，补进名单后按最终头重跑取到上面这组数；
-口径条件：`Python 3.14.3`、机器相对静默时全量 753.83s，同机有并行会话时同一批要 2453s；
+**2875 个测试本机全绿**（`2875 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
+收集 2882，护栏按 `collected − declared ≤ 10` 判；本行原先写 2857，Stage 2 那轮全量有两条红：
+本行还没改数，以及一条真回归——`RunHandle.exists()` 把替身自动生成的 `task_queue.get()`
+当成"队列里有这行"，一个不存在的 id 会一路走到拼载荷、序列化时炸成 JSON-RPC internal error；
+两处都修完后按最终头重跑，取到上面这组数；
+口径条件：`Python 3.14.3`、**同机有并行会话**（本轮全量 2534.08s ≈ 42 分钟；静默基线
+753.83s ≈ 12.5 分钟）。负载轮里先后暴露过两条时序判据：`test_runstore_parity` 的
+"账本行还没落地就断言"（已改成有界等待，见续58）、`test_p2_infra_fixes` 的队列排空竞态
+（与本批无因果，单跑 3 次各绿，另立待办）；两处处理完后本轮 2875 条全绿；
 `tests/test_admin_concurrency.py::TestBoundedConcurrency` 原先在满载轮里错位红，**这里旧写的
 "属时序窗口争用不是产品缺陷"是错的**——根因是池满拒答带着未读请求字节 close ⇒ 内核发 RST
 把 503 吞了（WinError 10053，缺陷原样时 20 轮红 9 轮），续57 已修并把等待条件换成

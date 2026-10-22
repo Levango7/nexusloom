@@ -118,6 +118,27 @@ def _wait_terminal_row(orch, task_id: str, timeout: float = 30.0) -> dict | None
     return None
 
 
+def _wait_ledger(task_id: str, timeout: float = 30.0) -> dict | None:
+    """等账本行落地——它比队列终态**晚一步**，不能假定同时到。
+
+    收尾链的顺序是 `task_queue.finish` → 终态事件 → 投影 → `_deliver`（写账本）。
+    `_wait_terminal_row` 只保证第一笔已落；机器忙时第二笔可能晚几十毫秒，这时读账本
+    拿到 None 不是"失败运行没记账"，而是**断言了一个还没发生的写**（2026-10-21 全量
+    在 20 分钟负载轮里就红在这里，单跑必绿）。
+
+    预算取 30s，与 `_wait_terminal_row` 同量级：10s 那版在同一次 20 分钟负载全量里
+    仍不够（收尾线程被挤掉），而这两笔写是**同一条线程顺序执行**的——等它出现不是
+    放宽判据，是在等一个被代码保证会发生的写。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        rec = DeliveryLedger().get(task_id)
+        if rec is not None:
+            return rec
+        time.sleep(0.05)
+    return None
+
+
 def _reconcile(store: RunStore, orch: PipelineOrchestrator, task_id: str,
                expect_status: str) -> dict:
     """四个来源逐字段对账；任何一处不一致就 AssertionError 带两侧实际值。
@@ -136,8 +157,11 @@ def _reconcile(store: RunStore, orch: PipelineOrchestrator, task_id: str,
         f"{[e['type'] for e in store.events(task_id)]}")
     # `DeliveryLedger.get()` 返回的就是那份结构化记录本身（payload_json 解开的样子），
     # 不是 {"payload": ...} 的套娃——读错键会让节点集合恒空，断言白给。
-    ledger = DeliveryLedger().get(task_id)
-    assert ledger is not None, "交付账本没有这一行（失败运行也该记）"
+    t_ledger = time.time()
+    ledger = _wait_ledger(task_id)
+    assert ledger is not None, (
+        f"等 {time.time() - t_ledger:.1f}s 账本这行仍没出现（收尾链在 _deliver 前中断了？）"
+        f" 队列行={queue_row.get('status')}")
 
     # 1) 终态三处必须同值——"事件说完成、投影说运行中"就是这个断言抓的
     assert run["status"] == expect_status, (

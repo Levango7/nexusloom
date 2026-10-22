@@ -25,10 +25,10 @@ ANCHORS = [
     ("loom_core/task_queue.py", 117, "add_column_if_missing"),
     ("loom_core/checkpoint_manager.py", 38, "def save"),
     ("loom_core/checkpoint_manager.py", 87, "os.replace"),
-    ("loom_core/run_handle.py", 52, "def status"),
-    ("loom_core/run_handle.py", 103, "def artifacts"),
-    ("loom_core/run_handle.py", 133, "def _ledger_record"),
-    ("loom_core/run_handle.py", 178, "def to_dict"),
+    ("loom_core/run_handle.py", 124, "def status"),
+    ("loom_core/run_handle.py", 178, "def artifacts"),
+    ("loom_core/run_handle.py", 236, "def _ledger_record"),
+    ("loom_core/run_handle.py", 281, "def to_dict"),
     ("loom_core/db_backend.py", 81, "add_column_if_missing"),
     ("loom_core/dag_executor.py", 821, "def _merge_resumed_nodes"),
     ("loom_core/dag_executor.py", 952, "def _reuse_completed_node"),
@@ -37,25 +37,28 @@ ANCHORS = [
     # 4 行字段 + 61 行 helper，Stage 1 又插 7 行 init + 108 行写口。**偏移不是常数**
     # （+4 / +65 / +47 / +95 / +106 并存），所以 remap 只能按整行文本对齐，不能推算。
     ("loom_core/pipeline.py", 308, "_max_task_history"),
-    ("loom_core/pipeline.py", 763, "def cancel"),
-    ("loom_core/pipeline.py", 776, "def resume"),
+    ("loom_core/pipeline.py", 764, "def cancel"),
+    ("loom_core/pipeline.py", 777, "def resume"),
     # 原 1290「不更新 task_queue」那句 docstring 已被 Stage 0 改掉——退役它，改钉新增的
     # 共用写口：§2 那条裂缝的"已并轨"结论必须指向一个真实存在的函数。
     ("loom_core/pipeline.py", 506, "def _record_plan_terminal_state"),
-    ("loom_core/pipeline.py", 696, "pipeline.started"),
-    ("loom_core/pipeline.py", 1043, "pipeline.finished"),
-    ("loom_core/pipeline.py", 1479, "pipeline.finished"),
-    ("loom_core/pipeline.py", 1712, "record"),
-    ("loom_core/pipeline.py", 1810, "pipeline.audit"),
-    ("loom_core/pipeline.py", 1922, ".done"),
-    ("loom_core/admin_api.py", 653, "get_task"),
-    ("loom_core/admin_api.py", 1017, "list_tasks"),
-    ("loom_core/admin_api.py", 1032, "list_tasks"),
-    ("loom_core/admin_api.py", 1281, "def _task_checkpoint_view"),
-    ("loom_core/admin_api.py", 1586, "list_tasks"),
-    ("loom_core/admin_api.py", 1899, "list_tasks"),
-    ("loom_core/admin_api.py", 2162, "run_plan_async"),
-    ("loom_core/admin_api.py", 2232, "get_callback"),
+    ("loom_core/pipeline.py", 697, "pipeline.started"),
+    ("loom_core/pipeline.py", 1044, "pipeline.finished"),
+    ("loom_core/pipeline.py", 1481, "pipeline.finished"),
+    ("loom_core/pipeline.py", 1715, "record"),
+    ("loom_core/pipeline.py", 1813, "pipeline.audit"),
+    ("loom_core/pipeline.py", 1980, ".done"),
+    ("loom_core/admin_api.py", 654, "get_task"),
+    ("loom_core/admin_api.py", 1038, "list_tasks"),
+    # Stage 2：/tasks、dashboard、cost 三处读口从 `list_tasks`（内存）换成
+    # `list_runs`（内存缓存 ∪ 投影）——锚点跟着换而不是删，否则"读侧已并轨"
+    # 这句话在表里就没有对应物了。
+    ("loom_core/admin_api.py", 1056, "list_runs"),
+    ("loom_core/admin_api.py", 1355, "def _task_checkpoint_view"),
+    ("loom_core/admin_api.py", 1660, "list_runs"),
+    ("loom_core/admin_api.py", 1972, "list_runs"),
+    ("loom_core/admin_api.py", 2235, "run_plan_async"),
+    ("loom_core/admin_api.py", 2305, "get_callback"),
 ]
 
 root = pathlib.Path(__file__).resolve().parent.parent

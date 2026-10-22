@@ -468,8 +468,15 @@ class TestMcpBusinessFailureIsError:
         assert isinstance(text, str) and text
 
     def test_task_not_found_is_error_result(self):
+        from loom_core.run_handle import RunHandle
+
         orch = MagicMock()
         orch.get_task.return_value = None
+        # 存在性由 RunHandle 回答（内存 → RunStore 投影 → 持久队列）：替身要把
+        # 这三条回落链都配成"没有"，否则自动生成的 mock 会被当成"存在"。
+        orch.run_handle.side_effect = lambda tid: RunHandle(orch, tid)
+        orch.run_store.return_value = None
+        orch.task_queue.get.return_value = None
         resp = self._server(orch)._handle_request({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "get_task", "arguments": {"task_id": "nope"}},
