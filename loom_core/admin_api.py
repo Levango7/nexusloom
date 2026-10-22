@@ -2115,6 +2115,8 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     _SSE_HEARTBEAT_SECONDS = 15.0
     _BROKEN_PIPE_CANCEL_THRESHOLD = 3
+    #: 跨进程重放没有回调可等，只能轮询事件表；0.5s 对进度条足够，也不至于打满库
+    _RUN_TAIL_POLL = 0.5
 
     def _send_sse(self, event) -> bool:
         """写出一条 SSE 帧（统一走 StreamEvent.to_dict() 序列化，含 ts/section/total）。
@@ -2185,6 +2187,105 @@ class AdminHandler(BaseHTTPRequestHandler):
                         self._cancel_for_broken_pipe(task_id)
                         return
                     last_frame = time.time()
+
+    @staticmethod
+    def _parse_last_event_id(raw: str | None) -> tuple[str, int]:
+        """拆 Last-Event-ID 的两套命名空间。
+
+        `r<seq>` = RunStore 的事件游标（跨进程有意义）；纯数字 = 进程内 StreamEvent
+        计数器（**跨进程没有意义**：它只是本进程自增的序号）。把计数器当 seq 用会
+        从错误的断点续传，所以这里必须分开，不能都 `int()` 掉。
+        """
+        if not raw:
+            return ("none", 0)
+        value = str(raw).strip()
+        if value.startswith("r") and value[1:].isdigit():
+            return ("run", int(value[1:]))
+        if value.isdigit():
+            return ("sse", int(value))
+        return ("none", 0)
+
+    def _send_run_event(self, ev: dict) -> bool:
+        """写一条投影事件帧。**只有这类帧的 id 是运行级游标**（`r<seq>`）。"""
+        payload = _fast_dumps({
+            "type": "run_event",
+            "data": {"seq": ev.get("seq"), "event": ev.get("type"),
+                     "payload": ev.get("payload") or {}, "ts": ev.get("ts")},
+            "ts": ev.get("ts"),
+            "section": -1,
+            "total": 0,
+        }, default=str)
+        frame = f"id: r{int(ev['seq'])}\ndata: {payload}\n\n"
+        try:
+            self.wfile.write(frame.encode())
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return False
+
+    def _send_run_progress(self, task_id: str) -> None:
+        """重放没有 chunk/段落，进度只能由投影的节点行合成——不编百分比。"""
+        from .streaming import StreamEvent
+        nodes = self.orch.run_handle(task_id).nodes() if self.orch else []
+        if not nodes:
+            return
+        finished = sum(1 for n in nodes
+                       if str(n.get("status")) in ("success", "skipped", "failed"))
+        self._send_sse(StreamEvent("progress", {
+            "current": finished, "total": len(nodes),
+            "message": f"{finished}/{len(nodes)} 节点", "source": "runstore"}))
+
+    def _stream_replay_from_store(self, task_id: str, last_seq: int) -> bool:
+        """从 RunStore 事件流重放（并尾随）一次运行；投影里没有这条运行给 False。
+
+        这条路径治的是"跨进程/重启不可重放"：进程内的 `StreamCallback` 没了，
+        只能读事件表。语义边界照实说：重放的是**运行级事实**
+        （`run.opened/node.finished/run.completed/...`），不是逐 chunk 的正文流——
+        后者从不落盘。
+        """
+        from .streaming import StreamEvent
+        store = self.orch.run_store() if self.orch else None
+        if store is None:
+            return False
+        run = self.orch.run_handle(task_id).record()
+        if run is None:
+            return False
+        handle = self.orch.run_handle(task_id)
+        self._send_sse(StreamEvent("connected", {
+            "task_id": task_id, "reconnect": last_seq > 0,
+            "resumed_from": last_seq, "source": "runstore"}))
+        cursor = int(last_seq)
+        replayed = 0
+        last_frame = time.time()
+        while True:
+            page = store.events(task_id, after_seq=cursor, limit=200)
+            for ev in page:
+                cursor = int(ev["seq"])
+                replayed += 1
+                if not self._send_run_event(ev):
+                    return True  # 客户端断了：响应已开始，静默收尾
+            if page:
+                last_frame = time.time()
+                continue
+            status = str(handle.status())
+            if status in ("done", "failed", "cancelled"):
+                break
+            if time.time() - last_frame >= self._SSE_HEARTBEAT_SECONDS:
+                if not self._send_heartbeat():
+                    return True
+                last_frame = time.time()
+            time.sleep(self._RUN_TAIL_POLL)
+        self._send_sse(StreamEvent("resumed", {
+            "replayed": replayed, "last_seq": cursor, "source": "runstore"}))
+        self._send_run_progress(task_id)
+        if status == "done":
+            self._send_sse(StreamEvent("complete", {
+                "status": status, "last_seq": cursor, "source": "runstore"}))
+        else:
+            self._send_sse(StreamEvent("error", {
+                "error": (run.get("error") or status),
+                "status": status, "last_seq": cursor, "source": "runstore"}))
+        return True
 
     def _stream_replay(self, task_id: str, query: str,
                        existing_callback, last_event_id: int) -> None:
@@ -2286,12 +2387,11 @@ class AdminHandler(BaseHTTPRequestHandler):
         query = params.get("query", [""])[0]
         title = params.get("title", ["自动生成文档"])[0]
 
-        # SSE 重连: 检查 Last-Event-ID header
-        last_event_id = 0
-        last_event_id_header = self.headers.get("Last-Event-ID")
-        if last_event_id_header:
-            with contextlib.suppress(ValueError):
-                last_event_id = int(last_event_id_header)
+        # SSE 重连: 检查 Last-Event-ID header（两套命名空间，见 `_parse_last_event_id`）
+        cursor_ns, cursor_value = self._parse_last_event_id(
+            self.headers.get("Last-Event-ID"))
+        last_event_id = cursor_value if cursor_ns == "sse" else 0
+        run_cursor = cursor_value if cursor_ns == "run" else 0
 
         from loom_core.streaming import (
             StreamCallback,
@@ -2304,7 +2404,18 @@ class AdminHandler(BaseHTTPRequestHandler):
         # 已有活跃流：直接挂接订阅（replay 历史后续推），不再重复起流水线
         existing_callback = get_callback(task_id)
 
-        if not query and existing_callback is None:
+        # 投影里的这条运行在不在调用方的作用域内：越权与"不存在"同形（404），
+        # 不能因为 SSE 走另一条路径就漏掉租户隔离。
+        store_rec = self._scoped_run(task_id)
+        raw_store_rec = self.orch.run_handle(task_id).record() if self.orch else None
+        if raw_store_rec is not None and store_rec is None:
+            self._json({"error": "task not found"}, 404)
+            return
+        # 运行是否"已经存在"：投影优先，其次持久队列（RunStore 关掉时仍成立）
+        has_run = bool(store_rec is not None or (
+            self.orch is not None and self.orch.run_handle(task_id).exists()))
+
+        if not query and existing_callback is None and not has_run:
             self._json({"error": "missing 'query' parameter"}, 400)
             return
 
@@ -2312,12 +2423,29 @@ class AdminHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        # 必须写 `close`：`send_header("Connection", …)` 会改写 close_connection，
+        # 写 keep-alive 会把本方法开头那句 `close_connection = True` 翻回 False ⇒
+        # 流推完后连接一直挂着，等 EOF 的客户端（http.client/urllib）只能超时，
+        # 而 EventSource 看不出来（它自己会重连）。SSE 本就不该参与连接复用。
+        self.send_header("Connection", "close")
         self._apply_cors_headers()
         self.end_headers()
+        self.close_connection = True
 
         if existing_callback:
             self._stream_replay(task_id, query, existing_callback, last_event_id)
+            return
+
+        # 跨进程/重启：投影里有这条运行就重放事件流 + 尾随到终态，
+        # **绝不因为查不到回调而重新起一条流水线**（那会把一次重连变成第二次运行）。
+        if store_rec is not None and self._stream_replay_from_store(task_id, run_cursor):
+            return
+        if has_run:
+            # 有运行、但没有可重放的事件（RunStore 被关掉 / 投影没写成功）：
+            # 如实说"重放不了"，同样不回退到"再跑一遍"。
+            self._send_sse(StreamEvent("error", {
+                "error": "run has no replayable events (is LOOM_RUNSTORE off?)",
+                "task_id": task_id}))
             return
 
         # 首次连接
