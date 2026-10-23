@@ -107,7 +107,7 @@
 - **锁竞争**：历史上 `database is locked` 在并行 worker 下出现过（CHANGELOG 3.9.2 修过四个 store 的首建竞态）。新增 store 必须复用同一套 `enable_wal + busy_timeout=3000` 与幂等加列。
 - **seq 分配**：`MAX(seq)+1` 在同一 run 上必须由单一写入者持有；async/worker/审批三方都往同一 run 写 ⇒ 需要在事务内用 `BEGIN IMMEDIATE`（PG 侧对应行锁），否则并发下 seq 撞 PK。这是本设计唯一的新锁点，必须自带变异判据。
 - **淘汰语义变更**：`_max_task_history=100` 现在是"存在性"的事实源；Stage 2 后它只影响内存缓存。**这是行为变化**：老部署里"重启即查不到"会变成"查得到"——要写进 CHANGELOG 与 README，不是静默改。
-- **回退**：Stage 1 的双写用一个内部开关（非产品 feature flag，默认开、可显式关）；关掉即回到今天形状，读写两侧都不依赖新表。
+- **回退**：~~Stage 1 的双写用一个内部开关~~〔**2026-10-21 移除**：开关不承载读语义（回落是数据边界），留着只会在运行期制造两套形状；写侧改为恒开 + `run_store_health()`与 `/api/health/deep` 的 `runstore` 组件把失败报出来。回退手段=回滚版本〕
 
 ## 6. 三件事的结论（2026-10-21 已拍板）
 

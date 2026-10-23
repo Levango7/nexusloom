@@ -27,12 +27,14 @@ checkpoint JSON、`deliveries.db`、`approvals.db`），读侧 20 处各自回�
 - **禁用 `INSERT OR REPLACE`**：`db_backend` 的方言翻译表里没有它，写出来就是
   "SQLite 能跑、PG 直接报错"的假可用；这里的 upsert 一律 `INSERT OR IGNORE` + `UPDATE`。
 
-开关：`LOOM_RUNSTORE=0` 显式关掉双写（内部开关，不是产品特性；默认开）。
-关掉即回到 Stage 0 之后的形状——读写两侧都不依赖本表，这是 §5 要求的退路。
+**没有开关**（2026-10-21 移除）：写侧恒开，读侧仍按"投影没有这行就回落队列/账本"
+的数据边界降级——这条回落与开关无关，所以删开关不改变任何读语义。写失败不再静默：
+`PipelineOrchestrator.run_store_health()` 与 `/api/health/deep` 的 `runstore` 组件
+会把"库能不能开、结构版本、最近一次失败"报出来。
 """
 from __future__ import annotations
 
-import os
+import contextlib
 import time
 from typing import Any, Literal
 
@@ -112,15 +114,6 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_run_nodes_run ON run_nodes(run_id, status)",
 )
 
-#: 双写开关：默认开，`LOOM_RUNSTORE=0` 显式关（§5 要求的退路）
-SWITCH_ENV = "LOOM_RUNSTORE"
-
-
-def enabled() -> bool:
-    return (os.environ.get(SWITCH_ENV, "1") or "1").strip().lower() not in (
-        "0", "false", "no", "off")
-
-
 class RunStore:
     """运行事实的唯一写入口 + 读接口。
 
@@ -138,6 +131,14 @@ class RunStore:
 
     def _conn(self):
         return self._pool.conn()
+
+    def schema_version(self) -> int:
+        """库里的结构版本；读不到给 0（健康检查用它识别"库是老的/空的"）。"""
+        with contextlib.suppress(Exception):
+            row = self._conn().execute(
+                "SELECT MAX(version) FROM schema_version").fetchone()
+            return int(row[0] or 0) if row else 0
+        return 0
 
     def _init_schema(self) -> None:
         conn = self._conn()

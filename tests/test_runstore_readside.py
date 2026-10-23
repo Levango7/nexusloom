@@ -179,18 +179,22 @@ class TestRunHandleFromStore:
         finally:
             orch.shutdown()
 
-    def test_store_off_falls_back_to_ledger(self, tmp_path, monkeypatch):
-        """`LOOM_RUNSTORE=0` 是设计 §5 的退路：读侧退回 Stage 1 之前的降级形态。"""
+    def test_store_unavailable_falls_back_to_ledger(self, tmp_path, monkeypatch):
+        """读口不可用时退回账本——这是**数据边界**，不是开关。
+
+        开关已经删了（2026-10-21），但"投影读不出来"这个故障仍然真实存在：
+        用替身把读口关掉，验证回落链没有跟着开关一起被删掉。
+        """
         _state_dir(monkeypatch, tmp_path)
         orch = _run_once(tmp_path, "rs-off")
         try:
             _evict(orch)
-            monkeypatch.setenv("LOOM_RUNSTORE", "0")
+            monkeypatch.setattr(orch, "_runstore", lambda: None)
             handle = orch.run_handle("rs-off")
             payload = handle.to_dict()
             assert payload["source"] == "deliveries"
             assert payload["pipeline"] == PIPELINE_NAME
-            # 关掉之后投影不参与存在性判定，只剩账本里那份终态载荷
+            # 读口不可用时投影不参与存在性判定，只剩账本里那份终态载荷
             assert DeliveryLedger().get("rs-off") is not None
         finally:
             orch.shutdown()
@@ -299,6 +303,16 @@ class TestReadSideHTTP:
         assert "rs-http-alice" in [t["id"] for t in body["tasks"]]
         code, body = _req("GET", f"{base}/tasks/rs-http-alice", TOK_OPS)
         assert code == 200 and body["id"] == "rs-http-alice"
+
+    def test_health_deep_reports_runstore(self, served):
+        """没有开关之后，RunStore 的状态必须在健康检查里看得见。"""
+        base, _orch = served
+        code, body = _req("GET", f"{base}/api/health/deep", TOK_OPS)
+        assert code == 200, body
+        comp = body["components"]["runstore"]
+        assert comp["status"] == "healthy", comp
+        assert comp["details"]["schema_version"] >= 1, comp
+        assert "runstore" not in body["unhealthy_components"], body["unhealthy_components"]
 
     def test_dashboard_after_eviction(self, served):
         base, _orch = served

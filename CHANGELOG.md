@@ -35,6 +35,32 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Changed（2026-10-21·续60，RunStore 不再留退路：开关移除 + 失败可观测）
+
+- **删掉 `LOOM_RUNSTORE=0`**：写侧恒开。删之前先确认过它**不承载读语义**——`RunHandle`
+  的回落是数据边界（"投影里没有这行 → 队列 → 账本"），与开关无关；所以删开关不改变任何
+  读结果，只失去"运行期把新写面关掉"的能力（回滚版本可替代）。
+- **失败不再静默**：新增 `PipelineOrchestrator.run_store_health()`（可用性 / 方言 /
+  `schema_version` / 最近一次失败原因）并接进 `/api/health/deep` 的 `runstore` 组件；
+  建口失败的日志从 warning 升为 **error**。没有退路之后，"写不出投影"必须一眼看得见，
+  而不是表现得像"一条运行都没跑过"。
+- **判据从"设环境变量"改成"注入故障"**：两处依赖开关的用例改为用替身让 `RunStore`
+  建口即抛，验证旧三面照旧、且健康检查报 `degraded` + 原因。
+- **`task_queue` 的终态写入保留**（不是这一批，也不该跟着删）：`recover()` 只看
+  `status='running'` 的行并把 owner 已死的翻回 pending 重跑，`queue.finish` 是这条恢复
+  路径的**判据**而不是投影的镜像——删了它，跑完的运行会在下一次 worker 启动时被整批重跑。
+- **顺带修两个被单测掩盖的真缺陷**：
+  ① `/api/health/deep` 在真编排器上必 500——`CircuitBreakerRegistry` 没有 `list()`
+  （读法是 `all() -> {name: to_dict()}`），而既有单测用 MagicMock 把 `hasattr` 与返回
+  值都糊过去了；
+  ② `CostTracker` 的库文件在 `__init__` 之后被删/换掉时，每个操作都撞
+  `no such table: cost_log`（state 目录迁移/清理的同类场景）——改为连接时发现文件是新的
+  就补建表。
+
+判据：`tests/test_runstore_parity.py` 的降级用例改为注入不可用（旧三面照旧 + 健康报
+degraded）+ `schema_version` 一条；`tests/test_runstore_readside.py` 加 `/api/health/deep`
+的 `runstore` 组件断言；`tests/test_cost_tracker.py` 加"库文件被删后自愈"一条。
+
 ### Added（2026-10-21·续59，RunStore Stage 2b：`/stream` 重放改读 `events`，跨进程可重放）
 
 - **重放改由投影回答**：进程内没有 `StreamCallback`（发起流的那条进程退出了 / 换了

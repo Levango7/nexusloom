@@ -296,12 +296,14 @@ class PipelineOrchestrator:
         from .approvals import ApprovalStore
         self.approvals = ApprovalStore()
 
-        # RunStore 双写口（Stage 1）：默认开，`LOOM_RUNSTORE=0` 退回 Stage 0 形状。
-        # 建口是惰性的，且失败只让本运行少一个观测面——新表不是运行前提。
+        # RunStore 写口（Stage 1 起）：恒开，没有开关（2026-10-21 移除退路）。
+        # 建口是惰性的；失败仍只让本运行少一个观测面，但**不静默**——
+        # `run_store_health()` 与 /api/health/deep 会报出来。
         # 属性名带下划线后缀区别（`_run_store`）：早先叫 `_runstore` 时它把同名方法
         # 遮住了，实例属性优先于类方法 ⇒ 每次调用都是 `'NoneType' object is not callable`。
         self._run_store: Any = None
         self._run_store_failed = False
+        self._run_store_error: str = ""
 
         # 性能统计
         self._execution_stats: list[dict] = []
@@ -546,28 +548,43 @@ class PipelineOrchestrator:
     # ─── RunStore 双写（Stage 1：事件 + 投影同事务，旧写面一律不动） ───
 
     def _runstore(self):
-        """惰性拿双写口；关掉、建不起、或此前已失败都返回 None。
+        """惰性拿写口；建不起或此前已失败返回 None（失败原因留给健康检查）。
 
         本方法**自己兜住一切异常**：调用点在 try 之外，如果它能抛，"新观测面写坏就
         只降级不判红"这条承诺就成了空话（第一轮就撞在 `'NoneType' object is not callable`
         上——属性遮蔽同名方法，8 条用例直接 ERROR、6 条 FAILED）。
-        每个降级出口都留一条 warning，不是沉默跳过：Stage 1 的门禁要能区分"没写"与"写错"。
+
+        没有开关之后，失败必须**吵**：`_run_store_error` 会被 `run_store_health()`
+        报给 `/api/health/deep`，日志也从 warning 提为 error（只记首次，避免刷屏）。
         """
+        if self._run_store_failed:
+            return None
         try:
             from . import run_store
 
-            if not run_store.enabled():
-                return None
-            if self._run_store_failed:
-                return None
             if self._run_store is None:
                 self._run_store = run_store.RunStore()
             return self._run_store
         except Exception as e:  # noqa: BLE001
             if not self._run_store_failed:
                 self._run_store_failed = True
-                self._log("warning", "RunStore 建口失败：本运行只写旧面", error=str(e))
+                self._run_store_error = str(e)
+                self._log("error", "RunStore 建口失败：这次运行没有投影可读", error=str(e))
             return None
+
+    def run_store_health(self) -> dict:
+        """RunStore 的可观测状态（健康检查与排障用）。
+
+        `status=degraded` 不是"功能关闭"，而是"这次进程写不出投影"——
+        读侧仍会按数据边界回落到队列/账本，但新运行在投影里会缺席。
+        """
+        store = self._runstore()
+        if store is None:
+            return {"status": "degraded", "available": False,
+                    "error": self._run_store_error}
+        return {"status": "healthy", "available": True,
+                "dialect": store.dialect,
+                "schema_version": store.schema_version()}
 
     def _runstore_open(self, task: PipelineTask, plan: ExecutionPlan,
                        input_file: str, trigger: str) -> None:
