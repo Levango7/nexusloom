@@ -27,6 +27,11 @@ OUTPUT_DIR = PROJECT / ".test_outputs"
 #      /api/versions/stats 因此慢到 4.9s（客户端 5s 超时就翻成测试失败）。
 # 这些默认值在**导入期**解析，所以环境变量必须在 import loom_core 之前设置。
 _STATE_DIR = PROJECT / ".test_state" / f"pid{os.getpid()}"
+# 目录按 pid 命名 ⇒ 里面只可能是本进程的数据；但 Windows 会回收 pid，上个会话
+# 残留的同名目录里可能还躺着 tasks.db / runs.db / 老 approvals.db 的行，而测试里的
+# run_id 是写死的（`run_a` 这种）——回落读会把它们当本会话的事实。会话开始先清。
+if _STATE_DIR.exists():
+    shutil.rmtree(str(_STATE_DIR), ignore_errors=True)
 _STATE_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["LOOM_STATE_DIR"] = str(_STATE_DIR)
 os.environ["LOOM_VERSIONS_DIR"] = str(_STATE_DIR / "versions")
