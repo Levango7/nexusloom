@@ -316,14 +316,19 @@ class RunStore:
         审计、事件、内存任务历史都读它。此前是"台账自己取一次 time.time()、
         调用方再取一次"，同一个决定因此有两个时刻（差几十微秒到几秒，
         取决于台账有没有排队），对账时只能靠容差糊过去——现在没得糊。
+
+        幂等守卫只有一条：那句 `WHERE ... AND status = ?` 加 `rowcount`。
+        先在 Python 里读一次 status 再判是重复的守卫（读到的值到 UPDATE 时
+        已被 `BEGIN IMMEDIATE` 锁住，两种写法同一个事务）——留两条就会有一条
+        是死的，而变异测试证明死的是哪条只取决于谁真的挡住写入。
         """
         stamp = ts or time.time()
         with _Txn(self._pool, self._conn()) as txn:
             conn = txn.conn
             row = conn.execute(
-                "SELECT run_id, status, nodes_json FROM approvals "
+                "SELECT run_id, nodes_json FROM approvals "
                 "WHERE request_id = ?", (request_id,)).fetchone()
-            if row is None or str(row[1]) != PENDING:
+            if row is None:
                 return None
             cur = conn.execute(
                 "UPDATE approvals SET status = ?, decided_at = ?, decided_by = ?, "
@@ -336,11 +341,11 @@ class RunStore:
                 conn, str(row[0]), APPROVAL_DECIDED,
                 {"request_id": request_id, "decision": decision,
                  "by": by or "", "note": note or "", "reason": reason or "",
-                 "nodes": _fast_loads(row[2]) or []}, stamp, txn)
+                 "nodes": _fast_loads(row[1]) or []}, stamp, txn)
             return {"request_id": request_id, "run_id": str(row[0]),
                     "status": decision, "decided_at": stamp, "decided_by": by or "",
                     "note": note or "", "reason": reason or "",
-                    "nodes": list(_fast_loads(row[2]) or []), "seq": seq}
+                    "nodes": list(_fast_loads(row[1]) or []), "seq": seq}
 
     def consume_approval(self, request_id: str) -> int:
         """标记决定已被执行器消费（续跑越过闸门后调用）。"""

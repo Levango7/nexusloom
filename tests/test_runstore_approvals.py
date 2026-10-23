@@ -246,7 +246,7 @@ class TestProjectionAndEvents:
 
 class TestLedgerIsAuthoritative:
     def test_gate_arms_into_the_store_projection(self, tmp_path, monkeypatch):
-        _set_state_dir(monkeypatch, tmp_path)
+        state = _set_state_dir(monkeypatch, tmp_path)
         orch = _orch(tmp_path)
         try:
             task = _run_to_gate(orch, tmp_path)
@@ -259,6 +259,8 @@ class TestLedgerIsAuthoritative:
             assert store.get_approval(row["request_id"]) is not None, \
                 "待批行没落在 runs.db 的投影里"
             assert len(_events_of(store, task.id, "approval.requested")) == 1
+            assert (state / "runs.db").exists(), \
+                "审批事实要跟着 LOOM_STATE_DIR 走，不许散到别处"
         finally:
             orch.shutdown()
 
@@ -327,6 +329,24 @@ class TestLegacyBoundary:
         assert store.get_approval("old-1") is None, "老行不许被抄进投影"
         assert _events_of(store, "old_run", "approval.decided") == [], \
             "老运行不进事件流（不 backfill，也不就地造伪事实）"
+
+    def test_legacy_decided_row_can_still_be_consumed(self, tmp_path):
+        """升级前已批准、还没跑过闸门的运行：续跑时决定要被消费掉，不能二次越闸。
+
+        这条是"老台账只剩历史"那句的另一面——**已存在**的决定仍然活着，
+        连它的消费标记也只能落在老台账上（新投影里根本没有这一行）。
+        """
+        legacy = _legacy(tmp_path)
+        _legacy_insert(legacy, "old-1", "old_run", ["release_gate"], 100.0,
+                       status=APPROVED, decided_at=200.0)
+        ledger = _ledger(tmp_path)
+
+        found = ledger.open_decision("old_run", ["release_gate"])
+        assert found is not None and found["request_id"] == "old-1"
+        ledger.consume("old-1")
+        assert ledger.open_decision("old_run", ["release_gate"]) is None, \
+            "消费没落到老台账：同一个决定可以反复越闸"
+        assert _legacy_rows(legacy)[0]["consumed"] == 1
 
     def test_new_request_never_touches_the_legacy_file(self, tmp_path):
         legacy = tmp_path / "approvals.db"
