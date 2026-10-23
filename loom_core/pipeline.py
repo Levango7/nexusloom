@@ -292,9 +292,13 @@ class PipelineOrchestrator:
         from .task_queue import TaskQueue
         self.task_queue = TaskQueue()
 
-        # 审批台账（跨重启/跨进程）：闸门待批与决策不再只活在内存
+        # 审批台账（跨重启/跨进程）：闸门待批与决策不再只活在内存。
+        # Stage 3a 起事实源是 RunStore（approvals 投影 + approval.* 事件）。
+        # 传的是取写口的闭包而不是实例：①建口惰性，构造引擎不该顺手建库；
+        # ②`self._runstore` 是属性查找，测试与子类替换它之后审批立刻跟着换——
+        #   绑成方法引用会把那一刻的绑定永久抄走（fail-closed 判据就测不到）。
         from .approvals import ApprovalStore
-        self.approvals = ApprovalStore()
+        self.approvals = ApprovalStore(run_store=lambda: self._runstore())
 
         # RunStore 写口（Stage 1 起）：恒开，没有开关（2026-10-21 移除退路）。
         # 建口是惰性的；失败仍只让本运行少一个观测面，但**不静默**——
@@ -828,15 +832,13 @@ class PipelineOrchestrator:
                 if not task.awaiting_approval or task.status != TaskStatus.PAUSED:
                     return False, (f"task {task_id} 未在审批等待中"
                                    f"（status={task.status.value}）")
-                pending = dict(task.awaiting_approval)
-                decision = {"nodes": list(pending.get("nodes", [])),
-                            "decision": "approved",
-                            "note": note, "reason": "", "at": time.time(), "by": by}
                 # fail-closed：先落台账再唤醒。写不进去就不能声称已批准——
                 # 否则执行了却没有持久授权，重启后台账仍显示待批（复核确认）。
-                if not self._decide_in_store(task_id, "approved", note, "", by):
+                recorded = self._decide_in_store(task_id, "approved", note, "", by)
+                if recorded is None:
                     return False, (f"task {task_id} 审批台账不可用或决定冲突，"
                                    "拒绝放行")
+                decision = self._decision_from_record(recorded)
                 task.approvals.append(decision)
                 task.awaiting_approval = None
                 task.status = TaskStatus.RUNNING
@@ -849,12 +851,12 @@ class PipelineOrchestrator:
                         return False, f"task not found: {task_id}"
                     return False, (f"task {task_id} 未在审批等待中"
                                    f"（status={queue_row.get('status')}）")
-                if not self.approvals.decide(str(row["request_id"]), "approved",
-                                             by=by, note=note, reason=""):
+                recorded = self._decide_in_ledger(str(row["request_id"]), "approved",
+                                                  note, "", by)
+                if recorded is None:
                     return False, f"task {task_id} 未在审批等待中（决定已被处理）"
-                nodes = list(row.get("nodes") or [])
-                decision = {"nodes": nodes, "decision": "approved", "note": note,
-                            "reason": "", "at": time.time(), "by": by}
+                decision = self._decision_from_record(recorded)
+                nodes = list(decision["nodes"])
                 resumed = self.task_queue.mark_for_resume(task_id)
                 self._log(
                     "info",
@@ -887,14 +889,11 @@ class PipelineOrchestrator:
                 if not task.awaiting_approval or task.status != TaskStatus.PAUSED:
                     return False, (f"task {task_id} 未在审批等待中"
                                    f"（status={task.status.value}）")
-                pending = dict(task.awaiting_approval)
-                decision = {"nodes": list(pending.get("nodes") or []),
-                            "decision": "rejected",
-                            "note": "", "reason": reason,
-                            "at": time.time(), "by": by}
-                if not self._decide_in_store(task_id, "rejected", "", reason, by):
+                recorded = self._decide_in_store(task_id, "rejected", "", reason, by)
+                if recorded is None:
                     return False, (f"task {task_id} 审批台账不可用或决定冲突，"
                                    "拒绝驳回")
+                decision = self._decision_from_record(recorded)
                 task.approvals.append(decision)
                 task.awaiting_approval = None
                 task.error = (f"审批被驳回: {reason}" if reason else "审批被驳回")
@@ -911,15 +910,15 @@ class PipelineOrchestrator:
                         return False, f"task not found: {task_id}"
                     return False, (f"task {task_id} 未在审批等待中"
                                    f"（status={queue_row.get('status')}）")
-                if not self.approvals.decide(str(row["request_id"]), "rejected",
-                                             by=by, note="", reason=reason):
+                recorded = self._decide_in_ledger(str(row["request_id"]), "rejected",
+                                                  "", reason, by)
+                if recorded is None:
                     return False, f"task {task_id} 未在审批等待中（决定已被处理）"
-                nodes = list(row.get("nodes") or [])
-                decision = {"nodes": nodes, "decision": "rejected", "note": "",
-                            "reason": reason, "at": time.time(), "by": by}
+                decision = self._decision_from_record(recorded)
                 self.task_queue.cancel(task_id)
                 self._log("warning",
-                          f"审批驳回（持久台账）：{nodes} —— {reason or '无原因'}",
+                          f"审批驳回（持久台账）：{decision['nodes']} —— "
+                          f"{reason or '无原因'}",
                           task_id=task_id)
         self._audit_approval(task_id, decision)
         emit_event("task.rejected", {"task_id": task_id, "nodes": decision["nodes"],
@@ -1096,29 +1095,45 @@ class PipelineOrchestrator:
         except Exception as e:  # noqa: BLE001
             self._log("warning", "审批决定消费标记写入失败", task_id=task.id,
                       error=str(e))
-        task.approvals.append({
-            "nodes": list(decision.get("nodes") or []),
-            "decision": str(decision.get("status") or ""),
-            "note": str(decision.get("note") or ""),
-            "reason": str(decision.get("reason") or ""),
-            "at": float(decision.get("decided_at") or 0.0),
-            "by": str(decision.get("decided_by") or ""),
-        })
+        task.approvals.append(self._decision_from_record(decision))
         return decision
 
-    def _decide_in_store(self, task_id: str, decision: str, note: str,
-                         reason: str, by: str) -> bool:
-        """把内存路径上的决定也写进台账（写失败只告警：内存审批仍然生效）。"""
+    @staticmethod
+    def _decision_from_record(record: dict) -> dict:
+        """台账行 → 审计 / 内存历史用的决定形状（字段全部来自台账）。
+
+        这几个字段此前是调用方各自 `time.time()` 拼出来的，于是同一个决定在台账、
+        事件、审计里可能有两个时刻，对账只能靠容差；现在台账单点取值，没得糊。
+        """
+        return {"nodes": list(record.get("nodes") or []),
+                "decision": str(record.get("status") or ""),
+                "note": str(record.get("note") or ""),
+                "reason": str(record.get("reason") or ""),
+                "at": float(record.get("decided_at") or 0.0),
+                "by": str(record.get("decided_by") or "")}
+
+    def _decide_in_ledger(self, request_id: str, decision: str, note: str,
+                          reason: str, by: str) -> dict | None:
+        """决策落台账并取回权威行；None = 没落下去（已被决策 / 台账不可用）。
+
+        返回 None 时调用方必须 fail-closed：台账不可用却回答"已批准"，等于
+        执行了一个没有持久授权的决定（重启后台账仍显示待批）。
+        """
         try:
-            row = self.approvals.pending_for_run(task_id)
-            if row is None:
-                return False
-            return self.approvals.decide(str(row["request_id"]), decision,
-                                         by=by, note=note, reason=reason)
+            return self.approvals.decide_recorded(request_id, decision, by=by,
+                                                  note=note, reason=reason)
         except Exception as e:  # noqa: BLE001
-            self._log("warning", "审批台账写入失败（仅影响重启后的可审批性）",
-                      task_id=task_id, error=str(e))
-            return False
+            self._log("error", "审批台账写入失败", error=str(e))
+            return None
+
+    def _decide_in_store(self, task_id: str, decision: str, note: str,
+                         reason: str, by: str) -> dict | None:
+        """内存路径上的决定同样落台账（同一张投影，不是另一面墙）。"""
+        row = self._pending_row(task_id)
+        if row is None:
+            return None
+        return self._decide_in_ledger(str(row["request_id"]), decision, note,
+                                      reason, by)
 
     def _queue_row(self, task_id: str) -> dict | None:
         try:
