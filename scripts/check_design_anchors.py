@@ -16,9 +16,11 @@ ANCHORS = [
     ("loom_core/message_store.py", 171, "sqlite3.connect"),
     ("loom_core/audit.py", 31, "def write_audit"),
     ("loom_core/deliveries.py", 61, "def record"),
-    ("loom_core/approvals.py", 84, "def request"),
-    ("loom_core/approvals.py", 107, "def decide"),
-    ("loom_core/approvals.py", 121, "def consume"),
+    # Stage 3a：审批的三个写点从 approvals.py 搬进了 RunStore（投影 + 同事务事件）。
+    # §1 那一行"审批本身就是一个写面"的结论必须指向新位置，而不是退役成无处可指。
+    ("loom_core/run_store.py", 288, "def open_approval"),
+    ("loom_core/run_store.py", 309, "def decide_approval"),
+    ("loom_core/run_store.py", 350, "def consume_approval"),
     ("loom_core/task_queue.py", 186, "def complete"),
     ("loom_core/task_queue.py", 110, "add_column_if_missing"),
     ("loom_core/task_queue.py", 113, "add_column_if_missing"),
@@ -36,18 +38,18 @@ ANCHORS = [
     # pipeline.py 这一批随 Stage 0（异步并轨）+ Stage 1（双写口）整体下移：Stage 0 插了
     # 4 行字段 + 61 行 helper，Stage 1 又插 7 行 init + 108 行写口。**偏移不是常数**
     # （+4 / +65 / +47 / +95 / +106 并存），所以 remap 只能按整行文本对齐，不能推算。
-    ("loom_core/pipeline.py", 310, "_max_task_history"),
-    ("loom_core/pipeline.py", 781, "def cancel"),
-    ("loom_core/pipeline.py", 794, "def resume"),
+    ("loom_core/pipeline.py", 314, "_max_task_history"),
+    ("loom_core/pipeline.py", 785, "def cancel"),
+    ("loom_core/pipeline.py", 798, "def resume"),
     # 原 1290「不更新 task_queue」那句 docstring 已被 Stage 0 改掉——退役它，改钉新增的
     # 共用写口：§2 那条裂缝的"已并轨"结论必须指向一个真实存在的函数。
-    ("loom_core/pipeline.py", 508, "def _record_plan_terminal_state"),
-    ("loom_core/pipeline.py", 714, "pipeline.started"),
-    ("loom_core/pipeline.py", 1061, "pipeline.finished"),
-    ("loom_core/pipeline.py", 1498, "pipeline.finished"),
-    ("loom_core/pipeline.py", 1732, "record"),
-    ("loom_core/pipeline.py", 1830, "pipeline.audit"),
-    ("loom_core/pipeline.py", 1997, ".done"),
+    ("loom_core/pipeline.py", 512, "def _record_plan_terminal_state"),
+    ("loom_core/pipeline.py", 718, "pipeline.started"),
+    ("loom_core/pipeline.py", 1060, "pipeline.finished"),
+    ("loom_core/pipeline.py", 1513, "pipeline.finished"),
+    ("loom_core/pipeline.py", 1747, "record"),
+    ("loom_core/pipeline.py", 1845, "pipeline.audit"),
+    ("loom_core/pipeline.py", 2012, ".done"),
     ("loom_core/admin_api.py", 654, "get_task"),
     ("loom_core/admin_api.py", 1038, "list_tasks"),
     # Stage 2：/tasks、dashboard、cost 三处读口从 `list_tasks`（内存）换成

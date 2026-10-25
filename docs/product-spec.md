@@ -127,6 +127,9 @@
 > **2026-10-20 复核后的状态**：控制台已**随包发布**（`loom_core/dashboard/`，`GET /` 直出，
 > 发布门禁 `verify_dist.py` 钉住三个资源）；新增**审批收件箱** `GET /api/approvals` + 控制台
 > "待审批"卡片，审批**跨重启可用**（台账 `approvals.db` + 队列续跑标记）。
+> 〔**2026-10-23 更新**：审批台账的事实源已换成 `runs.db` 的 `approvals` 投影 +
+> `approval.*` 事件（RunStore Stage 3a）；`approvals.db` 停止新增行，只按数据边界
+> 读/了结本批之前的老行。跨重启可批这件事不变。〕
 > 六屏 IA（S1–S6）在 `docs/product-design-review-2026-10-20.md` 里被建议替换为按任务切的
 > 六个面（Runs / Run 详情 / Approvals / Deliveries / Workflows&Schedules / Settings）——
 > 本表保留为历史目标，不再作为下一批 UI 的排期依据。

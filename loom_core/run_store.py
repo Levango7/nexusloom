@@ -7,7 +7,7 @@ checkpoint JSON、`deliveries.db`、`approvals.db`），读侧 20 处各自回�
 **同一个事务**里更新投影（`runs` / `run_nodes`）——恢复与审计因此共处同一个时间
 坐标系，不会出现"事件说完成、投影说运行中"。
 
-四张表（Stage 1 只做这些；`artifacts`/`schedules`/`cost_entries` 属后续批）：
+四张表 + 一张审批投影（Stage 3a 起，审批的事实源就是这里）：
 
 | 表 | 角色 |
 |---|---|
@@ -15,6 +15,7 @@ checkpoint JSON、`deliveries.db`、`approvals.db`），读侧 20 处各自回�
 | `events` | 追加式事实流，PK `(run_id, seq)`，`seq` 每运行单调 |
 | `runs` | 运行投影（列表页与作用域判定的唯一来源），`last_seq` 让 SSE 游标跨进程续传 |
 | `run_nodes` | 逐节点投影，把原先埋在 `deliveries.payload_json` 里的事实升为一等行
+| `approvals` | 审批投影（结构版本 2 起）：待批/决定/消费是可变状态，所以要投影；每次变更同事务落一条事件
 
 四条刻意留下的边界（对外要说清，不能读成"什么都齐了"）：
 
@@ -43,7 +44,7 @@ from artesian.fast_json import loads as _fast_loads
 
 from . import db_backend
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: 本批的形状化写口；其余事实走 `record()`，同一条流、不动投影
 RUN_OPENED = "run.opened"
@@ -52,6 +53,17 @@ NODE_FINISHED = "node.finished"
 RUN_COMPLETED = "run.completed"
 RUN_FAILED = "run.failed"
 RUN_CANCELLED = "run.cancelled"
+
+#: 审批是一条可变状态（pending → approved/rejected → consumed），
+#: 所以它既有投影又有事件：状态给收件箱读，事件给重放与审计读。
+APPROVAL_REQUESTED = "approval.requested"
+APPROVAL_DECIDED = "approval.decided"
+APPROVAL_CONSUMED = "approval.consumed"
+
+#: 审批行状态字面量（`approvals.py` 从这里再导出，词汇表只有一份）
+PENDING = "pending"
+APPROVED = "approved"
+REJECTED = "rejected"
 
 #: 终态投影状态 → 事件类型
 _TERMINAL_EVENT = {"done": RUN_COMPLETED, "failed": RUN_FAILED,
@@ -105,6 +117,23 @@ CREATE TABLE IF NOT EXISTS run_nodes (
     PRIMARY KEY (run_id, node)
 )
 """,
+    """
+CREATE TABLE IF NOT EXISTS approvals (
+    request_id    TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL,
+    pipeline      TEXT NOT NULL DEFAULT '',
+    principal     TEXT NOT NULL DEFAULT '',
+    nodes_json    TEXT NOT NULL DEFAULT '[]',
+    messages_json TEXT NOT NULL DEFAULT '{}',
+    status        TEXT NOT NULL DEFAULT 'pending',
+    requested_at  REAL NOT NULL DEFAULT 0,
+    decided_at    REAL NOT NULL DEFAULT 0,
+    decided_by    TEXT NOT NULL DEFAULT '',
+    note          TEXT NOT NULL DEFAULT '',
+    reason        TEXT NOT NULL DEFAULT '',
+    consumed      INTEGER NOT NULL DEFAULT 0
+)
+""",
 )
 
 _INDEXES = (
@@ -112,6 +141,8 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_runs_principal ON runs(principal, started_at)",
     "CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status, finished_at)",
     "CREATE INDEX IF NOT EXISTS idx_run_nodes_run ON run_nodes(run_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_approvals_run ON approvals(run_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_approvals_pending ON approvals(status, requested_at)",
 )
 
 class RunStore:
@@ -243,13 +274,91 @@ class RunStore:
 
     def record(self, run_id: str, type: str, payload: dict | None = None,
                ts: float | None = None) -> int:
-        """不属于上述三种形状的事实（审批、条件跳过……）：只追加事件，不动投影。
+        """不属于上述三种形状的事实（条件跳过……）：只追加事件，不动投影。
 
-        Stage 3 才决定这些要不要升成投影；现在先把它们收进同一条流，免得再添一面总线。
+        Stage 3 把审批升成了投影（`open_approval` 等，见下）——它是可变状态，
+        收件箱要按 status 查；其余仍在"只进事件流"这一档，免得再添一面总线。
         """
         with _Txn(self._pool, self._conn()) as txn:
             return self._append(txn.conn, run_id, type, payload or {},
                                 ts or time.time(), txn)
+
+    # ── 审批：投影 + 事件同事务（Stage 3a 起审批的唯一写口）──────
+
+    def open_approval(self, run_id: str, request_id: str, pipeline: str = "",
+                      nodes: list | None = None, messages: dict | None = None,
+                      principal: str = "", ts: float | None = None) -> int:
+        """登记一次待批：投影行 + `approval.requested`，同一事务。"""
+        stamp = ts or time.time()
+        node_list = list(nodes or [])
+        message_map = dict(messages or {})
+        with _Txn(self._pool, self._conn()) as txn:
+            conn = txn.conn
+            conn.execute(
+                "INSERT INTO approvals (request_id, run_id, pipeline, principal, "
+                "nodes_json, messages_json, status, requested_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (request_id, run_id, pipeline, principal or "",
+                 _fast_dumps(node_list), _fast_dumps(message_map), PENDING, stamp))
+            return self._append(
+                conn, run_id, APPROVAL_REQUESTED,
+                {"request_id": request_id, "nodes": node_list,
+                 "messages": message_map, "pipeline": pipeline,
+                 "principal": principal or ""}, stamp, txn)
+
+    def decide_approval(self, request_id: str, decision: str, by: str = "",
+                        note: str = "", reason: str = "",
+                        ts: float | None = None) -> dict | None:
+        """作出决定。只有 pending 行可被决策（幂等：第二次给 None）。
+
+        返回 None 的含义是"这个决定没落下去"——调用方必须据此拒绝放行，
+        不能声称已批准。返回的 `decided_at` 是这次决定的**唯一时间源**：
+        审计、事件、内存任务历史都读它。此前是"台账自己取一次 time.time()、
+        调用方再取一次"，同一个决定因此有两个时刻（差几十微秒到几秒，
+        取决于台账有没有排队），对账时只能靠容差糊过去——现在没得糊。
+
+        幂等守卫只有一条：那句 `WHERE ... AND status = ?` 加 `rowcount`。
+        先在 Python 里读一次 status 再判是重复的守卫（读到的值到 UPDATE 时
+        已被 `BEGIN IMMEDIATE` 锁住，两种写法同一个事务）——留两条就会有一条
+        是死的，而变异测试证明死的是哪条只取决于谁真的挡住写入。
+        """
+        stamp = ts or time.time()
+        with _Txn(self._pool, self._conn()) as txn:
+            conn = txn.conn
+            row = conn.execute(
+                "SELECT run_id, nodes_json FROM approvals "
+                "WHERE request_id = ?", (request_id,)).fetchone()
+            if row is None:
+                return None
+            cur = conn.execute(
+                "UPDATE approvals SET status = ?, decided_at = ?, decided_by = ?, "
+                "note = ?, reason = ? WHERE request_id = ? AND status = ?",
+                (decision, stamp, by or "", note or "", reason or "",
+                 request_id, PENDING))
+            if cur.rowcount <= 0:
+                return None
+            seq = self._append(
+                conn, str(row[0]), APPROVAL_DECIDED,
+                {"request_id": request_id, "decision": decision,
+                 "by": by or "", "note": note or "", "reason": reason or "",
+                 "nodes": _fast_loads(row[1]) or []}, stamp, txn)
+            return {"request_id": request_id, "run_id": str(row[0]),
+                    "status": decision, "decided_at": stamp, "decided_by": by or "",
+                    "note": note or "", "reason": reason or "",
+                    "nodes": list(_fast_loads(row[1]) or []), "seq": seq}
+
+    def consume_approval(self, request_id: str) -> int:
+        """标记决定已被执行器消费（续跑越过闸门后调用）。"""
+        with _Txn(self._pool, self._conn()) as txn:
+            conn = txn.conn
+            row = conn.execute("SELECT run_id FROM approvals WHERE request_id = ?",
+                               (request_id,)).fetchone()
+            if row is None:
+                return 0
+            conn.execute("UPDATE approvals SET consumed = 1 WHERE request_id = ?",
+                         (request_id,))
+            return self._append(conn, str(row[0]), APPROVAL_CONSUMED,
+                                {"request_id": request_id}, time.time(), txn)
 
     def _append(self, conn, run_id: str, type: str, payload: dict,
                 ts: float, txn: _Txn) -> int:
@@ -318,6 +427,62 @@ class RunStore:
                  "status": r[3], "started_at": r[4], "finished_at": r[5],
                  "error": r[6] or ""}
                 for r in rows]
+
+    # ── 审批读口 ──────────────────────────────────────
+    # 列一律显式列出、按位置建字典：`SELECT *` + `sqlite3.Row` 是 approvals.db
+    # 老实现里唯一依赖 SQLite 的地方（PG 给的是元组），这里不把它带进来。
+    _APPROVAL_COLS = (
+        "SELECT request_id, run_id, pipeline, principal, nodes_json, messages_json, "
+        "status, requested_at, decided_at, decided_by, note, reason, consumed ")
+
+    @staticmethod
+    def _approval_from_row(r: Any) -> dict:
+        return {"request_id": r[0], "run_id": r[1], "pipeline": r[2],
+                 "principal": r[3], "nodes": list(_fast_loads(r[4]) or []),
+                 "messages": dict(_fast_loads(r[5]) or {}), "status": r[6],
+                 "requested_at": r[7], "decided_at": r[8], "decided_by": r[9],
+                 "note": r[10], "reason": r[11], "consumed": int(r[12] or 0)}
+
+    def get_approval(self, request_id: str) -> dict | None:
+        row = self._conn().execute(
+            self._APPROVAL_COLS + "FROM approvals WHERE request_id = ?",
+            (request_id,)).fetchone()
+        return self._approval_from_row(row) if row else None
+
+    def pending_approval(self, run_id: str) -> dict | None:
+        """该运行当前**唯一**的待批行（没有则 None）。"""
+        row = self._conn().execute(
+            self._APPROVAL_COLS + "FROM approvals WHERE run_id = ? AND status = ? "
+            "ORDER BY requested_at DESC LIMIT 1", (run_id, PENDING)).fetchone()
+        return self._approval_from_row(row) if row else None
+
+    def open_approvals(self, run_id: str) -> list[dict]:
+        """该运行已作出但尚未消费的决定（新→旧），节点集合的匹配由调用方判。"""
+        rows = self._conn().execute(
+            self._APPROVAL_COLS + "FROM approvals WHERE run_id = ? "
+            "AND status IN (?, ?) AND consumed = 0 ORDER BY decided_at DESC",
+            (run_id, APPROVED, REJECTED)).fetchall()
+        return [self._approval_from_row(r) for r in rows]
+
+    def approvals_for_run(self, run_id: str) -> list[dict]:
+        """该运行的全部审批历史（新→旧），供详情页/对账。"""
+        rows = self._conn().execute(
+            self._APPROVAL_COLS + "FROM approvals WHERE run_id = ? "
+            "ORDER BY requested_at DESC", (run_id,)).fetchall()
+        return [self._approval_from_row(r) for r in rows]
+
+    def list_pending_approvals(self, principal: str | None = None,
+                               limit: int = 200) -> list[dict]:
+        """待批收件箱。`principal=None` 不过滤（admin 面），给了只看自己名下。"""
+        sql = self._APPROVAL_COLS + "FROM approvals WHERE status = ?"
+        args: list[Any] = [PENDING]
+        if principal is not None:
+            sql += " AND principal = ?"
+            args.append(principal)
+        sql += " ORDER BY requested_at ASC LIMIT ?"
+        args.append(int(limit))
+        rows = self._conn().execute(sql, args).fetchall()
+        return [self._approval_from_row(r) for r in rows]
 
 
 class _Txn:

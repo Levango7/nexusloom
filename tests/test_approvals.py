@@ -40,6 +40,7 @@ from loom_core.approvals import (  # noqa: E402
     REJECTED,
     ApprovalStore,
 )
+from loom_core.run_store import RunStore  # noqa: E402
 from loom_core.scheduler import Scheduler  # noqa: E402
 from loom_core.task_queue import TaskQueue  # noqa: E402
 from loom_core.worker import TaskWorker  # noqa: E402
@@ -64,9 +65,18 @@ topology:
 # ─── 1. 台账单元 ───────────────────────────────────
 
 class TestApprovalStore:
+    """台账契约单元。Stage 3a 起事实源是 RunStore 的 `approvals` 投影 + `approval.*` 事件。
+
+    下面这批断言钉的是"审批台账对外承诺的语义"（待办复用、只有 pending 可被决策、
+    决定消费后不再越闸、按 principal 过滤、按节点集合绑定），换后端不该改变任何一条
+    ——所以用例形状原样保留，只把数据来源换成 store 门面；`db_path` 指一个不存在的
+    老台账，让这一组用例绝不靠回落通过。
+    """
+
     @pytest.fixture
     def store(self, tmp_path):
-        return ApprovalStore(str(tmp_path / "approvals.db"))
+        return ApprovalStore(run_store=RunStore(str(tmp_path / "runs.db")),
+                             db_path=str(tmp_path / "approvals.db"))
 
     def test_request_is_reused_while_pending(self, store):
         first = store.request("r1", "p", ["g"], {"g": "ok"}, principal="alice")
