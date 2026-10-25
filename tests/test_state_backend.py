@@ -191,7 +191,7 @@ class TestPostgresTaskQueue:
         assert item and item["task_id"] == tid
         assert item["principal"] == "alice"
         assert item["config"] == {"k": "v"}
-        q.complete(tid, result={"ok": True})
+        q.complete(tid)
         row = q.get(tid)
         assert row["status"] == "done"
         assert row["result"]["ok"] is True

@@ -12,7 +12,7 @@
     q = TaskQueue("bus_data/tasks.db")
     q.submit("task-001", "docgen", "input.md", {"key": "val"})
     task = q.acquire(worker_id="w1")      # 原子出队
-    q.complete("task-001", result={...})  # 完成
+    q.complete("task-001")           # 完成（结果正文不在队列，见 run_nodes 投影）
     q.recover()                            # 重启恢复
 """
 from __future__ import annotations
@@ -28,6 +28,16 @@ from artesian.fast_json import dumps as _fast_dumps
 from artesian.fast_json import loads as _fast_loads
 
 from .db_backend import resolve_backend
+
+#: `get()` / `list_all()` 的行形状，列顺序与 `_row_to_dict` 严格一一对应。
+#: 这份清单原先在三个查询里各抄一遍——Stage 3b 把 `result_json` 换成 `projection`
+#: 时任何一处漏改都会**静默**把错位的结果交给调用方（列是按位置取的），所以收成常量。
+_ROW_COLS = (
+    "SELECT task_id, pipeline_name, input_file, status, config_json, "
+    "COALESCE(projection, 'ok') AS projection, error, created_at, started_at, "
+    "finished_at, worker_id "
+    "FROM task_queue"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +105,7 @@ class TaskQueue:
                     input_file    TEXT NOT NULL,
                     status        TEXT NOT NULL DEFAULT 'pending',
                     config_json   TEXT DEFAULT '{}',
-                    result_json   TEXT DEFAULT '{}',
+                    projection    TEXT DEFAULT 'ok',
                     error         TEXT DEFAULT '',
                     created_at    REAL NOT NULL,
                     started_at    REAL DEFAULT 0,
@@ -116,6 +126,13 @@ class TaskQueue:
             # 把行放回 pending 并置 1，worker 据此走 run_plan(resume=True)。
             self._backend.add_column_if_missing(
                 conn, "task_queue", "resume", "INTEGER DEFAULT 0")
+            # 投影健康位（Stage 3b，2026-10-24）：这次运行的 RunStore 投影到底落成没有。
+            # `ok` = 投影写了；`incomplete` = 想写但写失败（要补账）；`legacy` = 走的是
+            # 从不写投影的 legacy 路径（按设计缺，不是故障）。队列是投影写不进去时
+            # **唯一还活着的一行**，所以这个标记只能住在这里。老库里的行补列后按 'ok'
+            # 读（COALESCE），它们的真实历史仍由 deliveries/投影各自回答，不回填。
+            self._backend.add_column_if_missing(
+                conn, "task_queue", "projection", "TEXT DEFAULT 'ok'")
 
     def submit(self, task_id: str, pipeline_name: str, input_file: str,
                config: dict = None, principal: str = "") -> bool:
@@ -183,14 +200,20 @@ class TaskQueue:
                     "resume": bool(resume),
                 }
 
-    def complete(self, task_id: str, result: dict = None, error: str = ""):
-        """标记任务完成或失败"""
+    def complete(self, task_id: str, error: str = "") -> None:
+        """标记任务完成或失败。
+
+        Stage 3b 起不再收 `result`：节点结果正文的事实源是 RunStore 的
+        `run_nodes.result_json`（以及本批之前的 `deliveries.payload_json`），
+        队列这一列此前是**第三份拷贝**，而实测全仓没有任何读者——`RunHandle` 与
+        `_queue_row` 只用 `status`。留着它只多付一次整份结果的写入（§5 警告的写放大）。
+        """
         with self._lock, self._get_conn() as conn:
             status = "failed" if error else "done"
             conn.execute(
-                "UPDATE task_queue SET status = ?, result_json = ?, error = ?, finished_at = ? "
+                "UPDATE task_queue SET status = ?, error = ?, finished_at = ? "
                 "WHERE task_id = ?",
-                (status, _fast_dumps(result or {}), error, time.time(), task_id),
+                (status, error, time.time(), task_id),
             )
 
     def cancel(self, task_id: str):
@@ -246,14 +269,14 @@ class TaskQueue:
             conn.execute("UPDATE task_queue SET resume = 0 WHERE task_id = ?",
                          (task_id,))
 
-    def update_status(self, task_id: str, status: str, result: dict = None, error: str = ""):
-        """通用状态更新"""
+    def update_status(self, task_id: str, status: str, error: str = "") -> None:
+        """通用状态更新（`error` 非空或状态进终态时一并盖章时间）。"""
         with self._lock, self._get_conn() as conn:
-            if result is not None or error:
+            if error or status in ("done", "failed", "cancelled"):
                 conn.execute(
-                    "UPDATE task_queue SET status = ?, result_json = ?, error = ?, finished_at = ? "
+                    "UPDATE task_queue SET status = ?, error = ?, finished_at = ? "
                     "WHERE task_id = ?",
-                    (status, _fast_dumps(result or {}), error,
+                    (status, error,
                      time.time() if status in ("done", "failed", "cancelled") else 0,
                      task_id),
                 )
@@ -263,8 +286,30 @@ class TaskQueue:
                     (status, task_id),
                 )
 
-    def finish(self, task_id: str, status: str, result: dict = None,
-               error: str = "", allow_states: tuple = ("running", "pending")) -> bool:
+    def set_projection(self, task_id: str, state: str) -> bool:
+        """把这次运行的投影健康位写成 `ok` / `incomplete` / `legacy`。
+
+        调用顺序是**先悲观后升格**：终态写入时先记 `incomplete`，投影确认落地后才
+        升成 `ok`。反过来（先写 ok 再写投影）会留一个"队列说一切正常、投影里查无
+        此运行"的窗口——而那正是这批要消灭的静默缺口。
+        """
+        with self._lock, self._get_conn() as conn:
+            cur = conn.execute(
+                "UPDATE task_queue SET projection = ? WHERE task_id = ?",
+                (state, task_id))
+            return bool(cur.rowcount > 0)
+
+    def count_projection(self, state: str) -> int:
+        """按投影健康位统计行数（`run_store_health()` 用它报"有几条运行缺投影"）。"""
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM task_queue WHERE COALESCE(projection, 'ok') = ?",
+                (state,)).fetchone()
+        return int(row[0]) if row else 0
+
+    def finish(self, task_id: str, status: str, error: str = "",
+               allow_states: tuple = ("running", "pending"),
+               projection: str = "ok") -> bool:
         """写终态，但只在当前状态属于 allow_states 时才写。返回是否真的写了。
 
         为什么需要它：`update_status` 是无条件覆写，而 worker 化之后"用户取消"
@@ -274,6 +319,9 @@ class TaskQueue:
         不拼 IN 子句（bandit B608）：先读当前状态，再用常量 SQL 把那个观测值写进
         WHERE。观测值参与条件让"读到 cancelled 之后才被改"的竞态仍然安全——
         状态一变 rowcount 就归 0，不会覆写。
+
+        `projection` 一起写进行里（见 `set_projection` 的先悲观后升格）；结果正文
+        自 Stage 3b 起不再落这张表。
         """
         with self._lock, self._get_conn() as conn:
             row = conn.execute(
@@ -285,9 +333,9 @@ class TaskQueue:
                     f" 不在允许集合 {allow_states} 内（可能已被取消）")
                 return False
             cursor = conn.execute(
-                "UPDATE task_queue SET status = ?, result_json = ?, error = ?, finished_at = ? "
-                "WHERE task_id = ? AND status = ?",
-                (status, _fast_dumps(result or {}), error, time.time(), task_id, row[0]),
+                "UPDATE task_queue SET status = ?, error = ?, finished_at = ?, "
+                "projection = ? WHERE task_id = ? AND status = ?",
+                (status, error, time.time(), projection, task_id, row[0]),
             )
             return bool(cursor.rowcount > 0)
 
@@ -343,12 +391,8 @@ class TaskQueue:
     def get(self, task_id: str) -> dict | None:
         """查询单个任务"""
         with self._get_conn() as conn:
-            row = conn.execute(
-                "SELECT task_id, pipeline_name, input_file, status, config_json, "
-                "result_json, error, created_at, started_at, finished_at, worker_id "
-                "FROM task_queue WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
+            row = conn.execute(_ROW_COLS + " WHERE task_id = ?",
+                               (task_id,)).fetchone()
             if not row:
                 return None
             return self._row_to_dict(row)
@@ -358,16 +402,12 @@ class TaskQueue:
         with self._get_conn() as conn:
             if status:
                 rows = conn.execute(
-                    "SELECT task_id, pipeline_name, input_file, status, config_json, "
-                    "result_json, error, created_at, started_at, finished_at, worker_id "
-                    "FROM task_queue WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                    _ROW_COLS + " WHERE status = ? ORDER BY created_at DESC LIMIT ?",
                     (status, limit),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT task_id, pipeline_name, input_file, status, config_json, "
-                    "result_json, error, created_at, started_at, finished_at, worker_id "
-                    "FROM task_queue ORDER BY created_at DESC LIMIT ?",
+                    _ROW_COLS + " ORDER BY created_at DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
             return [self._row_to_dict(r) for r in rows]
@@ -402,7 +442,7 @@ class TaskQueue:
             "input_file": row[2],
             "status": row[3],
             "config": _fast_loads(row[4]) if row[4] else {},
-            "result": _fast_loads(row[5]) if row[5] else {},
+            "projection": row[5] or "ok",
             "error": row[6] or "",
             "created_at": row[7],
             "started_at": row[8],

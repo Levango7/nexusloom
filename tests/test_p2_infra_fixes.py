@@ -162,7 +162,7 @@ class TestTaskQueueCloseAll:
                 try:
                     task = q.acquire("wk2")
                     assert task is not None
-                    q.complete(task["task_id"], result={})
+                    q.complete(task["task_id"])
                 except Exception as e:  # pragma: no cover
                     t2_errors.append(e)
 
