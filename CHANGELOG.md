@@ -35,6 +35,50 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Added（2026-10-23·续61，RunStore Stage 3a：审批的事实源换成 runs.db 的投影 + 事件）
+
+- **审批摘写**：待批登记、决策、消费不再写 `approvals.db`，改为写 `runs.db` 的
+  `approvals` 投影 **+ 同事务的 `approval.requested/decided/consumed` 事件**（结构版本
+  1 → 2）。`ApprovalStore` 变成 RunStore 的门面，五个调用点（闸门 arm、approve/reject 各
+  两条路径、续跑取决定、Admin 收件箱）形状不变——换后端不该改变台账对外承诺的语义，
+  所以 `tests/test_approvals.py` 那 7 条台账契约用例只换了数据来源、断言原样保留。
+- **一个决定只有一个时刻**：`nodes / by / at / decision` 由 `_decision_from_record` 从台账行
+  单点映射，投影行、`approval.decided` 事件、内存 `task.approvals`、审计
+  `audit/approvals.jsonl` 四方同值。此前调用方 `time.time()` 一次、台账再取一次，同一个
+  决定有两个时刻，对账只能靠容差糊。
+- **老台账按数据边界读，不按开关读**：本批之前落进去的行仍读得到、仍批得掉、消费标记
+  仍落在它自己的行上；但**不再有新增行**，文件不存在就当没有（读连接带 `query_only`，
+  绝不因为"查一下"建库）。不 backfill、不抄行、不造伪事件。
+  为什么不能一刀切掉：升级那一刻停在闸门上的运行如果老行读不到，`decide` 在新投影里
+  查无此行 → fail-closed → 那个运行此后永远批不掉。
+- **代价要说清（刻意的 fail-closed）**：`runs.db` 打不开时**审批整体不可用**——连内存路径
+  的 `approve()` 也会被拒，任务留在 `PAUSED`。写不进台账却回答"已批准"等于执行一个没有
+  持久授权的决定（重启后台账仍显示待批）。原因由 `/api/health/deep` 的 `runstore` 组件与
+  引擎首条 error 日志承担；这也是上一批删 `LOOM_RUNSTORE=0` 退路之后一致的选择。
+- **测试会话的状态目录开局先清**（`.test_state/pid<pid>/`）：Windows 会回收 pid，上个会话
+  残留的老台账行会被回落读当成本会话的事实（收件箱凭空多一条待办）。
+
+判据：`tests/test_runstore_approvals.py` 16 条，四组——投影与事件同事务（含"事件写失败
+则投影不动"）、台账是决定形状的唯一来源（真闸门 + 真审计）、老台账的四条边界、写侧
+不可用时 fail-closed。`tests/test_approvals.py` 14 条（7 条台账契约 + 7 条端到端：
+真子进程硬退出在闸门上、双进程观察决定、真 HTTP 收件箱）只换数据来源、断言不动即过。
+
+窄变异（同一份最终头，只跑这两个文件共 30 条用例；每条只该红它射程内的那一两条）：
+
+| 变异 | 红 | 红的是 |
+|---|---|---|
+| 摘掉幂等守卫 `AND status='pending'` | 2 | `test_only_pending_can_be_decided` + `test_second_decision_writes_no_event_and_keeps_the_first` |
+| 待批只写投影、不写事件 | 2 | `test_request_lands_projection_and_event_together` + `test_gate_arms_into_the_store_projection` |
+| 事务异常也提交 | 1 | `test_append_failure_leaves_the_projection_pending` |
+| 老台账 pending 不再回落 | 1 | `test_legacy_pending_row_is_still_readable_and_approvable` |
+| 待批双写老台账（双写复活） | 7 | 老副本成了第二个事实源：二次决策被老行放行、决定错绑到前一道闸门、历史顺序被带偏 |
+| 决定形状自己取时刻 | 1 | `test_audit_event_and_memory_all_read_the_ledger_row` |
+| 无待批行也造一个决定（fail-open） | 1 | `test_approve_is_refused_when_the_store_is_unavailable` |
+| 消费不回落老台账 | 1 | `test_legacy_decided_row_can_still_be_consumed` |
+
+首轮还试过"摘掉 Python 侧的 status 预检"——**红 0**：它和条件 UPDATE 的 `WHERE` 是同一件事，
+挡住写入的一直是后者。于是把死的那条删掉（幂等只留一条守卫），不给后来人指错门。
+
 ### Changed（2026-10-21·续60，RunStore 不再留退路：开关移除 + 失败可观测）
 
 - **删掉 `LOOM_RUNSTORE=0`**：写侧恒开。删之前先确认过它**不承载读语义**——`RunHandle`

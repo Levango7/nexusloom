@@ -460,10 +460,18 @@ agents:
 - 决策落审计 `audit/approvals.jsonl`（任务/节点/决定/note/时间/审批人标识）；
 - `when` 不成立的闸门不挂起，按条件跳过（与普通条件节点同语义）。
 
-- **重启后仍可批**：待批与决策落 `approvals.db`（跟随 `LOOM_STATE_DIR`）。进程重启后
+- **重启后仍可批**：待批与决策落 `runs.db` 的 `approvals` 投影，并在同一条事务里追加
+  `approval.requested/decided/consumed` 事件（跟随 `LOOM_STATE_DIR`）。进程重启后
   `POST /tasks/<id>/approve` 把队列行放回 `pending` 并带续跑标记，worker 从 checkpoint
   续跑越过闸门；驳回则把行置 `cancelled`、不再执行。判据 `tests/test_approvals.py`
-  含真子进程硬退出在闸门上、父进程批准后完成的端到端；
+  含真子进程硬退出在闸门上、父进程批准后完成的端到端，`tests/test_runstore_approvals.py`
+  钉"投影与事件同事务""决定只有一个时刻""老台账按数据边界回落"；
+- **老台账 `approvals.db` 只读不再写**（2026-10-23 起）：本批之前落进去的行仍读得到、
+  仍批得掉（升级前停在闸门上的运行不能升级后批不掉），但不 backfill、也不再有新增行；
+  老行耗尽后该文件只剩历史；
+- **台账不可用 = 审批不可用**（刻意的 fail-closed）：`runs.db` 打不开时登记待办报错、
+  `approve()` 拒绝放行，任务留在 `PAUSED`——写不进台账却回答"已批准"等于执行一个没有
+  持久授权的决定。原因看 `/api/health/deep` 的 `runstore` 组件；
 - **批准方与执行方可以是两个进程**：执行方还活着停在闸门时，别的进程批准只写台账，
   暂停循环自己观察到决定并继续跑；同一时刻队列不会把这行重排给第二个执行者
   （活 owner 守卫），前序节点不重跑（判据挂在真实执行漏斗上计数，不是状态推断）；
@@ -957,16 +965,21 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**2889 个测试本机全绿**（`2889 passed, 7 skipped, 6 deselected`，2026-10-21 本机全量实测；
-收集 2896，护栏按 `collected − declared ≤ 10` 判；本行原先写 2886，移除 RunStore 退路那批
-+3 条判据（降级注入 / 健康位 / cost 自愈），按最终头重跑取到上面这组数；
+**2905 个测试本机全绿**（`2905 passed, 7 skipped, 6 deselected`，2026-10-24 本机全量实测；
+收集 2912，护栏按 `collected − declared ≤ 10` 判；本轮口径：`Python 3.14.3`、
+**同机有并行会话的负载轮**，全量 **2394.77s ≈ 39.9 分钟**（上一批同机 1226.74s，静默基线
+753.83s——读这三个数请带各自的负载条件，别互相换算）；上一行写的 2889 是"移除 RunStore
+退路"那批 +3 条判据（降级注入 / 健康位 / cost 自愈）后的数，本批 Stage 3a 审批摘写 **+16 条**
+（`tests/test_runstore_approvals.py`：投影与事件同事务、台账是决定形状的唯一来源、
+老台账的四条数据边界、写侧不可用时 fail-closed；另有 8 条窄变异逐条红在预期用例上，见
+CHANGELOG 续61）；
 更早一批（Stage 2）里全量曾抓到一条真回归——`RunHandle.exists()` 把替身自动生成的
 `task_queue.get()` 当成"队列里有这行"，一个不存在的 id 会一路走到拼载荷、序列化时炸成
 JSON-RPC internal error，已收紧成 `isinstance(row, dict)`；
-口径条件：`Python 3.14.3`、**同机有并行会话**（本轮全量 1226.74s ≈ 20.5 分钟；静默基线
-753.83s ≈ 12.5 分钟）。负载轮里先后暴露过两条时序判据：`test_runstore_parity` 的
+续60 那批的口径条件：`Python 3.14.3`、**同机有并行会话**（全量 1226.74s ≈ 20.5 分钟；静默基线
+753.83s ≈ 12.5 分钟）。那轮负载里先后暴露过两条时序判据：`test_runstore_parity` 的
 "账本行还没落地就断言"（已改成有界等待，见续58）、`test_p2_infra_fixes` 的队列排空竞态
-（与本批无因果，单跑 3 次各绿，另立待办）；两处处理完后本轮 2875 条全绿；
+（与本批无因果，单跑 3 次各绿，另立待办）；两处处理完后那轮 2875 条全绿；
 `tests/test_admin_concurrency.py::TestBoundedConcurrency` 原先在满载轮里错位红，**这里旧写的
 "属时序窗口争用不是产品缺陷"是错的**——根因是池满拒答带着未读请求字节 close ⇒ 内核发 RST
 把 503 吞了（WinError 10053，缺陷原样时 20 轮红 9 轮），续57 已修并把等待条件换成
