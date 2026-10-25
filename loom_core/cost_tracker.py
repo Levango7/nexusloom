@@ -266,11 +266,19 @@ class CostTracker:
             data["task_count"] = len(task_ids)
         return data
 
-    def cleanup(self, max_age_days: int = 90):
-        """清理过期记录"""
+    def cleanup(self, max_age_days: int = 90, max_rows: int = 0) -> int:
+        """清理过期记录（双判据并集；0 的语义与 TaskQueue 同口径）。"""
         cutoff = time.time() - max_age_days * 86400
         with self._lock, self._conn() as conn:
-            conn.execute("DELETE FROM cost_log WHERE timestamp < ?", (cutoff,))
+            cur = conn.execute("DELETE FROM cost_log WHERE timestamp < ?",
+                               (cutoff,))
+            dropped = cur.rowcount
+            if max_rows > 0:
+                cur = conn.execute(
+                    "DELETE FROM cost_log WHERE id NOT IN (SELECT id FROM cost_log "
+                    "ORDER BY timestamp DESC LIMIT ?)", (max_rows,))
+                dropped += cur.rowcount
+        return dropped
 
 
 _tracker_instance: CostTracker | None = None

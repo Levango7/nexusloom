@@ -425,15 +425,35 @@ class TaskQueue:
         """列出所有 pending 任务"""
         return self.list_all(status="pending", limit=1000)
 
-    def cleanup(self, max_age_days: int = 30):
-        """清理过期已完成任务"""
+    def cleanup(self, max_age_days: int = 30, max_rows: int = 0) -> int:
+        """清理过期已完成任务（双判据并集，与 `RunStore.cleanup` 同口径）。
+
+        年龄判据：终态行 `finished_at` 早于 `cutoff` 的删；数量判据：只保留
+        最近 `max_rows` 条终态行（按 finished_at 新→旧）。两条同时启用时
+        年龄判据对保留集内同样生效。
+
+        **边界（0 的语义按历史保持）**：`max_age_days=0` 仍按旧语义 = 删光
+        全部终态行（`cutoff=now`；tests/test_task_queue.py::test_cleanup 钉着
+        这条）。要"年龄不启用"必须显式传大数——`maintenance.gc_runs` 就是这么
+        调的（0 → 10^9 天，等于不删）。`max_rows=0` = 数量判据不启用。
+        """
         cutoff = time.time() - max_age_days * 86400
         with self._lock, self._get_conn() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "DELETE FROM task_queue "
-                "WHERE status IN ('done', 'failed', 'cancelled') AND finished_at < ?",
-                (cutoff,),
-            )
+                "WHERE status IN ('done', 'failed', 'cancelled') "
+                "AND finished_at < ?", (cutoff,))
+            dropped = cur.rowcount
+            if max_rows > 0:
+                cur = conn.execute(
+                    "DELETE FROM task_queue "
+                    "WHERE status IN ('done', 'failed', 'cancelled') "
+                    "AND task_id NOT IN (SELECT task_id FROM task_queue "
+                    "WHERE status IN ('done', 'failed', 'cancelled') "
+                    "ORDER BY finished_at DESC LIMIT ?)",
+                    (max_rows,))
+                dropped += cur.rowcount
+        return int(dropped)
 
     def stats(self) -> dict:
         """队列统计"""

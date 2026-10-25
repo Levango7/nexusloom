@@ -1,0 +1,305 @@
+"""保留期与 GC（设计复核 2026-10-20 §3.1 A6）的判据。
+
+覆盖四层：
+  A. RunStore.cleanup：年龄判据 + 数量判据 + 联动删（events/nodes/approvals
+     一起走）+ 进行中的行一行不碰 + 假时钟；
+  B. 既有 store 的清理：task_queue / cost / quality_feedback 的双判据
+     （0 的语义按历史保持：age=0 = 删光）；
+  C. maintenance.gc_runs / gc_from_orchestrator：disabled 早退、失败不拖垮、
+     汇总日志；
+  D. worker 接线：按配置周期调用 GC（重启后继续——判据落在"不依赖内存态"
+     这条性质上）、空转 worker 不构建 orchestrator、GC 失败不拖垮循环。
+"""
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+PROJECT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture()
+def state(tmp_path, monkeypatch):
+    d = tmp_path / "state"
+    d.mkdir()
+    monkeypatch.setenv("LOOM_STATE_DIR", str(d))
+    return d
+
+
+# ── A. RunStore 清理 ──────────────────────────────────
+
+class TestRunStoreCleanup:
+    def _seed(self, store, run_id, *, finished_at, status="done",
+              with_nodes=True, with_approval=False):
+        store.open_run(run_id, workflow="p", started_at=finished_at - 10)
+        if with_nodes:
+            store.record_node(run_id, "n1", "success", started_at=finished_at - 9,
+                              finished_at=finished_at - 1)
+        if with_approval:
+            store.open_approval(run_id, f"{run_id}-ap", pipeline="p",
+                                nodes=[{"name": "n1"}], principal="u")
+        store.close_run(run_id, status, finished_at=finished_at)
+
+    def _store(self, state):
+        from loom_core.run_store import RunStore
+        return RunStore()
+
+    def test_age_deletes_terminal_with_full_cascade(self, state):
+        store = self._store(state)
+        now = 10_000_000.0
+        self._seed(store, "old", finished_at=now - 100 * 86400, with_approval=True)
+        self._seed(store, "fresh", finished_at=now - 10, with_approval=True)
+        self._seed(store, "running", finished_at=0, status="running")
+        result = store.cleanup(retention_days=30, now=now)
+        assert result["runs"] == 1
+        assert store.get_run("old") is None
+        assert store.get_run("fresh") is not None
+        assert store.get_run("running") is not None
+        # 联动删：老运行的事件/节点/审批一行不留
+        assert store.events("old") == []
+        assert store.nodes("old") == []
+        assert store.open_approvals("old") == []
+
+    def test_max_runs_keeps_newest(self, state):
+        store = self._store(state)
+        now = 10_000_000.0
+        for i, rid in enumerate(["r1", "r2", "r3", "r4"]):
+            self._seed(store, rid, finished_at=now - (4 - i) * 86400)
+        result = store.cleanup(max_runs=2, now=now)
+        assert result["runs"] == 2
+        assert {store.get_run(rid)["status"] for rid in ("r3", "r4")} == {"done"}
+        assert store.get_run("r1") is None and store.get_run("r2") is None
+
+    def test_age_applies_to_kept_set_too(self, state):
+        """保留集内也过旧的行：年龄判据对保留集内同样生效。"""
+        store = self._store(state)
+        now = 10_000_000.0
+        self._seed(store, "old", finished_at=now - 100 * 86400)
+        self._seed(store, "mid", finished_at=now - 10)
+        self._seed(store, "new", finished_at=now - 1)
+        store.cleanup(retention_days=30, max_runs=2, now=now)
+        assert store.get_run("old") is None
+        assert store.get_run("mid") is not None
+        assert store.get_run("new") is not None
+
+    def test_disabled_is_all_zero(self, state):
+        store = self._store(state)
+        self._seed(store, "x", finished_at=1.0)
+        result = store.cleanup(now=10_000_000.0)
+        assert result == {"runs": 0, "run_nodes": 0, "events": 0, "approvals": 0}
+        assert store.get_run("x") is not None
+
+
+# ── B. 既有 store 清理 ──────────────────────────────────
+
+class TestQueueCleanup:
+    def test_max_rows_cap_keeps_newest(self, state):
+        from loom_core.task_queue import TaskQueue
+        q = TaskQueue()
+        for i in range(5):
+            q.submit(f"t{i}", "p", "a.md")
+            q.complete(f"t{i}")
+        # complete() 的时间戳是 now——直接 SQL 钉成递增值保证确定性
+        with q._lock, q._get_conn() as conn:
+            for i in range(5):
+                conn.execute("UPDATE task_queue SET finished_at = ? WHERE task_id = ?",
+                             (1000.0 + i, f"t{i}"))
+        dropped = q.cleanup(max_age_days=10 ** 9, max_rows=2)
+        assert dropped == 3
+        assert q.get("t3") is not None and q.get("t4") is not None
+        assert q.get("t0") is None
+
+    def test_age_zero_still_deletes_all(self, state):
+        """历史语义：max_age_days=0 = 删光全部终态行（旧判据钉着这条）。"""
+        from loom_core.task_queue import TaskQueue
+        q = TaskQueue()
+        q.submit("t1", "p", "a.md")
+        q.complete("t1")
+        assert q.cleanup(max_age_days=0) == 1
+        assert q.get("t1") is None
+
+
+class TestCostCleanup:
+    def test_max_rows_and_age(self, state):
+        from loom_core.cost_tracker import get_cost_tracker
+        t = get_cost_tracker()
+        for i in range(5):
+            t.record("cloudflare", 10, 10, cost=0.01, task_id=f"t{i}")
+        # record 的时间戳是 now——直接 SQL 钉成递增值保证确定性
+        with t._lock, t._conn() as conn:
+            for i in range(5):
+                conn.execute("UPDATE cost_log SET timestamp = ? WHERE task_id = ?",
+                             (2000.0 + i, f"t{i}"))
+        dropped = t.cleanup(max_age_days=10 ** 9, max_rows=2)
+        assert dropped == 3
+        assert t.total_cost() == pytest.approx(0.02)
+
+
+class TestFeedbackCleanup:
+    def test_default_disabled_and_explicit(self, state):
+        from loom_core.quality_feedback import get_quality_feedback
+        f = get_quality_feedback()
+        f.record("t1", {"completeness": 0.8}, ["core"], "p")
+        f.record("t2", {"completeness": 0.9}, ["core"], "p")
+        # record 的时间戳是 now——直接 SQL 钉成一旧一新保证确定性
+        now = time.time()
+        with f._lock, f._conn() as conn:
+            conn.execute("UPDATE quality_history SET timestamp = ? WHERE task_id = ?",
+                         (now - 30 * 86400, "t1"))
+            conn.execute("UPDATE quality_history SET timestamp = ? WHERE task_id = ?",
+                         (now - 10, "t2"))
+        # 默认 0 = 不启用：一条都不删
+        assert f.cleanup() == 0
+        assert f.stats()["total_records"] == 2
+        # 显式启用（7 天）：t1 过旧删、t2 保留
+        assert f.cleanup(max_age_days=7) == 1
+        assert f.stats()["total_records"] == 1
+
+
+# ── C. maintenance 模块 ──────────────────────────────────
+
+class TestGcRuns:
+    def test_disabled_returns_early(self):
+        from loom_core.maintenance import gc_runs
+        calls: list = []
+        result = gc_runs(log=calls.append)
+        assert result == {"enabled": False}
+        assert calls == [], "未启用不该产生任何日志（静默不删是刻意的）"
+
+    def test_calls_through_with_counts(self):
+        from loom_core.maintenance import Retention, gc_runs
+        q = SimpleNamespace(cleanup=lambda days, rows: 2)
+        cost = SimpleNamespace(cleanup=lambda days: 1)
+        fb = SimpleNamespace(cleanup=lambda days: 0)
+        rs = SimpleNamespace(cleanup=lambda days, rows: {"runs": 1})
+        logs: list = []
+        result = gc_runs(queue=q, cost=cost, feedback=fb, run_store=rs,
+                         retention=Retention(days=30, max_runs=10),
+                         log=logs.append)
+        assert result["queue"] == 2 and result["cost"] == 1
+        assert result["run_store"] == {"runs": 1}
+        assert any("GC 执行" in m for m in logs)
+
+    def test_store_failure_isolated(self):
+        from loom_core.maintenance import Retention, gc_runs
+
+        def boom(days, rows):
+            raise RuntimeError("db down")
+
+        result = gc_runs(queue=SimpleNamespace(cleanup=boom),
+                         retention=Retention(days=30))
+        assert result["queue"]["failed"] is True
+        assert "db down" in result["queue"]["message"]
+
+    def test_retention_from_config(self):
+        from loom_core.maintenance import retention_from_config
+        fake_cfg = SimpleNamespace(get=lambda key, default=0:
+                                   {"retention.runs_days": 30,
+                                    "retention.max_runs": 500}[key])
+        r = retention_from_config(fake_cfg)
+        assert (r.days, r.max_runs) == (30, 500)
+        # 非正数 / 读错 → 0（保守，不悄悄变成"删光"）
+        r2 = retention_from_config(SimpleNamespace(
+            get=lambda key, default=0: -5))
+        assert (r2.days, r2.max_runs) == (0, 0)
+        r3 = retention_from_config(None)
+        assert r3.enabled is False
+
+
+# ── D. worker 接线 ───────────────────────────────────────
+
+class TestWorkerGcHook:
+    def _worker(self, tmp_path, monkeypatch, retention_days=0, gc_ticks=60):
+        from loom_core.worker import TaskWorker
+        monkeypatch.setenv("LOOM_STATE_DIR", str(tmp_path / "state"))
+        fake_cfg = SimpleNamespace(
+            get=lambda key, default=0:
+            {"maintenance.gc_ticks": gc_ticks,
+             "retention.runs_days": retention_days}[key])
+        orch = SimpleNamespace(config=fake_cfg, task_queue=SimpleNamespace(),
+                               refresh_config_if_changed=lambda: False)
+        w = TaskWorker(queue=SimpleNamespace(recover=lambda **kw: [],
+                                             acquire=lambda **kw: None),
+                       scheduler=SimpleNamespace())
+        w._orch = orch
+        return w
+
+    def test_gc_called_periodically(self, tmp_path, monkeypatch):
+        w = self._worker(tmp_path, monkeypatch, retention_days=30, gc_ticks=2)
+        calls: list = []
+        import loom_core.maintenance as m
+
+        def fake_gc(orch, now=None, log=None):
+            calls.append(orch)
+            return {"enabled": True}
+
+        monkeypatch.setattr(m, "gc_from_orchestrator", fake_gc)
+        import threading
+
+        stop = threading.Event()
+        import time as _t
+
+        def stop_later():
+            _t.sleep(0.6)
+            stop.set()
+
+        t = threading.Thread(target=stop_later, daemon=True)
+        t.start()
+        w.run_forever(poll_interval=0.05, stop_event=stop)
+        assert len(calls) >= 2, f"GC 每 {2} 轮应至少跑 2 次，实际 {len(calls)}"
+
+    def test_idle_worker_does_not_build_orchestrator_for_gc(self, tmp_path, monkeypatch):
+        w = self._worker(tmp_path, monkeypatch)
+        w._orch = None
+        import loom_core.maintenance as m
+
+        called: list = []
+        monkeypatch.setattr(m, "gc_from_orchestrator",
+                            lambda orch, now=None, log=None: called.append(1))
+        import threading
+        import time as _t
+
+        stop = threading.Event()
+        t = threading.Thread(target=lambda: (_t.sleep(0.4), stop.set()), daemon=True)
+        t.start()
+        w.run_forever(poll_interval=0.05, stop_event=stop)
+        assert called == [], "空转 worker 不该为 GC 构建 orchestrator"
+        assert w._orch is None
+
+    def test_gc_failure_does_not_kill_worker(self, tmp_path, monkeypatch):
+        w = self._worker(tmp_path, monkeypatch, retention_days=30, gc_ticks=1)
+        import loom_core.maintenance as m
+
+        def boom(orch, now=None, log=None):
+            raise RuntimeError("gc boom")
+
+        monkeypatch.setattr(m, "gc_from_orchestrator", boom)
+        import threading
+        import time as _t
+
+        stop = threading.Event()
+        t = threading.Thread(target=lambda: (_t.sleep(0.3), stop.set()), daemon=True)
+        t.start()
+        processed = w.run_forever(poll_interval=0.05, stop_event=stop)
+        assert processed == 0, "GC 失败后 worker 循环必须继续"
+
+
+# ── E. CLI ──────────────────────────────────────────────
+
+class TestGcCli:
+    def test_flag_registered(self):
+        import run as run_mod
+        parser = run_mod.build_arg_parser()
+        dests = {a.dest for a in parser._actions}
+        assert "gc" in dests
+
+    def test_gc_cli_end_to_end_disabled(self, tmp_path):
+        """仓库默认配置 retention 未启用 → 如实报告"未启用"，退出 0。"""
+        import subprocess
+        import sys
+        r = subprocess.run(
+            [sys.executable, str(PROJECT / "run.py"), "--gc"],
+            capture_output=True, text=True, timeout=120, cwd=str(tmp_path))
+        assert r.returncode == 0, r.stderr[-800:]
+        assert "retention 未启用" in r.stdout

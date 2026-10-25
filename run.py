@@ -633,6 +633,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--once", action="store_true", help="配合 --worker：只消费一条任务")
     parser.add_argument("--poll-interval", type=float, default=1.0,
                         help="worker 空闲轮询间隔秒数")
+    parser.add_argument("--gc", action="store_true",
+                        help="保留期 GC：按 retention 配置清理过期运行（一次，维护动作）")
     parser.add_argument("--idle-timeout", type=float, default=None,
                         help="worker 空转多少秒后退出（默认不退出）")
     parser.add_argument("--lease-stale", type=float, default=900.0,
@@ -680,6 +682,23 @@ def main():
             *([f"--idle-timeout={args.idle_timeout}"] if args.idle_timeout is not None else []),
             f"--lease-stale={args.lease_stale}",
         ]))
+
+    # ─── 保留期 GC（A6）：一次性维护动作 ────────────
+    if args.gc:
+        from loom_core.maintenance import gc_from_orchestrator
+        project_root = Path(__file__).parent
+        orch = _get_orchestrator(project_root)
+        orch.register_agents()
+        try:
+            summary = gc_from_orchestrator(orch, log=print)
+        finally:
+            orch.shutdown()
+        if not summary.get("enabled"):
+            print("[gc] retention 未启用（retention.runs_days / retention.max_runs 全 0）"
+                  "——未删任何行；worker 循环同样如此")
+        else:
+            print(f"[gc] {summary}")
+        sys.exit(0)
 
     # 无输入文件时：仅 --check/--mcp/--recover/--replay-*/--triggers*、服务模式与
     # plan/lock/pack/plugin/demo 动词可用

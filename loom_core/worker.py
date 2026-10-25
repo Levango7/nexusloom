@@ -86,7 +86,9 @@ class TaskWorker:
         """消费直到 stop_event 置位或空转超过 idle_timeout。返回处理条数。"""
         stop_event = stop_event or threading.Event()
         idle_started: float | None = None
+        ticks = 0
         while not stop_event.is_set():
+            ticks += 1
             self.refresh_config()
             item = self.run_once()
             if item is None:
@@ -95,10 +97,37 @@ class TaskWorker:
                     if time.time() - idle_started >= idle_timeout:
                         self.log.info("worker 空转到超时，退出")
                         break
+                # A6：按配置周期跑保留期 GC（重启后继续——它不依赖内存态）
+                if self._gc_interval_ticks() and ticks % self._gc_interval_ticks() == 0:
+                    self._maybe_gc()
                 time.sleep(poll_interval)
             else:
                 idle_started = None
         return self.processed
+
+    # ── 保留期 GC（A6）────────────────────────
+
+    def _gc_interval_ticks(self) -> int:
+        """每 N 个轮询跑一次 GC（配置 `maintenance.gc_ticks`，默认 60）。"""
+        orch = self._orch
+        if orch is None:
+            return 60
+        try:
+            return max(1, int(orch.config.get("maintenance.gc_ticks", 60) or 60))
+        except Exception:                     # noqa: BLE001 — 配置读错不该让 worker 退出
+            return 60
+
+    def _maybe_gc(self) -> None:
+        """跑一次保留期 GC。失败只告警不拖垮 worker；空转 worker 不构建
+        orchestrator（与 refresh_config 的既有纪律一致）。"""
+        orch = self._orch
+        if orch is None:
+            return
+        try:
+            from .maintenance import gc_from_orchestrator
+            gc_from_orchestrator(orch, log=self.log.info)
+        except Exception as e:               # noqa: BLE001
+            self.log.warning(f"GC 失败（保留）：{e}")
 
     # ── 跨进程配置同步 ─────────────────────────────
 

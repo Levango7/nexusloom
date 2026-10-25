@@ -509,6 +509,61 @@ class RunStore:
         rows = self._conn().execute(sql, args).fetchall()
         return [self._approval_from_row(r) for r in rows]
 
+    # ── 维护：保留期清理（A6：RunStore 此前也无界）───────────
+    def cleanup(self, retention_days: int = 0, max_runs: int = 0,
+                now: float | None = None) -> dict[str, int]:
+        """删除过期运行：`runs`/`run_nodes`/`events`/`approvals` 一次删干净。
+
+        只碰**终态**（done/failed/cancelled）的运行——进行中的行一行都不碰
+        （把活运行从观测面抹掉，比不删更糟，且它还在写投影）。判删两条：
+
+        - `retention_days` > 0：`finished_at` 早于 `now - retention_days` 的
+          删（年龄判据，0 = 不启用）；
+        - `max_runs` > 0：按 `finished_at` 新→旧排序后，超出最近 N 条的删
+          （数量判据，0 = 不启用）。
+
+        两者同时启用时，年龄判据对**保留集内**的行也生效（一条 90 天前的
+        行哪怕在最近 500 条里也删）。删的是 run_id 集合联动删——
+        `events`/`run_nodes`/`approvals` 里挂着同一 run 的行必须一起走，
+        否则留下"运行没了、事件还在"的半条事实（§3 的边界句说的正是这种
+        形状）。两次都不启用返回全 0（幂等，也方便健康检查区分"没启用"和
+        "跑了但没删到"）。
+        """
+        stamp = time.time() if now is None else now
+        cutoff = stamp - retention_days * 86400.0
+        with _Txn(self._pool, self._conn()) as txn:
+            conn = txn.conn
+            rows = conn.execute(
+                "SELECT run_id, finished_at FROM runs "
+                "WHERE status IN (?, ?, ?) ORDER BY finished_at DESC",
+                TERMINAL_STATUSES).fetchall()
+            # 判删是两条判据的并集：超出最近 N 条 + 年龄过旧（含保留集内）。
+            to_delete: list[str] = []
+            if max_runs > 0:
+                to_delete += [r[0] for r in rows[max_runs:]]
+            if retention_days > 0:
+                to_delete += [r[0] for r in rows
+                              if float(r[1] or 0) < cutoff]
+            to_delete = sorted(set(to_delete))
+            if not to_delete:
+                return {"runs": 0, "run_nodes": 0, "events": 0, "approvals": 0}
+            chunk = 500
+            n_nodes = n_events = n_approvals = n_runs = 0
+            for i in range(0, len(to_delete), chunk):
+                part = to_delete[i:i + chunk]
+                ph = ",".join("?" * len(part))
+                args = tuple(part)
+                n_nodes += conn.execute(
+                    f"DELETE FROM run_nodes WHERE run_id IN ({ph})", args).rowcount
+                n_events += conn.execute(
+                    f"DELETE FROM events WHERE run_id IN ({ph})", args).rowcount
+                n_approvals += conn.execute(
+                    f"DELETE FROM approvals WHERE run_id IN ({ph})", args).rowcount
+                n_runs += conn.execute(
+                    f"DELETE FROM runs WHERE run_id IN ({ph})", args).rowcount
+        return {"runs": n_runs, "run_nodes": n_nodes, "events": n_events,
+                "approvals": n_approvals}
+
     # ── schedules：触发租约（两进程共享一库只允许一个触发者）──────
     # cron 触发此前只有进程内的 tick 循环，两个 `loom --triggers` 指向同一状态
     # 目录会把同一窗口各提交一遍。租约和队列租约是同一套语义：条件 UPDATE +

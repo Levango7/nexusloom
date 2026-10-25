@@ -144,6 +144,30 @@ class QualityFeedback:
                 "recommendations": self.get_recommendations(),
             }
 
+    def cleanup(self, max_age_days: int = 0, max_rows: int = 0) -> int:
+        """清理过期记录（双判据并集）。
+
+        与 RunStore 同口径：**0 = 不启用**（本 store 此前没有清理面，默认
+        0=删光会是一次静默的行为变化；age=0 的"删光"语义只保留在既有
+        行为的 TaskQueue/CostTracker 上）。worker GC 按 retention 配置调用。
+        """
+        if max_age_days <= 0 and max_rows <= 0:
+            return 0
+        dropped = 0
+        with self._lock, self._conn() as conn:
+            if max_age_days > 0:
+                cur = conn.execute(
+                    "DELETE FROM quality_history WHERE timestamp < ?",
+                    (time.time() - max_age_days * 86400,))
+                dropped = cur.rowcount
+            if max_rows > 0:
+                cur = conn.execute(
+                    "DELETE FROM quality_history WHERE id NOT IN (SELECT id FROM "
+                    "quality_history ORDER BY timestamp DESC LIMIT ?)",
+                    (max_rows,))
+                dropped += cur.rowcount
+        return dropped
+
 
 _instance: QualityFeedback | None = None
 _lock = threading.Lock()
