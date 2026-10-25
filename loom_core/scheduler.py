@@ -331,28 +331,48 @@ class Scheduler:
             self._verify_lock_after_parse(plan, source_dir=path.parent)
         return plan
 
-    def _verify_lock_after_parse(self, plan: ExecutionPlan, source_dir: Path | None = None):
-        import logging
-        logger = logging.getLogger(__name__)
-        # 锁与 YAML 同目录优先（pack 流水线的锁在 packs/<name>/pipelines/ 里），
-        # 旧布局（集中式 pipelines/ + Scheduler.pipeline_dir）退回查找；
-        # parse()（按名解析）没有源路径信息，仍走 pipeline_dir。
+    def resolve_lock_path(self, plan: ExecutionPlan,
+                          source_dir: Path | None = None) -> Path:
+        """这条流水线该用哪个锁文件——**唯一一处解析**，执行侧抛错与读侧巡检共用。
+
+        锁与 YAML 同目录优先（pack 流水线的锁在 packs/<name>/pipelines/ 里），
+        旧布局（集中式 pipelines/ + Scheduler.pipeline_dir）退回查找；
+        parse()（按名解析）没有源路径信息，仍走 pipeline_dir。
+        没有锁也返回"它该在的位置"：巡检要把"没锁"当成一个事实报出来，而不是抛。
+        """
         candidates = [source_dir] if source_dir else []
         candidates.append(self.pipeline_dir)
-        lock_path = next(
+        return next(
             (d / f"{plan.pipeline_name}.lock" for d in candidates
              if (d / f"{plan.pipeline_name}.lock").is_file()),
             candidates[-1] / f"{plan.pipeline_name}.lock",
         )
-        if not lock_path.exists():
+
+    def lock_drift(self, plan: ExecutionPlan, source_dir: Path | None = None) -> dict:
+        """按 resolve_lock_path 的同一套规则比对，返回问题表而**不抛**。
+
+        执行侧的口径是"漂移就拒绝跑"（`_verify_lock_after_parse` 抛
+        `LockfileMismatchError`），运维侧要的是"哪条流水线漂了、漂在哪"。同一个判据
+        不能写两遍——解析规则一旦分叉，巡检就会报出执行时根本不会发生的漂移。
+        """
+        lock_path = self.resolve_lock_path(plan, source_dir)
+        if not lock_path.is_file():
+            return {"lock_file": str(lock_path), "lock_present": False, "issues": []}
+        return {"lock_file": str(lock_path), "lock_present": True,
+                "issues": self.verify_lockfile(plan, str(lock_path))}
+
+    def _verify_lock_after_parse(self, plan: ExecutionPlan, source_dir: Path | None = None):
+        import logging
+        logger = logging.getLogger(__name__)
+        drift = self.lock_drift(plan, source_dir)
+        if not drift["lock_present"]:
             logger.debug(
                 "[%s] 无 lockfile（%s），跳过版本锁定校验；可用 --write-lock 生成",
-                plan.pipeline_name, lock_path,
+                plan.pipeline_name, drift["lock_file"],
             )
             return
-        issues = self.verify_lockfile(plan, str(lock_path))
-        if issues:
-            raise LockfileMismatchError(plan.pipeline_name, issues)
+        if drift["issues"]:
+            raise LockfileMismatchError(plan.pipeline_name, drift["issues"])
 
     def _deep_merge(self, base: dict, override: dict) -> dict:
         result = base.copy()
