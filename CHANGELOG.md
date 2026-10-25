@@ -135,6 +135,97 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
   已改回按整行文本钉死）。
 
 
+### Added（2026-10-26·续65，B4 触发租约：共享一库的多进程只允许一个触发者）
+
+- **治的是什么**（设计复核 2026-10-20 §3.2 B4）：cron 触发此前只有进程内的
+  tick 循环——两个 `loom --triggers` 指向同一状态目录，会把同一窗口**各提交
+  一遍**（重复 run、重复成本、观测面双份）。租约挂 RunStore 的 `schedules`
+  表（结构版本 3），与队列租约同一套语义：条件 UPDATE + rowcount 原子裁决
+  （SQLite 侧 BEGIN IMMEDIATE 排队 / PG 天然串行），到期、无人持有或本人
+  持有才成功；owner = `主机名:pid`，TTL 默认三倍轮询间隔（下限 60s），每轮
+  续租，优雅退出放掉本人租约（另一进程立即接管）。
+- **接管正确性有一条容易写错的判据**：tick 被租约拒绝时 `last_check` 仍要
+  前移——窗口记账与提交归属是两回事；不前移的话，持约进程一死，接管进程
+  会把它已经提交过的旧窗口再算成"到期"而重复提交（`TestTickLease` 的
+  接管用例钉住这条）。租约回调自身故障按 trigger 隔离（与提交失败同款
+  纪律），`on_fire` 记账失败不影响本次提交——观测面不是闸门。
+- **配置列与租约列分开更新**：`register_schedule` 幂等轮换 crontab 时
+  不许碰租约列——清了别人的约就有两个触发者（变异 M3 钉住）。
+- **降级必须说出口**：RunStore 建不起时回到单进程行为（B4 之前的形状），
+  但启动日志警告一行"租约停用——同库多进程可能重复触发"，不静默。
+- **表结构**：`schedules(name PK, pipeline, cron, enabled, next_fire,
+  last_fire, lease_owner, lease_until)`；`last_fire`/`next_fire` 是观测面
+  不参与裁决；未登记的触发 acquire 返回 False 且**不被顺手建出来**（登记
+  是配置侧的事，变异 M1 顺手证明了条件 UPDATE 是互斥的唯一裁决点）。
+- **判据**：`tests/test_schedule_lease.py` 14 条（存储层互斥/续租/到期接管/
+  只放自己的约/登记不碰租约列/未登记不建行/记账可读 + **真跨进程**两个
+  独立解释器进程抢同一触发恰好一个拿到 + 真 PG 门控）；`tests/test_triggers.py`
+  补 6 条（tick 闸门、被拒不前移时钟、故障隔离、on_fire、真 RunStore 循环
+  接线含退出放约、降级警告）。窄变异 3 条各只红预期用例：M1 拆掉条件
+  UPDATE → 互斥红；M2 被拒不前移 last_check → 接管正确性红；M3 登记清
+  租约列 → 轮换正确性红。
+- **文档**：设计文档 §3.1 加 `schedules` 行、落地进度与"只落 4 张表"的
+  边界句同步更正；`scripts/check_design_anchors.py` 补 `register_schedule`/
+  `acquire_schedule_lease` 两条新锚并重钉 run_store 四条旧行号。
+
+### Added（2026-10-26·续66，A6 保留期与 GC：死代码清理面变成可调度的统一口径）
+
+- 治的是什么：`task_queue.cleanup` / `cost_tracker.cleanup` 是**死代码**（实现过、
+  有判据、从未被调度），quality_feedback 与 RunStore 连清理面都没有，长跑
+  worker 无限膨胀。
+- **`RunStore.cleanup`**：年龄（finished_at < now-days）+ 数量（只留最近 N 条）
+  双判据并集，**联动删** runs/run_nodes/events/approvals（run_id 集合）——留下
+  "运行没了、事件还在"的半条事实正是本设计要消灭的形状；进行中的行一行不碰；
+  0 = 不启用（幂等）。
+- **TaskQueue/CostTracker.cleanup 加 max_rows**（SQL 子查询 NOT IN LIMIT）；
+  **0 的语义按历史保持**（age=0 = 删光，旧判据钉着）；"年龄不启用"由
+  maintenance 显式传 10^9 天。QualityFeedback.cleanup 新增：0 = 不启用
+  （此前无清理面，0=删光是静默行为变化，不做）。
+- **`loom_core/maintenance.py`**：`gc_runs` 统一口径（假时钟 now 只传给
+  RunStore；单 store 失败只记 failed 不拖垮维护）；`gc_from_orchestrator` 从
+  orchestrator 组装 store。
+- **worker 接线**：`run_forever` 每 `maintenance.gc_ticks` 轮（默认 60，配置热读）
+  跑一次 GC——不依赖内存态，**进程重启后下一轮照常执行**（"重启后仍执行"这条
+  判据落在这条性质上）；空转 worker 不构建 orchestrator；`run.py --gc` 一次性
+  维护动作。
+- **判据**：`tests/test_maintenance.py` 17 条（RunStore 联动删/保留集内年龄生效/
+  运行行不删/未启用幂等；队列与成本的数量判据与历史 0 语义；反馈默认不启用；
+  GC 汇总/失败隔离/配置解析边界；worker 周期调用、空转不构建、失败不拖垮；--gc
+  CLI 端到端）。变异对照：拆掉 RunStore 联动删 ⇒ 联动用例变红。
+  相关既有套件（task_queue/cost_tracker/quality_feedback/worker）86 条全绿。
+
+### Added（2026-10-26·续67，B6 配置覆写写的 revision CAS）
+
+- 此前 `_write_overlay_with` 是"读 revision → 写 revision+1"：两个进程并发写
+  不同键时都读到 N、都写 N+1，**后写者整份覆盖先写者**——先写者的键静默丢失，
+  而两边都报成功。这正是 B6 点名的形状。
+- 改为读 → 改 → 原子写 → **写后读回验证**：revision 与 values 都与写入时一致
+  才算成功；不一致说明有进程抢跑，**重读重写**（下一轮读到抢跑者的新值，把己方
+  键并进去——所有键最终都落在文件里）。重试 10 次仍冲突则如实报错
+  （`publish_reload` 同一套 CAS）。
+- **判据**：`tests/test_config_overlay.py` 补 `TestOverlayCAS` 三条——真双进程
+  并发写不同键都成功且两键都在文件里；持续抢跑如实报冲突；单次抢跑后重试收敛
+  且两键都在。变异对照：去掉读回验证 ⇒ 冲突用例变红。
+
+### Added（2026-10-26·续68，A4 loom demo：60 秒离线体验（P0 唯一欠账））
+
+- 入口 `loom demo`：在沙盒目录（loom-demo-<ts>/）跑 docgen pack 的 demo
+  流水线——transform 模板成稿 → quality_gate 评分 → checker 核查 → layout
+  排版 → safe_writer 落盘 → renderer 出 html/docx，外加 deliver.json 结构化
+  交付记录。全程无网络、无 LLM Key、不碰真实状态目录（LOOM_STATE_DIR/
+  LOOM_VERSIONS_DIR/checkpoint 全部指进沙盒）。
+- 实测 5 秒跑完，质量门 **82.0/100**（阈值 70，确定性离线——同输入同分数，
+  不是随机量）；渲染缺后端（python-docx 未装）照实报跳过原因；运行失败
+  walkthrough 不粉饰。退出码 = 状态。
+- 边界：demo 是 docgen pack 的第 7 条流水线（pack.yaml 同步更新）——复用
+  质量尾，核心不放领域流水线；锁文件与 YAML 同目录，demo.py 用 parse_file
+  走 pack 锁校验。
+- **判据**：`tests/test_demo.py` 12 条（真流水线离线端到端、交付物真内容、
+  质量分过阈值、账本记录、沙盒隔离、跳过如实报、失败不粉饰、walkthrough
+  全要素、动词注册、子进程端到端）；**干净 venv 验收**：`tests/test_
+  installable_product.py::TestInstalledSelfCheck::test_clean_venv_demo_runs_
+  offline`（真打 wheel → 真 venv → `loom demo` 跑通，实测 42.93s）。
+
 ### Added（2026-10-25·续63，RunStore 补账工具：incomplete 运行按交付账本重投影）
 
 - **看得见就得能处理**：续62 只做到"缺口可发现 + 可计数 + 可按 id 查"，本批给那个计数
