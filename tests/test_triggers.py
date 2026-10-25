@@ -221,6 +221,58 @@ class TestTick:
         assert any("提交失败" in m for m in logs)
 
 
+class TestTickLease:
+    def test_denied_lease_skips_submit_but_advances_clock(self):
+        """被拒后 last_check 仍前移：不前移的话，持约进程一死，接管者会把
+        它已提交过的旧窗口再算成"到期"而重复提交（B4 的接管正确性判据）。"""
+        calls: list = []
+        rt = _rt()                                  # 每小时；last_check 08:00
+        tick([rt], datetime(2026, 10, 8, 9, 0, 10),
+             lambda t, f: calls.append(f) or "tid", lambda m: None,
+             lease=lambda t: False)
+        assert calls == []
+        tick([rt], datetime(2026, 10, 8, 9, 0, 40),
+             lambda t, f: calls.append(f) or "tid", lambda m: None,
+             lease=lambda t: True)
+        assert calls == []          # 09:00 窗口已记账过去，下一窗 10:00 未到
+
+    def test_granted_lease_submits(self):
+        calls: list = []
+        out = tick([_rt()], datetime(2026, 10, 8, 9, 0, 10),
+                   lambda t, f: (calls.append((t.name, f)), "tid-1")[1],
+                   lambda m: None, lease=lambda t: True)
+        assert calls == [("t1", datetime(2026, 10, 8, 9, 0))]
+        assert out == ["tid-1"]
+
+    def test_lease_exception_isolated_per_trigger(self):
+        """租约面故障按 trigger 隔离（与提交失败同款纪律），不炸整个 tick。"""
+        logs: list = []
+        submitted: list = []
+
+        def lease_boom(t: Trigger) -> bool:
+            raise RuntimeError("store gone")
+
+        tick([_rt()], datetime(2026, 10, 8, 9, 0, 5),
+             lambda t, f: submitted.append(f) or "tid", logs.append,
+             lease=lease_boom)
+        assert submitted == []
+        assert any("租约判定失败" in m for m in logs)
+
+    def test_on_fire_records_after_submit_and_survives_failure(self):
+        fires: list = []
+        tick([_rt()], datetime(2026, 10, 8, 9, 0, 10),
+             lambda t, f: "tid", lambda m: None,
+             lease=lambda t: True, on_fire=lambda t, f: fires.append((t.name, f)))
+
+        def broken(t, f):
+            raise RuntimeError("ledger down")
+
+        tick([_rt(name="t2")], datetime(2026, 10, 8, 9, 0, 20),
+             lambda t, f: "tid2", lambda m: None,
+             lease=lambda t: True, on_fire=broken)
+        assert fires == [("t1", datetime(2026, 10, 8, 9, 0))]
+
+
 class TestSubmitTriggerRun:
     def test_submits_via_run_plan_with_output_override(self, tmp_path, monkeypatch):
         monkeypatch.setenv("LOOM_STATE_DIR", str(tmp_path))
@@ -265,6 +317,52 @@ triggers:
         run_trigger_loop(orch, triggers, max_ticks=1, log=logs.append)
         assert orch.calls == []
         assert any("没有启用的触发" in m for m in logs)
+
+
+class TestLoopLeaseWiring:
+    """run_trigger_loop 的租约接线：真 RunStore（SQLite）走通登记/抢约/记账/释放。"""
+
+    def test_loop_uses_runstore_lease_and_releases_on_exit(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOOM_STATE_DIR", str(tmp_path))
+        triggers = load_triggers(_write_cfg(tmp_path, """
+triggers:
+  - {name: job, pipeline: docgen, cron: "0 9 * * *"}
+"""), available=["docgen"])
+
+        from loom_core.run_store import RunStore
+
+        class LeaseOrch(FakeOrch):
+            def __init__(self):
+                super().__init__()
+                self._store = RunStore()
+
+            def _runstore(self):
+                return self._store
+
+        orch = LeaseOrch()
+        clock = {"now": datetime(2026, 10, 8, 8, 59)}
+        logs: list = []
+        run_trigger_loop(orch, triggers, poll_seconds=60,
+                         now_fn=lambda: clock["now"],
+                         sleep_fn=lambda s: clock.__setitem__(
+                             "now", clock["now"] + timedelta(seconds=s)),
+                         max_ticks=2, log=logs.append)
+        assert len(orch.calls) == 1                        # 09:00 窗口第二轮命中
+        assert any("租约已接 RunStore" in m for m in logs)
+        row = orch._store.list_schedules()[0]
+        assert (row["name"], row["pipeline"], row["cron"]) == ("job", "docgen", "0 9 * * *")
+        assert row["last_fire"] > 0, "on_fire 记账必须落表（观测面可读 last_fire/next_fire）"
+        assert row["lease_owner"] == "", "循环退出必须放掉本人租约（另一进程可立即接管）"
+
+    def test_loop_degrades_without_runstore(self, tmp_path):
+        triggers = load_triggers(_write_cfg(tmp_path, """
+triggers:
+  - {name: job, pipeline: docgen, cron: "0 9 * * *"}
+"""), available=["docgen"])
+        logs: list = []
+        run_trigger_loop(FakeOrch(), triggers, max_ticks=1, log=logs.append)
+        assert any("租约停用" in m for m in logs)
 
 
 class TestDescribe:

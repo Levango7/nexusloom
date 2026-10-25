@@ -16,6 +16,7 @@ checkpoint JSON、`deliveries.db`、`approvals.db`），读侧 20 处各自回�
 | `runs` | 运行投影（列表页与作用域判定的唯一来源），`last_seq` 让 SSE 游标跨进程续传 |
 | `run_nodes` | 逐节点投影，把原先埋在 `deliveries.payload_json` 里的事实升为一等行
 | `approvals` | 审批投影（结构版本 2 起）：待批/决定/消费是可变状态，所以要投影；每次变更同事务落一条事件
+| `schedules` | 触发租约（结构版本 3 起）：cron 触发的"谁有权提交"判据，两进程共享一库只允许一个触发者；`last_fire`/`next_fire` 让排程在观测面可见
 
 四条刻意留下的边界（对外要说清，不能读成"什么都齐了"）：
 
@@ -44,7 +45,7 @@ from artesian.fast_json import loads as _fast_loads
 
 from . import db_backend
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: 本批的形状化写口；其余事实走 `record()`，同一条流、不动投影
 RUN_OPENED = "run.opened"
@@ -137,6 +138,18 @@ CREATE TABLE IF NOT EXISTS approvals (
     note          TEXT NOT NULL DEFAULT '',
     reason        TEXT NOT NULL DEFAULT '',
     consumed      INTEGER NOT NULL DEFAULT 0
+)
+""",
+    """
+CREATE TABLE IF NOT EXISTS schedules (
+    name        TEXT PRIMARY KEY,
+    pipeline    TEXT NOT NULL DEFAULT '',
+    cron        TEXT NOT NULL DEFAULT '',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    next_fire   REAL NOT NULL DEFAULT 0,
+    last_fire   REAL NOT NULL DEFAULT 0,
+    lease_owner TEXT NOT NULL DEFAULT '',
+    lease_until REAL NOT NULL DEFAULT 0
 )
 """,
 )
@@ -495,6 +508,70 @@ class RunStore:
         args.append(int(limit))
         rows = self._conn().execute(sql, args).fetchall()
         return [self._approval_from_row(r) for r in rows]
+
+    # ── schedules：触发租约（两进程共享一库只允许一个触发者）──────
+    # cron 触发此前只有进程内的 tick 循环，两个 `loom --triggers` 指向同一状态
+    # 目录会把同一窗口各提交一遍。租约和队列租约是同一套语义：条件 UPDATE +
+    # rowcount 原子裁决（SQLite 侧 BEGIN IMMEDIATE 排队，PG 侧天然串行），
+    # 不引入新锁机制，也就不需要新的变异面。
+
+    def register_schedule(self, name: str, pipeline: str = "", cron: str = "",
+                          enabled: bool = True) -> None:
+        """触发配置进表（幂等）：新名字插入；老名字只更新配置列，租约列不动。
+
+        crontab 改了就该覆盖；但 `UPDATE` 若把租约列一并写掉，轮换配置的瞬间
+        会把别的进程正持有的租约清空——两个触发者就有两个了。
+        """
+        with _Txn(self._pool, self._conn()) as txn:
+            conn = txn.conn
+            conn.execute(
+                "INSERT OR IGNORE INTO schedules (name, pipeline, cron, enabled) "
+                "VALUES (?, ?, ?, ?)",
+                (name, pipeline, cron, int(bool(enabled))))
+            conn.execute(
+                "UPDATE schedules SET pipeline = ?, cron = ?, enabled = ? "
+                "WHERE name = ?", (pipeline, cron, int(bool(enabled)), name))
+
+    def acquire_schedule_lease(self, name: str, owner: str, ttl: float,
+                               now: float | None = None) -> bool:
+        """抢/续租约。到期、无人持有或本人持有三种情形才成功，其余 False。
+
+        同一个条件 UPDATE 承担两件事：跨进程的互斥（新持有者必须等旧租约
+        过期）和本进程的续租（持有者每轮把 `lease_until` 推远 TTL）。行不存在
+        返回 False——没登记过的触发不该被"顺手"建出来，登记是配置侧的事。
+        """
+        stamp = time.time() if now is None else now
+        with _Txn(self._pool, self._conn()) as txn:
+            cur = txn.conn.execute(
+                "UPDATE schedules SET lease_owner = ?, lease_until = ? "
+                "WHERE name = ? AND (lease_until <= ? OR lease_owner = ?)",
+                (owner, stamp + float(ttl), name, stamp, owner))
+            return bool(cur.rowcount > 0)
+
+    def release_schedule_lease(self, name: str, owner: str) -> bool:
+        """主动放掉本人持有的租约（优雅退出时调用；只放自己的，别人的不动）。"""
+        with _Txn(self._pool, self._conn()) as txn:
+            cur = txn.conn.execute(
+                "UPDATE schedules SET lease_owner = '', lease_until = 0 "
+                "WHERE name = ? AND lease_owner = ?", (name, owner))
+            return bool(cur.rowcount > 0)
+
+    def record_schedule_fire(self, name: str, fired_at: float,
+                             next_fire: float) -> None:
+        """记一次已发生的触发（last_fire/next_fire 是观测面，不参与裁决）。"""
+        with _Txn(self._pool, self._conn()) as txn:
+            txn.conn.execute(
+                "UPDATE schedules SET last_fire = ?, next_fire = ? "
+                "WHERE name = ?", (float(fired_at), float(next_fire), name))
+
+    def list_schedules(self) -> list[dict]:
+        """全部排程（按名字），供观测面与排障；列显式列出，不依赖 sqlite3.Row。"""
+        rows = self._conn().execute(
+            "SELECT name, pipeline, cron, enabled, next_fire, last_fire, "
+            "lease_owner, lease_until FROM schedules ORDER BY name").fetchall()
+        return [{"name": r[0], "pipeline": r[1], "cron": r[2],
+                 "enabled": bool(r[3]), "next_fire": r[4], "last_fire": r[5],
+                 "lease_owner": r[6], "lease_until": r[7]} for r in rows]
 
 
 class _Txn:
