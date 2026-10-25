@@ -20,6 +20,10 @@ from .state_paths import state_root
 
 logger = logging.getLogger(__name__)
 
+#: 覆写写口的 CAS 重试上限：读 → 写 → 读回验证，冲突则重读重写。
+#: 10 次还冲突说明有进程持续抢跑——如实报错，不无限重试。
+CAS_MAX_RETRIES = 10
+
 
 def overlay_path() -> Path:
     """运行时配置覆写文件（跨进程共享，见模块 docstring）。"""
@@ -244,35 +248,62 @@ class ConfigCenter:
             return self._write_overlay_with(key, value)
 
     def _write_overlay_with(self, key: str, value) -> str | None:
-        """读现覆写 → 改一个键 → 原子写回（revision +1）。持锁调用。"""
-        values, revision, error = _read_overlay(self._overlay_path)
-        if error:
-            return f"{error}（拒绝在损坏的覆写文件上增量写）"
-        values = dict(values)
-        values[key] = value
-        err = _write_overlay(self._overlay_path, revision + 1, values)
-        if err:
-            return err
-        self._overlay_revision = revision + 1
-        with contextlib.suppress(OSError):
-            self._overlay_mtime = self._overlay_path.stat().st_mtime
-        return None
+        """读现覆写 → 改一个键 → 原子写回（revision +1）→ **读回验证**。持锁调用。
+
+        B6：此前的写法是"读 revision → 写 revision+1"——多进程下两个进程
+        都读到 N、都写 N+1，**后写者整份覆盖先写者**：先写者的键丢失，
+        而两边都报成功（配置悄悄少了一个键，这正是 B6 点名的形状）。现在
+        写后必须读回：revision 与 values 都与写入时一致才算成功；不一致
+        说明有进程抢跑，**重读重写**（下一轮读到的是抢跑者的新值，把己方
+        键并进去再写——所有键最终都落在文件里）。重试仍冲突则如实报错。
+        """
+        for _attempt in range(CAS_MAX_RETRIES):
+            values, revision, error = _read_overlay(self._overlay_path)
+            if error:
+                return f"{error}（拒绝在损坏的覆写文件上增量写）"
+            new_rev = revision + 1
+            new_values = dict(values)
+            new_values[key] = value
+            err = _write_overlay(self._overlay_path, new_rev, new_values)
+            if err:
+                return err
+            back_values, back_rev, back_err = _read_overlay(self._overlay_path)
+            if back_err:
+                return f"{back_err}（写后读回验证失败）"
+            if back_rev == new_rev and back_values == new_values:
+                self._overlay_revision = new_rev
+                with contextlib.suppress(OSError):
+                    self._overlay_mtime = self._overlay_path.stat().st_mtime
+                return None
+            # 冲突：抢跑者的值已在文件里，下一轮并进来重写
+        return (f"配置覆写冲突（{CAS_MAX_RETRIES} 次重试后仍有并发推进；"
+                "请稍后重试）")
 
     def publish_reload(self) -> str | None:
         """递增 revision（值不变）——让其他进程重新读取全部配置层。
 
         用于配置文件被外部改动后的人工 reload：本进程 reload() 之外，也要
         把"重新读一次"这件事广播给其他进程。返回 None = 已广播。
+        与 `_write_overlay_with` 同一套 CAS：写后读回验证，冲突重读重写
+        （广播"重读"不能被并发发布抢掉——抢跑者的值才是文件里最新的值）。
         """
         with self._lock:
-            values, revision, error = _read_overlay(self._overlay_path)
-            if error:
-                return error
-            err = _write_overlay(self._overlay_path, revision + 1, values)
-            if err:
-                return err
-            self._overlay_revision = revision + 1
-            return None
+            for _attempt in range(CAS_MAX_RETRIES):
+                values, revision, error = _read_overlay(self._overlay_path)
+                if error:
+                    return error
+                new_rev = revision + 1
+                err = _write_overlay(self._overlay_path, new_rev, values)
+                if err:
+                    return err
+                back_values, back_rev, back_err = _read_overlay(self._overlay_path)
+                if back_err:
+                    return back_err
+                if back_rev == new_rev and back_values == values:
+                    self._overlay_revision = new_rev
+                    return None
+            return (f"配置发布冲突（{CAS_MAX_RETRIES} 次重试后仍有并发推进；"
+                    "请稍后重试）")
 
     @property
     def revision(self) -> int:
