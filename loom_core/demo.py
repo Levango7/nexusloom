@@ -24,10 +24,11 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 DEMO_PIPELINE_NAME = "demo"
 
@@ -46,8 +47,8 @@ Loom 60 秒离线体验：一次完整的交付演示
 
 def _resolve_demo_pipeline() -> Path:
     """定位 demo.yaml（核心 pipelines/ 优先，物理 pack 回退）。"""
-    from .paths import pipelines_dir
     from .pack_manifest import pipeline_dirs
+    from .paths import pipelines_dir
 
     candidates = [Path(pipelines_dir()) / f"{DEMO_PIPELINE_NAME}.yaml"]
     candidates.extend(d / f"{DEMO_PIPELINE_NAME}.yaml" for d in pipeline_dirs())
@@ -78,7 +79,13 @@ class DemoResult:
 
 
 def run_demo(log: Callable[[str], None] = print) -> DemoResult:
-    """跑一次完整 demo。构造编排器之前先落沙盒，异常原样向上抛（CLI 兜底）。"""
+    """跑一次完整 demo。构造编排器之前先落沙盒，异常原样向上抛（CLI 兜底）。
+
+    **环境变量在结束时还原**：`_isolate_state` 改的是进程级 os.environ，
+    不还原的话调用方（测试进程）会被污染——它是"库函数不该有进程级副作用"
+    这条纪律的直接反例（隔离测试就抓过它）。
+    """
+    _env_backup = {k: os.environ.get(k) for k in ("LOOM_STATE_DIR", "LOOM_VERSIONS_DIR")}
     sandbox = _make_sandbox(Path.cwd())
     _isolate_state(sandbox)
     input_file = sandbox / "input.md"
@@ -86,9 +93,8 @@ def run_demo(log: Callable[[str], None] = print) -> DemoResult:
     deliver_dir = sandbox / "deliverables"
     deliver_dir.mkdir(parents=True, exist_ok=True)
 
+    from .paths import agents_dir
     from .pipeline import PipelineOrchestrator
-    from .paths import agents_dir, pipelines_dir
-    from .pack_manifest import pipeline_dirs
     from .scheduler import Scheduler
 
     log(f"[demo] 沙盒目录: {sandbox}")
@@ -131,6 +137,13 @@ def run_demo(log: Callable[[str], None] = print) -> DemoResult:
             result.quality["threshold"] = _quality_threshold(plan)
     finally:
         orch.shutdown()
+        # 环境变量还原：demo 改过的两个键恢复原值（原本没设过的删掉）
+        for _k, _v in _env_backup.items():
+            if _v is None:
+                with contextlib.suppress(KeyError):
+                    del os.environ[_k]
+            else:
+                os.environ[_k] = _v
 
     _walkthrough(result, log)
     return result
@@ -180,7 +193,7 @@ def _collect(task: Any, sandbox: Path, deliver_dir: Path,
     if p.exists() and p.stat().st_size > 0:
         deliverables.append(p)
     if isinstance(render, dict):
-        for fmt, path in (render.get("outputs") or {}).items():
+        for _fmt, path in (render.get("outputs") or {}).items():
             fp = Path(str(path))
             if fp.exists() and fp.stat().st_size > 0:
                 deliverables.append(fp)

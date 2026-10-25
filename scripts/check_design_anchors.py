@@ -29,6 +29,11 @@ ANCHORS = [
     # B4 触发租约的新写口：设计文档 §3.1 的 schedules 行必须指向真实存在的方法。
     ("loom_core/run_store.py", 518, "def register_schedule"),
     ("loom_core/run_store.py", 535, "def acquire_schedule_lease"),
+    # A3 类型化输入：设计复核的 A3 条（§3.1 第 3 行）必须指向设计文档里真实
+    # 存在的分期节——A3 判据文件本身在 tests/test_input_schema.py。
+    ("docs/" + "runstore-eventlog-design-2026-10-21.md", 81,
+     "## 4. 分期与退出条件"),
+    ("tests/" + "test_input_schema.py", 1, "类型化输入"),
     ("loom_core/backfill.py", 35, "class RunBackfill"),
     ("loom_core/backfill.py", 59, "def replay"),
     # Stage 3b：`complete()` 摘掉 result 参数，整体下移到 203。

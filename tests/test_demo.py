@@ -80,15 +80,13 @@ class TestDemoRunner:
         assert r.ledger.get("pipeline") == "demo"
 
     def test_sandbox_state_isolated(self, demo_dir):
-        """沙盒即隔离：LOOM_STATE_DIR 指进沙盒，真实状态目录不受影响。"""
         from loom_core.demo import run_demo
 
+        before = os.environ.get("LOOM_STATE_DIR")
         r = run_demo(log=lambda _m: None)
-        assert os.environ["LOOM_STATE_DIR"] == str(r.sandbox / "state")
-        assert os.environ["LOOM_VERSIONS_DIR"] == str(r.sandbox / "versions")
         assert (r.sandbox / "input.md").exists()
-        assert (r.sandbox / "state" / "deliveries.db").exists(), (
-            "账本必须落在沙盒状态目录里")
+        assert (r.sandbox / "state" / "deliveries.db").exists()
+        assert os.environ.get("LOOM_STATE_DIR") == before
 
     def test_skipped_format_reported_honestly(self, demo_dir, monkeypatch):
         """缺后端的格式如实报跳过原因——不许假装成功（能力包的诚实边界）。"""

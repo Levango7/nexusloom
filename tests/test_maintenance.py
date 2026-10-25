@@ -121,9 +121,13 @@ class TestQueueCleanup:
 
 
 class TestCostCleanup:
-    def test_max_rows_and_age(self, state):
-        from loom_core.cost_tracker import get_cost_tracker
-        t = get_cost_tracker()
+    def test_max_rows_and_age(self, state, monkeypatch):
+        """单例污染的教训：get_cost_tracker 是进程级单例，绑定的是**首次构造时**
+        的 LOOM_STATE_DIR——全量跑里更早的测试先构造了它，本用例就会操作别人的库。
+        每次用前重置（monkeypatch 负责还原）。"""
+        from loom_core import cost_tracker
+        monkeypatch.setattr(cost_tracker, "_tracker_instance", None)
+        t = cost_tracker.get_cost_tracker()
         for i in range(5):
             t.record("cloudflare", 10, 10, cost=0.01, task_id=f"t{i}")
         # record 的时间戳是 now——直接 SQL 钉成递增值保证确定性
@@ -137,9 +141,10 @@ class TestCostCleanup:
 
 
 class TestFeedbackCleanup:
-    def test_default_disabled_and_explicit(self, state):
-        from loom_core.quality_feedback import get_quality_feedback
-        f = get_quality_feedback()
+    def test_default_disabled_and_explicit(self, state, monkeypatch):
+        from loom_core import quality_feedback
+        monkeypatch.setattr(quality_feedback, "_instance", None)
+        f = quality_feedback.get_quality_feedback()
         f.record("t1", {"completeness": 0.8}, ["core"], "p")
         f.record("t2", {"completeness": 0.9}, ["core"], "p")
         # record 的时间戳是 now——直接 SQL 钉成一旧一新保证确定性
