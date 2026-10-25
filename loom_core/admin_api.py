@@ -859,6 +859,15 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._handle_dashboard()
             elif self.path == "/api/approvals":
                 self._handle_approvals()
+            elif self.path.split("?", 1)[0] == "/api/deliveries":
+                self._handle_deliveries()
+            elif self.path.startswith("/api/deliveries/"):
+                run_id = self.path.split("/api/deliveries/", 1)[1].split("/")[0].split("?")[0]
+                if not _validate_task_id(run_id):
+                    return self._json({"error": "invalid run id"}, 400)
+                self._handle_delivery_detail(run_id)
+            elif self.path.split("?", 1)[0] == "/api/locks":
+                self._handle_locks()
             elif self.path == "/api/pipeline":
                 self._handle_pipeline()
             elif self.path == "/api/openapi.json":
@@ -1722,6 +1731,132 @@ class AdminHandler(BaseHTTPRequestHandler):
                 item["principal"] = r.get("principal", "")
             items.append(item)
         self._json({"approvals": items, "count": len(items)})
+
+    # ─── 交付账本 / 锁巡检（P1 #8，只读）───────────────────
+
+    #: 账本一行装的是整条运行的逐节点历史，一次给太多会把进程拖垮
+    _DELIVERY_LIMIT_MAX = 200
+
+    def _int_param(self, name: str, default: int, maximum: int) -> int:
+        """读一个带上限的整数查询参数；坏值回落到默认，不 400。"""
+        from urllib.parse import parse_qs, urlparse
+        raw = (parse_qs(urlparse(self.path).query).get(name) or [""])[0]
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return max(1, min(value, maximum))
+
+    def _delivery_item(self, rec: dict, p: Principal) -> dict | None:
+        """账本一行 → 响应项，同时裁决可见性。
+
+        账本自己没有归属列（`deliveries.py` 的表里就没有 principal），所以"这条你
+        能不能看"只能问投影：走 `_scoped_run` 那条口径——越权按不存在处理，不给 403。
+        顺带带上 Stage 3b 的健康位：`incomplete` 就是该跑 `--replay-run` 的那批，
+        但**这里不替你判能不能补**（判据只有补账工具一处，抄一份就会分叉）。
+        """
+        run_id = str(rec.get("run_id") or "")
+        if not p.admin and self._scoped_run(run_id) is None:
+            return None
+        nodes = [n for n in (rec.get("nodes") or []) if isinstance(n, dict)]
+        return {
+            "run_id": run_id,
+            "pipeline": str(rec.get("pipeline") or ""),
+            "status": str(rec.get("status") or ""),
+            "finished_at": rec.get("finished_at") or 0,
+            "duration_sec": rec.get("duration_sec"),
+            "output_path": str(rec.get("output_path") or ""),
+            "node_count": len(nodes),
+            "artifact_count": sum(len(n.get("artifact_keys") or []) for n in nodes),
+            "error": str(rec.get("error") or ""),
+            "projection": self.orch.run_handle(run_id).projection(),
+        }
+
+    def _handle_deliveries(self):
+        """`GET /api/deliveries?limit=N`：最近交付（`finished_at` 降序）。"""
+        if not self.orch:
+            return self._json({"error": "orchestrator not set"}, 500)
+        p = self._principal()
+        limit = self._int_param("limit", 50, self._DELIVERY_LIMIT_MAX)
+        try:
+            from .deliveries import DeliveryLedger
+            rows = DeliveryLedger().list(limit=limit)
+        except Exception as e:  # noqa: BLE001 —— 账本读不动要报 503，不能当成"没有交付"
+            _logger.warning("[AdminAPI] 读取交付账本失败: %s", e)
+            return self._json({"error": "deliveries unavailable"}, 503)
+        items = [item for item in (self._delivery_item(r, p) for r in rows
+                                   if isinstance(r, dict)) if item is not None]
+        self._json({"deliveries": items, "count": len(items), "limit": limit,
+                    "truncated": len(rows) >= limit,
+                    "scope": "all" if p.admin else "principal"})
+
+    def _handle_delivery_detail(self, run_id: str):
+        """`GET /api/deliveries/<run_id>`：整条结构化载荷（含逐节点）+ 健康位。
+
+        "账本里没这条"和"这条不是你的"**同一个 404**：存在性本身就是信息。
+        """
+        if not self.orch:
+            return self._json({"error": "orchestrator not set"}, 500)
+        p = self._principal()
+        try:
+            from .deliveries import DeliveryLedger
+            rec = DeliveryLedger().get(run_id)
+        except Exception as e:  # noqa: BLE001
+            _logger.warning("[AdminAPI] 读取交付明细失败: %s", e)
+            return self._json({"error": "deliveries unavailable"}, 503)
+        if not isinstance(rec, dict) or str(rec.get("run_id") or "") != run_id:
+            return self._json({"error": "delivery not found"}, 404)
+        item = self._delivery_item(rec, p)
+        if item is None:
+            return self._json({"error": "delivery not found"}, 404)
+        item["plan_id"] = str(rec.get("plan_id") or "")
+        item["input_file"] = str(rec.get("input_file") or "")
+        item["started_at"] = rec.get("started_at") or 0
+        item["nodes"] = [n for n in (rec.get("nodes") or []) if isinstance(n, dict)]
+        self._json({"delivery": item})
+
+    def _handle_locks(self):
+        """`GET /api/locks[?pipeline=<name>]`：**当前文件 vs 当前锁**的漂移巡检。
+
+        口径要说清，否则这口会变成假证据：报的是"现在这两份文件对不对得上"，
+        **不是**"某次运行时用的锁对不对"——运行时的 `config_hash`/`topology_hash`
+        今天不落库（只在 `verify_lockfile` 那一瞬存在于内存），所以后者无法在这里
+        回答，也不拿今天的值冒充当时。响应里的 `scope` 就是给读的人钉这一点的。
+        """
+        from urllib.parse import parse_qs, urlparse
+
+        from .pack_manifest import pipeline_dirs
+        from .scheduler import Scheduler
+        wanted = (parse_qs(urlparse(self.path).query).get("pipeline") or [""])[0]
+        entries: list[dict] = []
+        seen: set[str] = set()
+        for d in pipeline_dirs():
+            if not d.is_dir():
+                continue
+            # 解析顺序即优先级：核心 pipelines/ 在前，pack 里的同名片段不覆盖它
+            sched = Scheduler(pipeline_dir=str(d))
+            for name in sorted(sched.list_pipelines()):
+                if name in seen or (wanted and name != wanted):
+                    continue
+                seen.add(name)
+                try:
+                    plan = sched.parse_file(str(d / f"{name}.yaml"), verify_lock=False)
+                    drift = sched.lock_drift(plan, source_dir=d)
+                    # 三值而不是布尔：`matches: true` 要说的是"比过且一致"，
+                    # 没有锁可比时给 true 等于把"没发现问题"和"没法判断"混成一件事。
+                    entry = {"pipeline": name,
+                             "lock_file": Path(drift["lock_file"]).name,
+                             "lock_present": drift["lock_present"],
+                             "matches": (not drift["issues"]) if drift["lock_present"] else None,
+                             "issues": list(drift["issues"])}
+                except Exception as e:  # noqa: BLE001 —— 解析炸了也要报，别把一条拖成全口 500
+                    entry = {"pipeline": name, "lock_file": "", "lock_present": None,
+                             "matches": None, "issues": [f"解析失败: {e}"]}
+                entries.append(entry)
+        if wanted and not entries:
+            return self._json({"error": "pipeline not found"}, 404)
+        self._json({"scope": "current files", "pipelines": entries, "count": len(entries),
+                    "drifted": [e["pipeline"] for e in entries if e.get("matches") is False]})
 
     def _handle_pipeline(self):
         """返回流水线配置信息"""

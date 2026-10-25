@@ -777,6 +777,31 @@ python run.py --replay-run <run_id>                  # 按 id 补一条
 收尾都不会再往审计里塞第二条终态事件（此前只靠 `_claim_terminal_event`，那是**进程内**
 的去重，跨进程与事后重放都绕过它）。
 
+**账本与锁要能在 HTTP 侧读**（2026-10-25，#8）：上面那两条命令的输入源——交付账本——
+此前只有 CLI 与进程内读得到，运维判断"该不该补"必须先看见它。新增三个只读口：
+
+| 口 | 给什么 |
+|----|--------|
+| `GET /api/deliveries` | 最近交付（`?limit=`，默认 50、夹到 200），逐行带 `projection` 健康位 |
+| `GET /api/deliveries/<run_id>` | 整条结构化载荷：逐节点状态/耗时/`artifact_keys` |
+| `GET /api/locks` | 逐流水线锁巡检（`?pipeline=<name>` 只看一条） |
+
+两条口径要说在前面，别让响应被读成别的含义：
+
+- **`/api/locks` 回答的是"当前 YAML 与当前锁对不对"**，响应里的 `scope: "current files"`
+  就是钉这一点的。它**不回答**"某次运行时用的锁对不对"——运行时的 `config_hash` /
+  `topology_hash` 只在校验那一瞬存在于内存，从未落库，所以那件事今天无法证据化，
+  也不拿今天的值冒充当时。三值 `matches`：`true` 比过且一致、`false` 漂移（`issues`
+  给差在哪）、`null` 没有锁可比或 YAML 解析失败——"没发现问题"与"没法判断"不混。
+  巡检与执行共用同一处锁路径解析（`Scheduler.resolve_lock_path`），否则会报出执行时
+  根本不会发生的漂移。
+- **交付账本自己没有归属列**，所以非 admin 的可见性是逐行反查投影的 `principal`：
+  CLI 直跑、投影里没有的运行，`projection` 报 `unknown` 且**只有 admin 看得见**。
+  越权与不存在给同一个 404（存在性本身就是信息）；账本读不动给 503，**不降级成空列表**。
+
+看到 `projection: "incomplete"` 就走到上面那条 `python run.py --replay-run <run_id>`——
+**能不能补由补账工具判**（它拒绝时会说清是运行中、三方冲突还是已升格），这里不复制那条规则。
+
 ### 定时触发（Cron）
 
 按 `triggers.yaml` 的 cron 常驻调度（本地时间；**错过不补跑**，跳过窗口会打印出来）：
