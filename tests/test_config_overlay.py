@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -251,6 +252,102 @@ out.close()
             child.wait(timeout=10)
             err = child.stderr.read() if child.stderr else ""
             assert "Traceback" not in err, f"子进程崩溃: {err}"
+
+
+# ── B6：覆写写的 revision CAS ─────────────────────
+
+class TestOverlayCAS:
+    """配置覆写写口的乐观锁（B6）：多进程写不同键不许互相覆盖。
+
+    此前的"读 revision → 写 revision+1"在两个进程并发时会静默丢键：
+    后写者整份覆盖先写者，两边都报成功。CAS 写回 = 写后读回验证 + 重试。
+    """
+
+    #: 子进程源码：写一个键后把结果打到 stdout（不落文件——子进程不写
+    #: 路径参数，PYTHONPATH 由父进程环境传入，子进程里没有 sys.path 操作）。
+    CHILD_SRC = '''\
+import json
+from loom_core.config import ConfigCenter
+c = ConfigCenter()
+err = c.set_persisted({key!r}, {value!r})
+print(json.dumps({{"error": err}}))
+'''
+
+    def test_two_processes_writing_different_keys_both_land(self, state_dir, tmp_path):
+        """真进程并发写不同键：都成功，且所有键都留在文件里。
+
+        用 4 个进程而不是 2 个——CI 上 2 进程时抓到过"验证通过后被覆盖"
+        的竞态（P1 读回验证通过 → P2 才写同 revision 覆盖 → 最终只剩
+        一个键）。文件锁（`_overlay_file_lock`）把读-改-写-读回串行化后，
+        无论几个进程并发，键一个都不会丢。
+        """
+        jobs = [("a.k", 1), ("b.k", 2), ("c.k", 3), ("d.k", 4)]
+        procs = []
+        for key, value in jobs:
+            script = tmp_path / f"cas_child_{key.replace('.', '_')}.py"
+            script.write_text(self.CHILD_SRC.format(key=key, value=value),
+                              encoding="utf-8")
+            procs.append(subprocess.Popen(
+                [sys.executable, str(script)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env={**os.environ, "PYTHONPATH": str(PROJECT)}))
+        try:
+            for p in procs:
+                out, err = p.communicate(timeout=180)
+                assert p.returncode == 0, err[-800:]
+                assert json.loads(out.strip())["error"] is None
+            overlay = _overlay(state_dir)
+            expected = {key: value for key, value in jobs}
+            assert overlay["values"] == expected, overlay
+            assert overlay["revision"] == len(jobs), overlay
+        finally:
+            for p in procs:
+                if p.poll() is None:
+                    p.kill()
+
+    def test_conflict_reported_after_retries(self, state_dir, monkeypatch):
+        """读回永远不一致（模拟持续抢跑）→ 如实报冲突，不假装成功。"""
+        from loom_core import config as cfg_mod
+
+        real_write = cfg_mod._write_overlay
+        state = {"n": 0}
+
+        def raced_write(path, revision, values):
+            err = real_write(path, revision, values)
+            if err:
+                return err
+            # 每次抢跑都换一个新键——读回永远多出一个键，恒不一致
+            state["n"] += 1
+            return real_write(path, revision,
+                              {f"ghost.k{state['n']}": "stolen", **values})
+
+        monkeypatch.setattr(cfg_mod, "_write_overlay", raced_write)
+        cfg = ConfigCenter(auto_reload=False)
+        err = cfg.set_persisted("a.k", 1)
+        assert err is not None and "冲突" in err, err
+
+    def test_retry_converges_after_one_race(self, state_dir, monkeypatch):
+        """抢跑只发生一次 → 重试读到抢跑者的值并进来，最终成功且两键都在。"""
+        from loom_core import config as cfg_mod
+
+        real_write = cfg_mod._write_overlay
+        state = {"first": True}
+
+        def raced_write(path, revision, values):
+            err = real_write(path, revision, values)
+            if err:
+                return err
+            if state["first"]:
+                state["first"] = False
+                return real_write(path, revision, {"ghost.k": "stolen", **values})
+            return None
+
+        monkeypatch.setattr(cfg_mod, "_write_overlay", raced_write)
+        cfg = ConfigCenter(auto_reload=False)
+        err = cfg.set_persisted("a.k", 1)
+        assert err is None, err
+        overlay = _overlay(state_dir)
+        assert overlay["values"] == {"a.k": 1, "ghost.k": "stolen"}, overlay
 
 
 # ── Orchestrator 侧：通知循环真身 ──────────────────────────

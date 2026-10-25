@@ -31,8 +31,9 @@ coverage.xml
 
 # 运行产物
 *.lock
-# pipeline lockfile 应纳入版本控制
+# pipeline lockfile 应纳入版本控制（顶层 pipelines/ 与物理 pack 的 pipelines/）
 !pipelines/*.lock
+!packs/**/pipelines/*.lock
 *.log
 .DS_Store
 bus_data/

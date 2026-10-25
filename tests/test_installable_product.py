@@ -141,3 +141,33 @@ class TestInstalledSelfCheck:
             "安装态 pack 清册为空：wheel 没带上 pipelines 数据")
         assert data["missing"] == [], (
             f"安装态有引用不到的 agent: {data['missing']}")
+
+    def test_clean_venv_demo_runs_offline(self, tmp_path):
+        """A4 验收线：干净 venv 装完 `loom demo` 跑通一次完整交付。
+
+        全程离线（demo 流水线没有检索/抓取/LLM 节点）；交付物、质量门、
+        账本全部真产出——这是 P0 欠账的最后一条判据。
+        """
+        wheel = self._build_wheel(tmp_path)
+        venv_dir = tmp_path / "venv-demo"
+        r = subprocess.run(
+            [sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)],
+            capture_output=True, text=True, timeout=300)
+        assert r.returncode == 0, r.stderr[-800:]
+        venv_python = self._venv_python(venv_dir)
+        self._install_into_venv(venv_python, wheel)
+
+        neutral = tmp_path / "neutral-cwd"
+        neutral.mkdir()
+        loom_exe = venv_dir / ("Scripts" if os.name == "nt" else "bin") / "loom"
+        r = subprocess.run([str(loom_exe), "demo"], cwd=str(neutral),
+                           capture_output=True, text=True, timeout=600)
+        assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+        assert "沙盒目录" in r.stdout
+        assert "交付物" in r.stdout
+        assert "质量门" in r.stdout, "质量门分数必须出现在 walkthrough（真评分）"
+        assert "交付账本" in r.stdout
+        assert neutral.glob("loom-demo-*"), "沙盒必须建在 cwd 下"
+        sandbox = next(neutral.glob("loom-demo-*"))
+        assert (sandbox / "deliverables" / "demo-report.md").exists()
+        assert (sandbox / "deliverables" / "demo-report.html").exists()

@@ -2,7 +2,7 @@
 
 > 承接 `docs/product-design-review-2026-10-20.md` §5。本文只解决一件事：**把"一次运行的事实"从 5 套写入 + 20 处直读，收敛成一个写入口、一个读接口。**
 > 行号基线：main @ `0f6090f`（PR #50 合并后），本仓 `fix/console-runtime-validation` 分支上取证的落点已逐条复核。**本文所有 `file:line` 是"当时那一行的原状"**，Stage 每落地一批就会让一批引用失效——`scripts/check_design_anchors.py` 按 `(文件, 行号, 锚文本)` 逐条核对，改了代码就要按新现实更新或退役对应条目。
-> 落地进度：§6 三件事已拍板；**Stage 0 / Stage 1 已合并**（PR #54 / #55），**Stage 2 读侧已交付**（PR #57），SSE 重放拆到 Stage 2b（PR #58，见 §4 末），**Stage 3a 审批摘写已交付**（PR #60，见 §4 末），**Stage 3b 队列收口已交付**（PR #62，见 §4 末），**Stage 3c 补账工具已交付**（PR：本批，见 §4 末）。Stage 3 的两条退出判据里，"每个源有且只有一个写入者"达成；"RunHandle 五原语全部只读 RunStore"**只在观测面达成**——`cancel/resume` 仍是内存动作（Stage 2 就写了这条边界：动作只在内存态有意义），不把它算成已闭环。
+> 落地进度：§6 三件事已拍板；**Stage 0 / Stage 1 已合并**（PR #54 / #55），**Stage 2 读侧已交付**（PR #57），SSE 重放拆到 Stage 2b（PR #58，见 §4 末），**Stage 3a 审批摘写已交付**（PR #60，见 §4 末），**Stage 3b 队列收口已交付**（PR #62，见 §4 末），**Stage 3c 补账工具已交付**（PR：本批，见 §4 末），**B4 触发租约已交付**（`schedules` 表进 RunStore，结构版本 3，见 §3.1）。Stage 3 的两条退出判据里，"每个源有且只有一个写入者"达成；"RunHandle 五原语全部只读 RunStore"**只在观测面达成**——`cancel/resume` 仍是内存动作（Stage 2 就写了这条边界：动作只在内存态有意义），不把它算成已闭环。
 
 ---
 
@@ -63,7 +63,7 @@
 边界（明确不做）：
 - **不 backfill** 历史运行。新运行起才进 RunStore；文档写"运行历史自 vX 起"。老运行仍按现状经 `deliveries` 回落读得到终态。
 - checkpoint **保留**"恢复快照"职责，不改成事件源（`_merge_resumed_nodes`/`_reuse_completed_node` 读快照，`dag_executor.py:821/952`）。它的磁盘存在性不再对外报（`admin_api.py:1232` `_task_checkpoint_view` 的 `exists`/`resumed` 改由事件/投影回答"是否续跑过"）。
-- 本批只落 4 张表：`schema_version` / `events` / `runs` / `run_nodes`。`artifacts`、`schedules`、`cost_entries` 属后续批。
+- ~~本批只落 4 张表：`schema_version` / `events` / `runs` / `run_nodes`。`artifacts`、`schedules`、`cost_entries` 属后续批。~~〔B4 落地更正（2026-10-25）：`schedules` 已随触发租约进表（结构版本 3），见 §3.1；`artifacts` / `cost_entries` 仍是后续批〕
 - `RunStore` 走 `db_backend.resolve_backend` 的**已翻译子集**（`?`、`INSERT OR IGNORE`、`REAL`），因此本批 SQL 禁用 `INSERT OR REPLACE`；PG 实现仍是下一步，判据按 `LOOM_TEST_PG_URL` 门控（与 `tests/test_state_backend.py` 同口径）。
 
 ### 3.1 表结构（本批）
@@ -75,6 +75,7 @@
 | `runs` | run_id PK, workflow, principal, status, trigger, inputs_json, started_at, finished_at, error, cost_usd, quality_score, last_seq, artifacts_json | 列表页与作用域判定的唯一来源；`last_seq` 让 SSE 游标能跨进程续传 |
 | `run_nodes` | run_id, node, status, attempts, started_at, finished_at, error, result_json, artifact_keys_json；PK(run_id, node) | S2/S3 直读；把现在藏在 `deliveries.payload_json` 里的逐节点事实升到一等行 |
 | `approvals`（结构版本 2 起，Stage 3a） | request_id PK, run_id, pipeline, principal, nodes_json, messages_json, status, requested_at, decided_at, decided_by, note, reason, consumed | 审批是可变状态（pending→approved/rejected→consumed），收件箱要按 status 查，所以有投影；每次变更同事务追加 `approval.*` 事件 |
+| `schedules`（结构版本 3 起，B4 触发租约） | name PK, pipeline, cron, enabled, next_fire, last_fire, lease_owner, lease_until | cron 触发的"谁有权提交"判据：条件 UPDATE + rowcount 原子裁决（到期/无人持有/本人持有才成功），`owner=主机名:pid` 每轮续租；`last_fire`/`next_fire` 是观测面不参与裁决。**配置列与租约列分开更新**——crontab 轮换的 `register_schedule` 不许碰租约列，清了别人的约就有两个触发者（判据 `tests/test_schedule_lease.py`，含真跨进程双开恰好一个拿到 + 真 PG 门控） |
 
 `Deliveries` 不动，作为"交付账本"继续写；`runs.artifacts_json` 由 recorder 在 `_deliver` 处同事务写入，避免两个来源（迁移到视图是后续批）。
 

@@ -9,7 +9,7 @@
 # 引擎与其余 13 条流水线照常工作（文档件全部来自本包的 import 面已清零）。
 name: docgen
 version: "1.0.0"
-description: 文档生成领域件 —— writer/quality_gate/checker/layout/fact_checker + docgen 系流水线 + 质量档案 + prompt 模板
+description: 文档生成领域件 —— writer/quality_gate/checker/layout/fact_checker + docgen 系流水线 + demo 离线体验流水线 + 质量档案 + prompt 模板
 agents:
   - writer
   - quality_gate
@@ -23,6 +23,7 @@ pipelines:
   - docgen-lean
   - docreq
   - kb-docgen
+  - demo
 quality_profiles:
   - technical-doc
   - tutorial

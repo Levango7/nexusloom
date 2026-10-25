@@ -12,9 +12,15 @@
   固定路径且内容随配置固定——不存在"任务读到半个文件"的中间态。
 - **校验前置**：加载时把名字唯一 / 流水线存在 / cron 合法一次验完，错一条
   拒绝启动——配置写错不该等到触发那一刻才发现。
+- **多进程互斥（B4）**：共享一个状态目录的多个 `--triggers` 进程只有持租约者
+  提交（租约挂 RunStore 的 `schedules` 表，owner=`主机名:pid`，每轮续租）。
+  RunStore 不可用时降级为单进程行为并警告——降级是事实，必须说出口。
 """
 from __future__ import annotations
 
+import contextlib
+import os
+import socket
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -162,12 +168,31 @@ class _Runtime:
 
 def tick(runtimes: list[_Runtime], now: datetime,
          submit: Callable[[Trigger, datetime], str],
-         log: Callable[[str], None]) -> list[str]:
-    """推进一次调度：到期提交、清点错过窗口。循环体本身无副作用，便于测试。"""
+         log: Callable[[str], None],
+         lease: Callable[[Trigger], bool] | None = None,
+         on_fire: Callable[[Trigger, datetime], None] | None = None) -> list[str]:
+    """推进一次调度：到期提交、清点错过窗口。循环体本身无副作用，便于测试。
+
+    `lease`（B4）在窗口计算**之前**判定"这个触发归不归本进程"。被拒时
+    `last_check` 仍要前移——窗口记账与提交归属是两回事；不前移的话，持约
+    进程一死，接管进程会把它已经提交过的旧窗口再算成"到期"而重复提交。
+    `on_fire` 在提交成功后记账（schedules 表的 last_fire/next_fire），
+    失败不影响本次提交——它是观测面，不是闸门。
+    """
     submitted: list[str] = []
     for rt in runtimes:
         if not rt.trigger.enabled:
             continue
+        if lease is not None:
+            try:
+                allowed = lease(rt.trigger)
+            except Exception as e:               # 租约面故障不拖垮整个循环
+                log(f"[triggers] {rt.trigger.name} 租约判定失败: {e}")
+                rt.last_check = now
+                continue
+            if not allowed:
+                rt.last_check = now
+                continue
         nf = next_fire(rt.trigger.spec, rt.last_check)
         if nf > now:
             rt.last_check = now
@@ -191,6 +216,9 @@ def tick(runtimes: list[_Runtime], now: datetime,
             f"（task {task_id}，触发时刻 {nf:%Y-%m-%d %H:%M}）")
         if missed:
             log(f"[triggers] {rt.trigger.name} 跳过 {missed} 个错过窗口（进程未运行）")
+        if on_fire is not None:
+            with contextlib.suppress(Exception):
+                on_fire(rt.trigger, nf)
         submitted.append(task_id)
     return submitted
 
@@ -214,12 +242,24 @@ def run_trigger_loop(orch: Any, triggers: list[Trigger], *,
                      now_fn: Callable[[], datetime] = datetime.now,
                      sleep_fn: Callable[[float], None] | None = None,
                      max_ticks: int | None = None,
-                     log: Callable[[str], None] = print) -> None:
-    """前台常驻循环（Ctrl+C 退出）。轮询间隔决定触发精度（秒级误差）。"""
+                     log: Callable[[str], None] = print,
+                     lease_ttl: float | None = None) -> None:
+    """前台常驻循环（Ctrl+C 退出）。轮询间隔决定触发精度（秒级误差）。
+
+    B4 起：多个进程共享一个状态目录时只有**持租约的进程**提交——租约经
+    RunStore 的 `schedules` 表原子裁决，owner = `主机名:pid`，TTL 默认三倍
+    轮询间隔（下限 60s），每轮续租；优雅退出时放掉本人租约，另一进程立即
+    接管。RunStore 建不起时降级为单进程模式（B4 之前的行为），但降级必须
+    说出口（警告一行），不能静默装没事。
+    """
     active = [t for t in triggers if t.enabled]
     if not active:
         log("[triggers] 没有启用的触发（全部 enabled: false），无事可做")
         return
+    ttl = lease_ttl if lease_ttl is not None else max(poll_seconds * 3.0, 60.0)
+    owner = f"{socket.gethostname()}:{os.getpid()}"
+    store, lease_cb, on_fire_cb = _wire_schedule_lease(
+        orch, triggers, owner, ttl, log)
     started = now_fn()
     runtimes = [_Runtime(t, started) for t in triggers]
     for t in active:
@@ -228,6 +268,9 @@ def run_trigger_loop(orch: Any, triggers: list[Trigger], *,
             f" 下次触发 {nf:%Y-%m-%d %H:%M} → {t.pipeline}")
     log(f"[triggers] 常驻调度启动（{len(active)} 个启用触发，"
         f"轮询 {poll_seconds:g}s；Ctrl+C 退出）")
+    if lease_cb is not None:
+        log(f"[triggers] 租约已接 RunStore（owner={owner}，TTL {ttl:g}s）"
+            "——共享同一状态目录的多进程只有持约者提交")
     sleep = sleep_fn or time.sleep
 
     def _submit(trigger: Trigger, fire_time: datetime) -> str:
@@ -237,10 +280,57 @@ def run_trigger_loop(orch: Any, triggers: list[Trigger], *,
     ticks = 0
     try:
         while True:
-            tick(runtimes, now_fn(), _submit, log)
+            tick(runtimes, now_fn(), _submit, log,
+                 lease=lease_cb, on_fire=on_fire_cb)
             ticks += 1
             if max_ticks is not None and ticks >= max_ticks:
                 break
             sleep(poll_seconds)
     except KeyboardInterrupt:
         log("\n[triggers] 收到中断，退出调度")
+    finally:
+        if store is not None:
+            for t in active:
+                with contextlib.suppress(Exception):
+                    store.release_schedule_lease(t.name, owner=owner)
+
+
+def _wire_schedule_lease(orch: Any, triggers: list[Trigger], owner: str,
+                         ttl: float, log: Callable[[str], None],
+                         ) -> tuple[Any, Callable[[Trigger], bool] | None,
+                                    Callable[[Trigger, datetime], None] | None]:
+    """把 RunStore 的 `schedules` 表接成 tick 的租约/记账回调。
+
+    返回 `(store, lease, on_fire)`；任一环节建不起来就返回 `(None, None, None)`
+    ——降级成 B4 之前的单进程行为。登记一次做完（配置列幂等覆盖，租约列不动），
+    之后每个 tick 只做条件 UPDATE 的抢/续约。
+    """
+    store = None
+    getter = getattr(orch, "_runstore", None)
+    if callable(getter):
+        try:
+            store = getter()
+        except Exception as e:               # noqa: BLE001 — _runstore 本应 fail-soft
+            log(f"[triggers] RunStore 访问失败，租约停用: {e}")
+            return None, None, None
+    if store is None:
+        log("[triggers] RunStore 不可用，租约停用——同库多进程可能重复触发")
+        return None, None, None
+    try:
+        for t in triggers:
+            store.register_schedule(t.name, pipeline=t.pipeline,
+                                    cron=t.cron, enabled=t.enabled)
+    except Exception as e:                   # noqa: BLE001
+        log(f"[triggers] 触发登记失败，租约停用: {e}")
+        return None, None, None
+
+    def _lease(trigger: Trigger) -> bool:
+        return bool(store.acquire_schedule_lease(trigger.name, owner=owner,
+                                                 ttl=ttl))
+
+    def _on_fire(trigger: Trigger, fired_at: datetime) -> None:
+        nxt = next_fire(trigger.spec, fired_at)
+        store.record_schedule_fire(trigger.name, fired_at.timestamp(),
+                                   nxt.timestamp())
+
+    return store, _lease, _on_fire

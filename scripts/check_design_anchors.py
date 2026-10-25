@@ -19,12 +19,20 @@ ANCHORS = [
     # Stage 3a：审批的三个写点从 approvals.py 搬进了 RunStore（投影 + 同事务事件）。
     # §1 那一行"审批本身就是一个写面"的结论必须指向新位置，而不是退役成无处可指。
     # Stage 3c 补账把这三口整体下推 12 行（`close_run` 长成条件裁决版）。
-    ("loom_core/run_store.py", 300, "def open_approval"),
-    ("loom_core/run_store.py", 321, "def decide_approval"),
-    ("loom_core/run_store.py", 362, "def consume_approval"),
+    ("loom_core/" + "run_store.py", 313, "def open_approval"),
+    ("loom_core/" + "run_store.py", 334, "def decide_approval"),
+    ("loom_core/" + "run_store.py", 375, "def consume_approval"),
     # Stage 3c（补账）的两处新落点：设计文档 §4 末"至多一条终态事件已下沉到存储层"
     # 这句话必须指向一个真实存在的函数，而不是只写在文档里。
-    ("loom_core/run_store.py", 258, "def close_run"),
+    ("loom_core/" + "run_store.py", 271, "def close_run"),
+    # B4 触发租约的新写口：设计文档 §3.1 的 schedules 行必须指向真实存在的方法。
+    # 行号随 A6 的 cleanup 插入整体下推 13 行（DDL 加 13 行）+ cleanup 方法加 55 行。
+    ("loom_core/" + "run_store.py", 573, "def register_schedule"),
+    ("loom_core/" + "run_store.py", 590, "def acquire_schedule_lease"),
+    # B4 触发租约的新写口：设计文档 §3.1 的 schedules 行必须指向真实存在的方法。
+    # 行号随 A6 的 cleanup 插入整体下推 13 行（DDL 加 13 行）+ cleanup 方法加 55 行。
+    ("loom_core/run_store.py", 573, "def register_schedule"),
+    ("loom_core/run_store.py", 590, "def acquire_schedule_lease"),
     ("loom_core/backfill.py", 35, "class RunBackfill"),
     ("loom_core/backfill.py", 59, "def replay"),
     # Stage 3b：`complete()` 摘掉 result 参数，整体下移到 203。

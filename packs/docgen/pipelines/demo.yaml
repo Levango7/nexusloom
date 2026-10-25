@@ -1,0 +1,116 @@
+# demo —— 60 秒离线体验流水线（设计复核 2026-10-20 §3.1 A4）。
+#
+# 与 docgen 系不同：没有检索、没有抓取、没有 LLM 写作。transform 用模板
+# 渲染正文，质量尾（quality_gate → checker → layout → safe_writer）原样复用
+# docgen pack 的实现，交付物经 renderer 出 html / docx。整条链全离线、无 Key。
+#
+# `loom demo` 在沙盒目录里跑它（LOOM_STATE_DIR 指进沙盒，交付物落在沙盒
+# deliverables/），所以它不依赖仓库布局、也不写真实状态目录。
+_name: demo
+_version: "1.0"
+description: 离线体验流水线（模板成稿 → 质量门 → 核查 → 排版 → 落盘 → 多格式渲染）
+
+defaults:
+  parallelism:
+    mode: single
+    max_workers: 1
+
+# ── Agent 定义 ──────────────────────────────
+agents:
+  - name: transform
+    version: "1.0"
+    timeout: 60
+    dependencies: []
+    config:
+      items: ""
+      template: |
+        # Loom 60 秒离线体验：一次完整的交付演示
+
+        ## 概览
+
+        这份报告由 `loom demo` 生成——一次真实的、离线的、不需要 LLM Key 的运行。
+        它演示的是引擎的完整交付链：模板成稿、质量门评分、成品核查、排版落盘、
+        多格式渲染。你看到的这份文件本身就是交付物，不是演示脚本的输出。
+        整个演示不超过一分钟：安装、一条命令、一次运行、一次可验收的交付。
+
+        ## 工作方式
+
+        Loom 的工作流是声明式 YAML：每个节点声明依赖、超时与产物契约，引擎负责
+        调度、重试、熔断、检查点与验收。质量门按维度给分并有硬底线——空章节、
+        素材直粘、降级声明会被拦下，未交付不算完成。本次运行的质量分来自真实
+        的评分过程，不是占位符。
+
+        ## 可复现性
+
+        流水线的拓扑与配置指纹记在锁文件里，配置漂移即拒绝执行。每一次运行
+        都落在交付账本中，可按运行 ID 回查交付物与质量分——这在审计场景里
+        就是"交付了什么、能不能追溯"的全部答案。交付物本身的质量底线由
+        引擎在运行时把关，而不是靠事后人工抽检。
+
+        ## 参考资料
+
+        - [产品规格](https://github.com/Levango7/nexusloom/blob/main/docs/product-spec.md)
+        - [架构说明](https://github.com/Levango7/nexusloom/blob/main/docs/architecture.md)
+        - [快速开始](https://github.com/Levango7/nexusloom#readme)
+
+  - name: quality_gate
+    version: "2.0"
+    timeout: 300
+    dependencies: [transform]
+    config:
+      quality_profile: technical-doc
+      threshold: 70
+      max_regenerations: 3
+
+  - name: checker
+    version: "1.1"
+    timeout: 300
+    dependencies: [quality_gate]
+    config:
+      fail_fast: false
+
+  - name: layout
+    version: "2.0"
+    timeout: 300
+    dependencies: [checker]
+    config:
+      style: markdown
+
+  - name: safe_writer
+    version: "2.0"
+    timeout: 300
+    dependencies: [layout]
+    config:
+      backup_dir: backups
+      atomic: true
+
+  - name: renderer
+    version: "1.0"
+    timeout: 120
+    dependencies: [safe_writer]
+    config:
+      formats: ["html", "docx"]
+      output_dir: deliverables
+      title: Loom 60 秒体验报告
+
+# ── DAG 拓扑 ──────────────────────────────
+topology:
+  type: dag
+  levels:
+    - [transform]
+    - [quality_gate]
+    - [checker]
+    - [layout]
+    - [safe_writer]
+    - [renderer]
+
+  edges:
+    - [transform, quality_gate]
+    - [quality_gate, checker]
+    - [checker, layout]
+    - [layout, safe_writer]
+    - [safe_writer, renderer]
+
+pipeline:
+  timeout: 300
+  fail_fast: false

@@ -227,6 +227,13 @@ class _Conn:
     def execute(self, sql: str, *args: Any) -> Any:
         return self._raw.execute(translate(self._pool, sql), *args)
 
+    def executemany(self, sql: str, seq_of_parameters: Any) -> Any:
+        """批量执行也过方言翻译（否则 PG 上占位符原样送达 psycopg 会挂）。
+
+        参数与 SQL 文本分离（参数化），不拼接。"""
+        return self._raw.executemany(translate(self._pool, sql),
+                                     seq_of_parameters)
+
     def __enter__(self) -> _Conn:
         # sqlite3/psycopg 的 __enter__ 都返回连接自身；这里返回包装体，
         # 让 `with conn:` 之后仍走翻译层

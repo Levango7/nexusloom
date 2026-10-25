@@ -137,6 +137,22 @@ def _task_paths() -> dict:
                 },
             },
         },
+        "/api/workflows/" + "{workflow_name}" + "/runs": {
+            "post": {
+                "summary": "类型化输入提交运行（A3）",
+                "parameters": [{"name": "workflow_name", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WorkflowRunSubmit"}}},
+                },
+                "responses": {
+                    "200": {"description": "运行已提交"},
+                    "400": {"description": "输入不满足流水线 inputs schema（fields 给出字段路径）", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                    "404": {"description": "流水线不存在", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                    "409": {"description": "流水线锁漂移", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                },
+            },
+        },
         "/tasks/{task_id}/cancel": {
             "post": {
                 "summary": "取消任务",
