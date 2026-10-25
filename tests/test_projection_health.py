@@ -150,6 +150,7 @@ class TestIncompleteMarker:
         assert task.status.value in ("done", "failed", "cancelled"), task.status.value
 
         row = _wait_projection(orch, "ph_legacy", "legacy")
+        assert row["status"] in ("done", "failed", "cancelled"), row
         health = orch.run_store_health()
         assert health["incomplete_runs"] == 0, health
         assert health["legacy_runs"] == 1, health
