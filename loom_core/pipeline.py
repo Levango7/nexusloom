@@ -510,26 +510,35 @@ class PipelineOrchestrator:
         emit_event(name, payload)
 
     def _record_plan_terminal_state(self, task: PipelineTask, plan: ExecutionPlan) -> None:
-        """声明式路径收尾里"运行事实"的两笔写入：队列终态 + 终态事件。
+        """声明式路径收尾里"运行事实"的两笔写入：队列终态 + 终态事件 + 投影盖章。
 
         同步与异步两条收尾共用这一个口——这两笔正是历史上异步版整段缺掉的部分
         （SSE 发起的运行因此在持久队列里查不到、事件面一条不发）。
+
+        投影写失败时的口径（2026-10-24 拍板：标 incomplete 后继续）：队列终态照写、
+        worker 继续跑，但这次运行在队列里留下 `projection='incomplete'`。顺序是
+        **先悲观后升格**——先按 incomplete 写队列行，投影确认落地才升成 ok；反过来
+        会留一个"队列说一切正常、投影里查无此运行"的窗口，而那正是静默丢运行的形状。
         """
+        status = task.status.value if hasattr(task.status, "value") else str(task.status)
         # 用 finish 而不是 update_status：终态只应写一次。worker 化之后，API 取消
         # （行已 cancelled）与流水线收尾会并发，无条件覆写会把取消洗成 done。
         try:
-            self.task_queue.finish(
-                task.id,
-                task.status.value if hasattr(task.status, "value") else str(task.status),
-                result=dict(task.result) if task.result else None,
-                error=task.error,
-            )
+            self.task_queue.finish(task.id, status, error=task.error,
+                                   projection="incomplete")
         except Exception as e:
             self._logger.log("warning", "task_queue.finish 失败",
                              task_id=task.id, error=str(e))
 
         self._emit_plan_terminal(task, plan)
-        self._runstore_close(task, plan)
+        if self._runstore_close(task, plan):
+            try:
+                self.task_queue.set_projection(task.id, "ok")
+            except Exception as e:  # noqa: BLE001
+                # 升格失败 ⇒ 这行停在 incomplete，而投影其实是好的：偏保守，
+                # 宁可让人多看一条"待补账"，也不要反过来把缺投影的运行报成正常。
+                self._logger.log("warning", "投影健康位升格失败",
+                                 task_id=task.id, error=str(e))
 
     def _emit_plan_terminal(self, task: PipelineTask, plan: ExecutionPlan) -> None:
         """声明式路径的终态事件——同步与异步收尾调同一个口，载荷逐字段一致。
@@ -581,14 +590,25 @@ class PipelineOrchestrator:
 
         `status=degraded` 不是"功能关闭"，而是"这次进程写不出投影"——
         读侧仍会按数据边界回落到队列/账本，但新运行在投影里会缺席。
+
+        两个计数来自队列（投影写不进去时唯一还活着的那一行），回答的是同一个问题的
+        两面：`incomplete_runs` = 想写投影但没写成（要补账，是故障）；
+        `legacy_runs` = 走的是从不写投影的 legacy 路径（按设计缺，不是故障）。
+        读的人把它们混成一个数，就会把 deprecated 兜底路径报成数据丢失。
         """
+        counts = {"incomplete_runs": None, "legacy_runs": None}
+        try:
+            counts["incomplete_runs"] = self.task_queue.count_projection("incomplete")
+            counts["legacy_runs"] = self.task_queue.count_projection("legacy")
+        except Exception as e:  # noqa: BLE001  健康检查不许因为队列读不动就整体 500
+            self._logger.log("warning", "投影健康位计数失败", error=str(e))
         store = self._runstore()
         if store is None:
             return {"status": "degraded", "available": False,
-                    "error": self._run_store_error}
+                    "error": self._run_store_error, **counts}
         return {"status": "healthy", "available": True,
                 "dialect": store.dialect,
-                "schema_version": store.schema_version()}
+                "schema_version": store.schema_version(), **counts}
 
     def _runstore_open(self, task: PipelineTask, plan: ExecutionPlan,
                        input_file: str, trigger: str) -> None:
@@ -638,10 +658,16 @@ class PipelineOrchestrator:
             self._log("warning", "RunStore 节点投影失败",
                       task_id=task.id, nodes=[r["node"] for r in rows], error=str(e))
 
-    def _runstore_close(self, task: PipelineTask, plan: ExecutionPlan) -> None:
+    def _runstore_close(self, task: PipelineTask, plan: ExecutionPlan) -> bool:
+        """给投影盖章，返回**这次盖章是否真的落了**。
+
+        调用方拿这个布尔决定队列行的 `projection` 标记升不升成 ok。False 有两种：
+        写口整个建不起来（`runs.db` 打不开），或 `close_run` 抛了。两种都意味着
+        "这次运行在投影里查不到或停在 running"——必须能被发现，而不是只进日志。
+        """
         store = self._runstore()
         if store is None:
-            return
+            return False
         status = task.status.value if hasattr(task.status, "value") else str(task.status)
         keys: set[str] = set()
         for dag in task.dag_nodes.values():
@@ -652,15 +678,23 @@ class PipelineOrchestrator:
                             error=task.error or "", artifacts=sorted(keys))
         except Exception as e:  # noqa: BLE001
             self._log("warning", "RunStore 终态投影失败", task_id=task.id, error=str(e))
+            return False
+        return True
 
     def _finalize_task_queue(self, task: PipelineTask, config: dict) -> None:
-        """任务终态同步任务队列 + 清理临时文件 + 断点保留/删除。"""
+        """任务终态同步任务队列 + 清理临时文件 + 断点保留/删除。
+
+        legacy 路径**从不写投影**（`_runstore_open`/`_runstore_nodes` 只在
+        `run_plan` / `run_plan_async` 里调用），所以这里的行标 `legacy` 而不是
+        `incomplete`：那条是"按设计没有投影"，后者是"想写没写成、要补账"，
+        混成一个值就会让健康检查把 deprecated 路径报成数据丢失。
+        """
         try:
             self.task_queue.finish(
                 task.id,
                 task.status.value if hasattr(task.status, "value") else str(task.status),
-                result=dict(task.result) if task.result else None,
                 error=task.error,
+                projection="legacy",
             )
         except Exception as e:
             self._logger.log("warning", "task_queue.finish 失败",
