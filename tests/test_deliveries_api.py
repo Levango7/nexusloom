@@ -411,6 +411,11 @@ class TestLocksHTTP:
         d, name = self._tmp_pipeline_dir(tmp_path, monkeypatch, "singlecheck")
         _code, primed = self._locks(base)          # 先灌满缓存（此刻还没有锁）
         assert primed["cached"] == 0 and primed["pipelines"][0]["lock_present"] is False
+        # 文件没动就直接问那一条：显式单条**不读缓存**，所以 `cached` 必须是 0。
+        # 上一轮 A10（把这条守卫改成恒读）红 0 条，就是因为判据先改了文件——
+        # 时间戳一变，读不读缓存都是同一答案，那条判据对"读缓存"没有射程。
+        _code, untouched = self._locks(base, f"?pipeline={name}")
+        assert untouched["count"] == 1 and untouched["cached"] == 0, untouched
         (d / f"{name}.lock").write_text(json.dumps({"pipeline": name,
                                                    "topology_hash": "a" * 12,
                                                    "agents": {}}), encoding="utf-8")
@@ -472,9 +477,13 @@ class TestSpecParity:
     """`test_doc_consistency` 只查"文档里的路径在 openapi 规范里"，规范和 handler
     之间没人守——本仓栽过一次的形状（规范写了、路由没接，读的人以为有口）。"""
 
-    ROUTES = {"/api/deliveries": "_handle_deliveries",
-              "/api/deliveries/{run_id}": "/api/deliveries/",
-              "/api/locks": "_handle_locks"}
+    #: needle 是**分发表达式**而不是 handler 名——上一轮 W1（把路由摘成
+    #: `/api/deliveries_disabled`）时 handler 名和 `"/api/deliveries/"` 子串都还在，
+    #: 这条判据没红，等于它对"路由被摘"零射程。规范里写了、路由不接，正是本仓
+    #: 栽过的那个形状。
+    ROUTES = {"/api/deliveries": '== "/api/deliveries"',
+              "/api/deliveries/{run_id}": 'startswith("/api/deliveries/")',
+              "/api/locks": '== "/api/locks"'}
 
     def test_each_spec_path_is_both_routed_and_documented(self):
         from loom_core.openapi_spec import generate_spec
