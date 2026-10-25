@@ -1,0 +1,41 @@
+agents:
+  checker:
+    config_hash: 4cca84a3c824
+    dependencies:
+    - quality_gate
+    pool_size: 1
+    version: '1.1'
+  layout:
+    config_hash: fd4abfa751e5
+    dependencies:
+    - checker
+    pool_size: 1
+    version: '2.0'
+  quality_gate:
+    config_hash: ceb0d41976b0
+    dependencies:
+    - transform
+    pool_size: 1
+    version: '2.0'
+  renderer:
+    config_hash: ada1f8022893
+    dependencies:
+    - safe_writer
+    pool_size: 1
+    version: '1.0'
+  safe_writer:
+    config_hash: a5047e77162a
+    dependencies:
+    - layout
+    pool_size: 1
+    version: '2.0'
+  transform:
+    config_hash: 1e36704349d9
+    dependencies: []
+    pool_size: 1
+    version: '1.0'
+created_at: '2026-10-26T00:27:15'
+node_count: 6
+pipeline: demo
+plan_id: ccc490a5
+topology_hash: 603d1b78ba15

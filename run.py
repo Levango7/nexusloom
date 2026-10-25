@@ -510,8 +510,8 @@ def _run_daemon(orch: PipelineOrchestrator) -> None:
 
 
 # ─── CLI 动词收敛（spec §7.3 第 7 步 / §5.3 CLI 行）─────────────
-#: 五个动词：run / plan / lock / pack / plugin
-VERBS = ("run", "plan", "lock", "pack", "plugin")
+#: 六个动词：run / plan / lock / pack / plugin / demo（demo = A4 离线体验）
+VERBS = ("run", "plan", "lock", "pack", "plugin", "demo")
 
 _PACK_ACTIONS = {"list": "pack_list", "check": "pack_check"}
 
@@ -519,9 +519,9 @@ _PACK_ACTIONS = {"list": "pack_list", "check": "pack_check"}
 def _split_verb(argv: list[str]) -> tuple[str | None, str | None, list[str]]:
     """拆分动词前缀，返回 (verb, action, rest)。
 
-    action ∈ {None, "plan", "lock", "pack_list", "pack_check", "plugin_list"}。
-    首个 token 不在动词表里 → (None, None, argv)：**裸输入 = 隐式 run**，
-    既有 `python run.py input.md …` 的调用形态全部照旧。
+    action ∈ {None, "plan", "lock", "pack_list", "pack_check", "plugin_list",
+    "demo"}。首个 token 不在动词表里 → (None, None, argv)：**裸输入 = 隐式
+    run**，既有 `python run.py input.md …` 的调用形态全部照旧。
 
     `loom plan docgen` / `loom lock docgen` 里紧随动词的裸词 = 流水线名，
     翻译为 `--pipeline <name>`（与 flag 形态等价）。
@@ -542,6 +542,12 @@ def _split_verb(argv: list[str]) -> tuple[str | None, str | None, list[str]]:
             print("用法: loom plugin list", file=sys.stderr)
             raise SystemExit(2)
         return verb, "plugin_list", rest[1:]
+    if verb == "demo":
+        if rest:
+            print("用法: loom demo（demo 不接受参数；沙盒建在 cwd 下）",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        return verb, "demo", []
     if verb in ("plan", "lock"):
         if rest and not rest[0].startswith("-"):
             return verb, verb, ["--pipeline", rest[0], *rest[1:]]
@@ -562,6 +568,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
   loom pack list        列出 pack 清册（物理 pack + 散装流水线）
   loom pack check       运行启动自检（等价 --check）
   loom plugin list      列出全部 Agent / 插件（含来源标记）
+  loom demo             离线体验：沙盒里跑一次完整交付（无网络无 Key）
 
 示例:
   # 运行完整流水线 (自动发现 pipeline YAML；动词可省)
@@ -675,15 +682,28 @@ def main():
         ]))
 
     # 无输入文件时：仅 --check/--mcp/--recover/--replay-*/--triggers*、服务模式与
-    # plan/lock/pack/plugin 动词可用
+    # plan/lock/pack/plugin/demo 动词可用
     if args.input is None and not args.check and not args.mcp and not args.recover \
             and not args.replay_run and not args.replay_incomplete \
             and not args.triggers and not args.triggers_dry_run \
             and not args.admin and not args.dashboard and not args.daemon \
-            and verb_action not in ("plan", "lock", "pack_list", "plugin_list"):
-        parser.error('input required (or use verbs loom plan/lock/pack/plugin, or flags like --check)')
+            and verb_action not in ("plan", "lock", "pack_list", "plugin_list",
+                                    "demo"):
+        parser.error('input required (or use verbs loom plan/lock/pack/plugin/demo, or flags like --check)')
 
     print_banner()
+
+    # ─── 离线体验：loom demo ────────────────
+    # 入口即验收线：干净环境里一条命令看到一次完整交付（沙盒隔离、无网络
+    # 无 Key）。失败不粉饰——状态非 done 退出码非 0。
+    if verb_action == "demo":
+        from loom_core.demo import run_demo
+        try:
+            result = run_demo()
+        except Exception as e:
+            print(f"[demo] ✗ demo 运行失败: {e}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0 if result.status == "done" else 1)
 
     # ─── 启动自检 ──────────────────────────────
     if args.check:
