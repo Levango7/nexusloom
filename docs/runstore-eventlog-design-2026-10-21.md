@@ -2,7 +2,7 @@
 
 > 承接 `docs/product-design-review-2026-10-20.md` §5。本文只解决一件事：**把"一次运行的事实"从 5 套写入 + 20 处直读，收敛成一个写入口、一个读接口。**
 > 行号基线：main @ `0f6090f`（PR #50 合并后），本仓 `fix/console-runtime-validation` 分支上取证的落点已逐条复核。**本文所有 `file:line` 是"当时那一行的原状"**，Stage 每落地一批就会让一批引用失效——`scripts/check_design_anchors.py` 按 `(文件, 行号, 锚文本)` 逐条核对，改了代码就要按新现实更新或退役对应条目。
-> 落地进度：§6 三件事已拍板；**Stage 0 / Stage 1 已合并**（PR #54 / #55），**Stage 2 读侧已交付**（PR #57），SSE 重放拆到 Stage 2b（PR #58，见 §4 末），**Stage 3a 审批摘写已交付**（PR：本批，见 §4 末）。Stage 3b（队列收窄）未开始，前置条件写在 §4 末。
+> 落地进度：§6 三件事已拍板；**Stage 0 / Stage 1 已合并**（PR #54 / #55），**Stage 2 读侧已交付**（PR #57），SSE 重放拆到 Stage 2b（PR #58，见 §4 末），**Stage 3a 审批摘写已交付**（PR #60，见 §4 末），**Stage 3b 队列收口已交付**（PR：本批，见 §4 末）。Stage 3 的两条退出判据里，"每个源有且只有一个写入者"达成；"RunHandle 五原语全部只读 RunStore"**只在观测面达成**——`cancel/resume` 仍是内存动作（Stage 2 就写了这条边界：动作只在内存态有意义），不把它算成已闭环。
 
 ---
 
@@ -70,7 +70,7 @@
 
 | 表 | 列 | 说明 |
 |---|---|---|
-| `schema_version` | version INTEGER PK, applied_at REAL | 取代 `add_column_if_missing` 的临时迁移（现仅 3 处生产调用，全在 `task_queue.py:110/113/117`） |
+| `schema_version` | version INTEGER PK, applied_at REAL | 取代 `add_column_if_missing` 的临时迁移——**范围只到 `runs.db`**：`task_queue` 所在的 `tasks.db` 仍走加列（Stage 3b 给它加了第 4 列 `projection`，调用点在 `task_queue._init_db`，baseline 时是 3 处）。所以"现仅 3 处生产调用"这句按符号核对即可，别把行号当契约 |
 | `events` | run_id TEXT, seq INTEGER, type TEXT, payload_json TEXT, ts REAL；PK(run_id, seq) | seq 由 recorder 在事务内取 `MAX(seq)+1`，**不用自增 id**（跨进程共享库时 per-run 单调才可用） |
 | `runs` | run_id PK, workflow, principal, status, trigger, inputs_json, started_at, finished_at, error, cost_usd, quality_score, last_seq, artifacts_json | 列表页与作用域判定的唯一来源；`last_seq` 让 SSE 游标能跨进程续传 |
 | `run_nodes` | run_id, node, status, attempts, started_at, finished_at, error, result_json, artifact_keys_json；PK(run_id, node) | S2/S3 直读；把现在藏在 `deliveries.payload_json` 里的逐节点事实升到一等行 |
@@ -85,7 +85,7 @@
 | 0 | 两条引擎并轨（§2）**已交付** | 终态事件去重 | 同/异步 parity 断言逐字段相等（**实交付=事件序列+队列行+检查点形状；账本行比对挪 Stage 1**，见 §2 末）；parity 变异可红（最终头实测：还原 `pipeline.py` ⇒ 4 条全红，只摘"已发过"闸门 ⇒ 恰好 2 红 2 绿，红的是两条取消判据） |
 | 1 | `RunStore`（落地时的类名，本文原写作 `RunRecorder`）+ 4 表 + **双写** 已交付 | 不删任何旧写；写口全部 fail-soft | 三方对账：`runs`/`run_nodes` vs `task_queue`/`deliveries`/内存，不一致当场红（`tests/test_runstore_parity.py` 8 条，随 CI 全量跑）。**两处与本文原设想不同，照实记**：① 门禁是**显式用例**覆盖两引擎 × done/cancelled，不是"每条用例跑完自动后置检查"——后者现在挂上去只会把每个既有用例都拖一遍库盘，等 Stage 2 读侧切完再谈；② `runs.cost_usd`/`quality_score` **本批不填**（来源未定，不拿猜测当事实），`principal` 沿用调用方归属（今天 SSE/直跑都传不出 owner ⇒ 列有、值多空串，见 §2 末） |
 | 2 | 读侧切换：`/tasks`、`/tasks/<id>`、`/api/dashboard`、`/api/cost` 作用域、MCP `list_tasks`/`get_task`、`_scoped_task` 存在性 **已交付**（PR #57）；SSE 重放改读 `events` **已交付（Stage 2b，独立 PR）** | 内存退化为缓存（仅加速，不再作为存在性判据）**已交付**：`RunHandle` 与 `list_runs` 依次回落到投影 | 双 token 真 HTTP：淘汰 100 条后仍查得到、越权仍 404 不泄露存在性（`tests/test_runstore_readside.py` 18 条，五组窄变异各只红预期用例）；`/stream` 断线重连跨进程可重放（`tests/test_sse_replay.py` 11 条，三组窄变异；重放游标 `r<seq>`、重连不再起第二条流水线） |
-| 3 | 摘写：**3a `approvals` 已改为 `runs.db` 的投影 + `approval.*` 事件（2026-10-23 交付）**；3b `task_queue` 只保留"租约/抢占"职责（未开始，见下"Stage 3 的前置") | 老台账 `approvals.db` 停止新增行，只保留对既有行的就地决策/消费 | 每个源有且只有一个写入者；`RunHandle` 五原语全部只读 RunStore（3a 后审批这一源已达标） |
+| 3 | 摘写：**3a `approvals` 已改为 `runs.db` 的投影 + `approval.*` 事件（PR #60）**；**3b 队列已收口（本批）**——停写 `result_json`（实测无读者的第三份拷贝），保留 `status/started_at/owner_pid` 这些**租约**列，并新增 `projection` 健康位 | 老台账 `approvals.db` 停止新增行，只保留对既有行的就地决策/消费；`queue.finish` **不删**（它是 `recover()` 的判据，不是投影的镜像） | 每个源有且只有一个写入者（**观测面达成**：内存=缓存、审批=store、结果正文=投影/账本、队列=租约）；`RunHandle` 五原语只读 RunStore（`status/artifacts` 达成，`cancel/resume` 仍按 Stage 2 的边界只认内存） |
 
 双写窗口的长度用门禁约束：Stage 1 起，"两套口径漂移"不是靠人盯，而是被 parity 断言钉在 CI 里；Stage 3 才允许删写。
 
@@ -119,11 +119,29 @@
   四方同值（`tests/test_runstore_approvals.py::TestLedgerIsAuthoritative`）。此前调用方与
   台账各取一次 `time.time()`，同一个决定有两个时刻。
 
-**Stage 3b（`task_queue` 收窄为"租约/抢占"）的两个前置**，缺一个都不该动：
-① `recover()` 改读投影（现在它只看 `status='running'` 的队列行，`queue.finish` 是
-恢复路径的判据，不是投影的镜像——删了它，跑完的运行会在下次 worker 启动时整批重跑）；
-② 重复执行闸门与"投影写失败时队列怎么办"的策略先定（fail-closed 会卡住 worker，
-fail-open 会重跑——这条得产品拍板，不能由存储层默认）。
+**Stage 3b 交付时的两条更正（照实记，2026-10-24）**：
+
+- ~~前置①"`recover()` 改读投影"~~ —— **这条前提是错的**，本批按实测改掉。`recover()`
+  读 `status='running'` + `owner_pid` 存活 + 新鲜度阈值，这套判据本身就是**租约**，
+  不是"运行事实的第二份拷贝"：投影里没有 lease 概念，改读投影等于把抢占语义搬进
+  观测面。所以 `queue.finish` 保留——它是恢复路径的判据，删了会让跑完的运行在
+  下次 worker 启动时被整批重跑。真正重复的是 `result_json` 那一列，摘的是它。
+- 前置②"投影写失败时队列怎么办"是**产品口径**，已由用户 2026-10-24 拍板：
+  **标 incomplete 后继续**（观测面故障不放大成可用性故障，但缺口必须可发现）。
+  落成的形状：终态写入**先悲观后升格**（先按 `projection='incomplete'` 写队列行，
+  投影确认盖章才升 `ok`）；`run_store_health()` 报 `incomplete_runs`（待补账）与
+  `legacy_runs`（按设计没有投影）；`RunHandle.projection()` 把标记排在"投影里查得到行"
+  **之前**——盖章失败时 `runs` 那行会永远停在 `running`，只看有无行会把它读成 complete
+  （这条顺序是第一轮实测撞出来的，也留了变异 M5 钉住）。
+
+**为什么 `legacy` 与 `incomplete` 必须是两个值**：`_runstore_open` 只在 `run_plan` /
+`run_plan_async` 里调用（实测），legacy 路径 `run()` 连一行投影都不写——那是
+"deprecated 兜底，按设计缺观测面"。混成一个数，健康检查就把兜底路径报成数据丢失，
+而**误报的运维代价高于不报**（人会开始忽略这个指标）。
+
+**这批没做的**：补账工具（把一个 `incomplete` 运行重新投影进 `runs` 表需要一个幂等的
+终态重放入口）。目前只做到"可见 + 可计数 + 可按 id 查"。`deliveries.db` 与 checkpoint
+按 §3 的边界原样保留（一个仍是交付账本，一个仍是恢复快照）。
 
 ## 5. 风险清单（动共享状态前）
 

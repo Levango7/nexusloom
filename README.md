@@ -735,6 +735,22 @@ handle.cancel(); handle.resume()      # 引擎拒绝（已完成 / 停在审批�
 artifact_keys），但**不给 `result` 正文本**——它从不落盘（投影只存摘要），不编空值冒充；
 ④`cancel` / `resume` / 审批仍只读内存：**动作**只有内存态才有意义，淘汰后照旧 404。
 
+**回落会掩盖缺失，所以补了一个健康位**（2026-10-24 Stage 3b）：队列行带 `projection`
+列，`ok` = 投影盖章落了，`incomplete` = 想写没写成（待补账），`legacy` = 走的是从不写
+投影的 legacy 兜底路径（按设计缺，不是故障）。顺序是**先悲观后升格**——终态先按
+`incomplete` 写队列行，投影确认落地才升 `ok`；反过来会开一个"队列说一切正常、投影里
+查无此运行"的窗口。口径是"标 incomplete 后继续"：观测面故障不放大成可用性故障，但缺口
+必须可发现。`RunHandle.projection()`（`complete` / `incomplete` / `legacy` / `unknown`）
+与 `run_store_health()` 的 `incomplete_runs` / `legacy_runs` 把它报出来，`to_dict()` 里
+也有 `projection` 键。**标记优先于"投影里查得到行"**：终态盖章失败时 `runs` 那一行会
+永远停在 `running`，只看有无行会把它读成正常完成。补账工具（重放终态）本批未做。
+
+同批摘掉的一处写面：**队列不再承载结果正文**（`result_json` 列停写、也不再 SELECT）。
+实测全仓没有读者——`RunHandle` 与 `_queue_row` 只用 `status`；结果正文的事实源是
+`run_nodes.result_json`（以及本批之前落账的 `deliveries.payload_json`）。老库里的列与
+行留在原处（不回填、不 DROP）。`recover()` 读的 `status='running'` + `owner_pid` 存活
+**保留**：那是租约判据，不是运行事实的第二份拷贝。
+
 `/stream` 的重连也走同一份投影（2026-10-21 Stage 2b）：没有进程内回调时按 `events`
 重放运行级事实，帧 id 是运行级游标 `r<seq>`（`Last-Event-ID: r<seq>` 可续传），
 运行没结束就尾随到终态；**重连不会重新起一条流水线**。逐 chunk 的正文流从不落盘，
@@ -965,14 +981,18 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**2905 个测试本机全绿**（`2905 passed, 7 skipped, 6 deselected`，2026-10-24 本机全量实测；
-收集 2912，护栏按 `collected − declared ≤ 10` 判；本轮口径：`Python 3.14.3`、
-**同机有并行会话的负载轮**，全量 **2394.77s ≈ 39.9 分钟**（上一批同机 1226.74s，静默基线
-753.83s——读这三个数请带各自的负载条件，别互相换算）；上一行写的 2889 是"移除 RunStore
-退路"那批 +3 条判据（降级注入 / 健康位 / cost 自愈）后的数，本批 Stage 3a 审批摘写 **+16 条**
-（`tests/test_runstore_approvals.py`：投影与事件同事务、台账是决定形状的唯一来源、
-老台账的四条数据边界、写侧不可用时 fail-closed；另有 8 条窄变异逐条红在预期用例上，见
-CHANGELOG 续61）；
+**2911 个测试本机全绿**（`2911 passed, 7 skipped, 6 deselected`，2026-10-25 本机全量实测；
+现场读到的数是 `2910 passed, 1 failed`——那唯一一条红就是这条计数护栏自身，把本行换成
+本批实测数之后它才转绿，选中 2918 条不变，护栏按 `collected − declared ≤ 10` 判；
+本轮口径：`Python 3.14.3`、`LOOM_TEST_PG_URL` 未设置、我这侧同机没有其他 pytest 在跑，
+全量 **1178.48s ≈ 19.6 分钟**（上一批同机负载轮 2394.77s、再上一批 1226.74s、静默基线
+753.83s——读这几个数请带各自的负载条件，别互相换算）；上一行写的 2905 是 Stage 3a 审批摘写
+**+16 条**（`tests/test_runstore_approvals.py`：投影与事件同事务、台账是决定形状的唯一来源、
+老台账的四条数据边界、写侧不可用时 fail-closed；8 条窄变异逐条红在预期用例上，见
+CHANGELOG 续61）后的数，本批 Stage 3b 队列收口 **+6 条**（`tests/test_projection_health.py`：
+盖章炸掉 / 写口建不起来 / 正常升格 / legacy 不算故障 / 只有账本的老运行报 unknown /
+幽灵 id 报 unknown；7 条窄变异各自只红在射程内，含首轮漏跑、补跑才拿到数字的 M6，见
+CHANGELOG 续62；另有 3 条旧断言换成钉新契约而不是删）；
 更早一批（Stage 2）里全量曾抓到一条真回归——`RunHandle.exists()` 把替身自动生成的
 `task_queue.get()` 当成"队列里有这行"，一个不存在的 id 会一路走到拼载荷、序列化时炸成
 JSON-RPC internal error，已收紧成 `isinstance(row, dict)`；
