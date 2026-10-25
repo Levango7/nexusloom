@@ -802,6 +802,52 @@ python run.py --replay-run <run_id>                  # 按 id 补一条
 看到 `projection: "incomplete"` 就走到上面那条 `python run.py --replay-run <run_id>`——
 **能不能补由补账工具判**（它拒绝时会说清是运行中、三方冲突还是已升格），这里不复制那条规则。
 
+### 类型化运行输入（2026-10-26，#7）
+
+流水线可以在 YAML 里声明运行输入的**结构与约束**，四个调用面（CLI / HTTP / MCP / webhook）
+在提交那一刻按同一份声明校验，非法载荷被拒且错误**定位到字段**：
+
+```yaml
+pipeline:
+  inputs:
+    type: object
+    required: [topic]
+    additionalProperties: false      # 本实现只支持 true/false
+    properties:
+      topic: {type: str, minLength: 2, maxLength: 40}
+      depth: {type: int, minimum: 1, maximum: 5, default: 3}
+      tags:  {type: list, items: {type: str}}
+      mode:  {enum: [fast, full]}
+```
+
+```bash
+python run.py -p mypipe --set-input topic=云成本 --set-input depth=3
+python run.py -p mypipe --inputs-json '{"topic": "云成本", "tags": ["a", "b"]}'
+curl -X POST localhost:8080/api/workflows/mypipe/runs \
+     -H "Authorization: Bearer $ADMIN_API_KEY" -d '{"inputs": {"topic": "云成本"}}'
+curl localhost:8080/api/workflows/mypipe/inputs     # 读回声明，客户端据此生成表单
+```
+
+支持的 keyword 是**声明式子集**（`type`/`required`/`enum`/`pattern`/`minimum`/`maximum`/
+`minLength`/`maxLength`/`default`/`items`/`properties`/`additionalProperties`），不是完整
+JSON Schema：本仓不为此新增第三方依赖，`type` 沿用引擎既有类型名（`str`/`int`/`float`/
+`bool`/`list`/`dict`），同一个值只有一种叫法。写在这套子集之外的 keyword（含拼错的
+`max_length`）在**解析流水线时**就报错——被静默忽略的约束等于那条约束从没存在过。
+
+三条边界要说在前面：
+
+- **声明不进锁指纹**（`config_hash` / `topology_hash` 都不含它）。代价照实说：改 schema
+  不会被锁拦下。收益是随包 20 条流水线不必因为加了这个字段而全部重锁。
+- **声明写错 = 解析期红**，不留到提交期：一条拼错名的流水线如果照常放行，它从来没有
+  过 schema，而没人会去查。
+- **自由文本入口在声明存在时被拒绝**。`POST /api/tasks` 的 `query`、MCP
+  `generate_document`、CLI 的位置参数 `input`、webhook 的非 JSON 文本载荷传的是整篇
+  文本，没有可校验的键→值结构；流水线一旦声明了 `inputs`，这些入口会明确拒并指出该用
+  哪个口。**没有声明的流水线一切照旧**（随包 20 条行为不变，含渲染出的文档逐字节相同）。
+
+恢复（`--recover`）与 worker 取的是**已渲染的输入文件**，不过这道门——它们重放的是
+当初已经通过校验的那份载荷，再校验一次只会因为 schema 演进把老任务卡死。
+
 ### 定时触发（Cron）
 
 按 `triggers.yaml` 的 cron 常驻调度（本地时间；**错过不补跑**，跳过窗口会打印出来）：

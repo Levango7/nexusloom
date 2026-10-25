@@ -66,27 +66,27 @@ ANCHORS = [
     ("loom_core/pipeline.py", 1824, "record"),               # _deliver 内 DeliveryLedger().record
     ("loom_core/pipeline.py", 1922, "pipeline.audit"),
     ("loom_core/pipeline.py", 2089, ".done"),
-    ("loom_core/admin_api.py", 654, "get_task"),
-    ("loom_core/admin_api.py", 1047, "list_tasks"),
+    ("loom_core/admin_api.py", 671, "get_task"),
+    ("loom_core/admin_api.py", 1072, "list_tasks"),
     # Stage 2：/tasks、dashboard、cost 三处读口从 `list_tasks`（内存）换成
     # `list_runs`（内存缓存 ∪ 投影）——锚点跟着换而不是删，否则"读侧已并轨"
     # 这句话在表里就没有对应物了。
-    ("loom_core/admin_api.py", 1065, "list_runs"),
-    ("loom_core/admin_api.py", 1364, "def _task_checkpoint_view"),
-    ("loom_core/admin_api.py", 1669, "list_runs"),
-    ("loom_core/admin_api.py", 2156, "list_runs"),
-    ("loom_core/admin_api.py", 2520, "task = _aio.run(orch.run_plan_async("),
-    ("loom_core/admin_api.py", 2589, "existing_callback = get_callback(task_id)"),
+    ("loom_core/admin_api.py", 1090, "list_runs"),
+    ("loom_core/admin_api.py", 1389, "def _task_checkpoint_view"),
+    ("loom_core/admin_api.py", 1785, "list_runs"),
+    ("loom_core/admin_api.py", 2272, "list_runs"),
+    ("loom_core/admin_api.py", 2636, "task = _aio.run(orch.run_plan_async("),
+    ("loom_core/admin_api.py", 2705, "existing_callback = get_callback(task_id)"),
     # #8：账本与锁的只读 HTTP 面。三条 handler 进表，"文档教了这三个口"才在代码里
     # 有对应物（`test_doc_consistency` 只把文档对到 openapi 规范，规范和 handler
     # 之间没人守——这条就是补那段距离的）。
-    ("loom_core/admin_api.py", 1775, "def _handle_deliveries"),
-    ("loom_core/admin_api.py", 1793, "def _handle_delivery_detail"),
-    ("loom_core/admin_api.py", 1850, "def _handle_locks"),
+    ("loom_core/admin_api.py", 1891, "def _handle_deliveries"),
+    ("loom_core/admin_api.py", 1909, "def _handle_delivery_detail"),
+    ("loom_core/admin_api.py", 1966, "def _handle_locks"),
     # 锁路径解析只留一处：巡检口（`lock_drift`）与执行口（`_verify_lock_after_parse`）
     # 各自解析一次就会报出执行时根本不会发生的漂移。
-    ("loom_core/scheduler.py", 334, "def resolve_lock_path"),
-    ("loom_core/scheduler.py", 353, "def lock_drift"),
+    ("loom_core/scheduler.py", 338, "def resolve_lock_path"),
+    ("loom_core/scheduler.py", 357, "def lock_drift"),
     # 账本的读口：`list` 在本批之前**没有任何生产调用者**（只有测试读它）。
     ("loom_core/deliveries.py", 99, "def list(self, limit"),
 ]

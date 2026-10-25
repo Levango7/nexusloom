@@ -152,6 +152,35 @@ HTTP 侧不复制那条规则（两处判据一定会分叉）。
   404**（存在性本身就是信息）；账本读不动给 **503** `{"error": "deliveries unavailable"}`，
   不降级成 200 空列表——把"读不到"报成"没有交付"是最难被发现的那类假绿。
 
+### 类型化输入：提交与声明（2026-10-26，#7）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/workflows/{name}/runs` | 通用提交口：body `{"inputs": {...}, "wait": bool, "output": str}`，按该流水线 `pipeline.inputs` 声明校验后开一次运行 |
+| GET | `/api/workflows/{name}/inputs` | 读回声明（`{"pipeline", "declared", "inputs"}`），客户端据此生成表单；没声明时 `declared: false` 而不是报错 |
+| POST | `/api/tasks` | 除 `query` 外可选 `inputs`：给了 `inputs` 就走同一道闸门 |
+
+`{name}` 先过与 `task_id` 同一套字符白名单，再交给 `resolve_pipeline_name` 的已安装名单——
+白名单只有一处，URL 段拼不出目录遍历，也不会出现两份名单各漂各的。
+
+校验不通过时是 **400** + 一份可定位的错误表（与 MCP/webhook 同一形状）：
+
+```json
+{"error": "输入校验未通过（2 项）:", "code": "invalid_inputs",
+ "fields": [{"field": "topic", "reason": "缺少必填输入"},
+            {"field": "tags[1]", "reason": "期望 str，实际 int=7"}]}
+```
+
+`field` 用点号与下标路径定位（`spec.region`、`tags[1]`）；顶层为空串表示载荷整体不是对象。
+**四条口共用这一处实现**（`loom_core/input_schema.py`），所以"同一个载荷在 CLI 与 HTTP
+得到同一份输入文档"这条既有承诺在校验加入后仍然成立——它是被测试钉住的，不是约定。
+
+两条边界：
+
+- 自由文本入口（`/api/tasks` 的 `query`）在流水线**声明了** `inputs` 时返回同样的 400，
+  错误里指出该用哪个口；没声明时行为与文档形状一字未变。
+- `output` 字段沿用既有行为：**只做白名单校验，不参与落盘**（把它接成真写文件是另一件事）。
+
 ---
 
 实现位置：全部端点（含 `/api/*` 扩展）在 `loom_core/admin_api.py`（`AdminHandler` 路由分发）。
