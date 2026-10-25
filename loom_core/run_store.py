@@ -547,20 +547,17 @@ class RunStore:
             to_delete = sorted(set(to_delete))
             if not to_delete:
                 return {"runs": 0, "run_nodes": 0, "events": 0, "approvals": 0}
-            chunk = 500
-            n_nodes = n_events = n_approvals = n_runs = 0
-            for i in range(0, len(to_delete), chunk):
-                part = to_delete[i:i + chunk]
-                ph = ",".join("?" * len(part))
-                args = tuple(part)
-                n_nodes += conn.execute(
-                    f"DELETE FROM run_nodes WHERE run_id IN ({ph})", args).rowcount
-                n_events += conn.execute(
-                    f"DELETE FROM events WHERE run_id IN ({ph})", args).rowcount
-                n_approvals += conn.execute(
-                    f"DELETE FROM approvals WHERE run_id IN ({ph})", args).rowcount
-                n_runs += conn.execute(
-                    f"DELETE FROM runs WHERE run_id IN ({ph})", args).rowcount
+            # executemany 而不是拼 IN (…)：SQL 文本零插值（bandit B608 的
+            # 判定点就是 f-string 拼查询）；rowcount 是两表删除的总行数。
+            rows_args = [(rid,) for rid in to_delete]
+            n_nodes = conn.executemany(
+                "DELETE FROM run_nodes WHERE run_id = ?", rows_args).rowcount
+            n_events = conn.executemany(
+                "DELETE FROM events WHERE run_id = ?", rows_args).rowcount
+            n_approvals = conn.executemany(
+                "DELETE FROM approvals WHERE run_id = ?", rows_args).rowcount
+            n_runs = conn.executemany(
+                "DELETE FROM runs WHERE run_id = ?", rows_args).rowcount
         return {"runs": n_runs, "run_nodes": n_nodes, "events": n_events,
                 "approvals": n_approvals}
 
