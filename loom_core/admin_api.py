@@ -62,6 +62,7 @@ from artesian.fast_json import loads as _fast_loads
 from . import scheduler as _scheduler_mod
 from .artifacts import task_output
 from .ids import new_task_id
+from .input_schema import InputValidationError, gate_freeform, prepare_inputs
 from .scheduler import resolve_pipeline_name
 from .tokens import LOCAL_PRINCIPAL, Principal, TokenConfigError, TokenStore, parse_bearer, token_from_query
 
@@ -165,6 +166,22 @@ def _validate_task_id(task_id: str) -> bool:
     if not task_id or len(task_id) > 128:
         return False
     return bool(_TASK_ID_RE.match(task_id))
+
+
+def _workflow_route(path: str) -> tuple[str, str] | None:
+    """解析 `/api/workflows/{name}/{sub}` → `(name, sub)`，形状不对返回 None。
+
+    流水线名沿用 `task_id` 那套字符白名单（随包 20 条流水线名全在其中），目的是只拿
+    **一段**、不含分隔符/遍历的名字；真正的存在性判断仍交给 `resolve_pipeline_name`，
+    这里不做第二套名单，免得两处白名单各漂各的。
+    """
+    parts = path.split("?", 1)[0].strip("/").split("/")
+    if len(parts) != 4 or parts[0] != "api" or parts[1] != "workflows":
+        return None
+    name, sub = parts[2], parts[3]
+    if not _validate_task_id(name):
+        return None
+    return name, sub
 
 
 # ─── 流式指标聚合 ─────────────────────────────
@@ -779,6 +796,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._json({"error": "unauthorized"}, 401)
                 return
             self._sync_shared_config()
+            wf_route = _workflow_route(self.path)
             if self.path.startswith("/stream"):
                 self._handle_stream()
                 return
@@ -868,6 +886,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._handle_delivery_detail(run_id)
             elif self.path.split("?", 1)[0] == "/api/locks":
                 self._handle_locks()
+            elif wf_route and wf_route[1] == "inputs":
+                self._handle_workflow_inputs(wf_route[0])
             elif self.path == "/api/pipeline":
                 self._handle_pipeline()
             elif self.path == "/api/openapi.json":
@@ -927,6 +947,11 @@ class AdminHandler(BaseHTTPRequestHandler):
             # 处理 POST 专属路由
             if self.path == "/api/tasks":
                 self._handle_submit_task(body)
+                return
+            wf_route = _workflow_route(self.path)
+            if wf_route and wf_route[1] == "runs":
+                # POST /api/workflows/{name}/runs —— 类型化输入的通用提交口（P1 #7）
+                self._handle_create_run(wf_route[0], body)
                 return
             if self.path.startswith("/tasks/"):
                 task_id = self.path.split("/tasks/")[1].split("/")[0]
@@ -1473,7 +1498,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         """提交新文档生成任务
 
         body JSON:
-          query (str, 必填) — 文档主题/查询
+          query (str, 与 inputs 二选一) — 文档主题/查询（自由文本形）
+          inputs (obj, 与 query 二选一) — 类型化载荷，按流水线 `pipeline.inputs` 校验
           title (str, 可选) — 文档标题，默认同 query
           pipeline (str, 可选) — 流水线名，默认 docgen
           wait (bool, 可选) — 是否同步等待完成，默认 false
@@ -1486,9 +1512,10 @@ class AdminHandler(BaseHTTPRequestHandler):
         except Exception:
             return self._json({"error": "invalid JSON body"}, 400)
 
-        query = data.get("query", "").strip()
-        if not query:
-            return self._json({"error": "missing 'query' field"}, 400)
+        query = str(data.get("query", "") or "").strip()
+        typed_inputs = data.get("inputs")
+        if typed_inputs is None and not query:
+            return self._json({"error": "missing 'query' or 'inputs' field"}, 400)
 
         title = data.get("title", query)
         pipeline_name, pipeline_err = resolve_pipeline_name(
@@ -1504,18 +1531,108 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not ok:
                 return self._json({"error": f"output 路径校验失败: {reason}"}, 400)
 
-        import tempfile
-        task_id = new_task_id()
-
         try:
             from .scheduler import Scheduler
-            sched = Scheduler()
-            plan = sched.parse(pipeline_name)
+            plan = Scheduler().parse(pipeline_name)
         except Exception as e:
             return self._json({"error": f"failed to parse pipeline '{pipeline_name}': {e}"}, 400)
 
+        # 两条载荷形状过同一个闸门：typed 走逐字段校验，query 自由文本在流水线声明了
+        # inputs 时直接拒（否则声明就成了装饰）。
+        try:
+            if typed_inputs is not None:
+                input_text = prepare_inputs(plan, typed_inputs, title=pipeline_name)
+            else:
+                gate_freeform(plan, surface="POST /api/tasks")
+                input_text = f"# {title}\n\n## 查询\n\n{query}\n"
+        except InputValidationError as e:
+            return self._json(e.to_dict(), 400)
+
+        echo = {"query": query, "title": title} if typed_inputs is None \
+            else {"inputs": typed_inputs}
+        self._launch_from_doc(plan, input_text, wait=wait, echo=echo)
+
+    def _handle_create_run(self, pipeline_name: str, body: bytes):
+        """`POST /api/workflows/{name}/runs` —— 类型化输入的通用提交口（P1 #7）。
+
+        body JSON:
+          inputs (obj, 必填) — 按该流水线 `pipeline.inputs` 声明校验的载荷
+          wait (bool, 可选) — 同步等待完成，默认 false
+          output (str, 可选) — 输出文件路径（同 /api/tasks 的白名单校验）
+
+        与 `/api/tasks` 的差别只在载荷形状：这里没有 `query` 语义，任何声明了 inputs
+        的流水线都能用同一份契约提交；非法载荷 400 且错误带字段名（`fields`）。
+        鉴权、10MiB 体积上限与 owner 口径由 do_POST 的统一入口提供，不在这里另立。
+        """
+        if not self.orch:
+            return self._json({"error": "orchestrator not set"}, 500)
+        try:
+            data = _fast_loads(body) if body else {}
+        except Exception:
+            return self._json({"error": "invalid JSON body"}, 400)
+        if not isinstance(data, dict):
+            return self._json({"error": "body 必须是 JSON 对象"}, 400)
+
+        resolved, err = resolve_pipeline_name(
+            pipeline_name, _scheduler_mod.installed_pipelines())
+        if err:
+            return self._json({"error": err}, 400)
+        wait = bool(data.get("wait", False))
+        output_path = data.get("output", "")
+        if output_path:
+            ok, reason = _validate_output_path(output_path)
+            if not ok:
+                return self._json({"error": f"output 路径校验失败: {reason}"}, 400)
+
+        try:
+            from .scheduler import Scheduler
+            plan = Scheduler().parse(resolved)
+        except Exception as e:
+            return self._json({"error": f"failed to parse pipeline '{resolved}': {e}"}, 400)
+
+        try:
+            input_text = prepare_inputs(plan, data.get("inputs") or {},
+                                        title=resolved)
+        except InputValidationError as e:
+            return self._json(e.to_dict(), 400)
+
+        self._launch_from_doc(plan, input_text, wait=wait,
+                              echo={"inputs": data.get("inputs") or {}})
+
+    def _handle_workflow_inputs(self, pipeline_name: str):
+        """`GET /api/workflows/{name}/inputs` —— 读回类型化输入声明（表单/预估用）。
+
+        返回的是流水线里那份声明的**副本**，没声明时 `{"declared": false}`：客户端据此
+        决定生成表单还是退回自由文本，而不是靠猜键名。
+        """
+        resolved, err = resolve_pipeline_name(
+            pipeline_name, _scheduler_mod.installed_pipelines())
+        if err:
+            return self._json({"error": err}, 404)
+        try:
+            from .scheduler import Scheduler
+            plan = Scheduler().parse(resolved)
+        except Exception as e:
+            return self._json({"error": f"failed to parse pipeline '{resolved}': {e}"}, 500)
+        from .input_schema import declaration
+        schema = declaration(plan)
+        self._json({"pipeline": resolved, "declared": bool(schema),
+                    "inputs": schema})
+
+    def _launch_from_doc(self, plan, input_text: str, *, wait: bool, echo: dict):
+        """共享提交尾（Admin 侧）：临时输入文件 → run_plan(owner=principal) → 收尾。
+
+        `/api/tasks` 与 `/api/workflows/{name}/runs` 共用这一段——wait 语义、SSE
+        callback 的摘挂、异步输入文件的 reaper 只在一处维护；两处各写一份的话，
+        "两个入口行为不同"这种漂移没有任何门禁会看见。
+
+        注意 `output` 字段沿用了既有行为：**只做白名单校验，不参与落盘**（改它=开始
+        按客户端给的路径写文件，是另一件事，不在这一条线里顺手做）。
+        """
+        import tempfile
+        task_id = new_task_id()
         input_file = Path(tempfile.gettempdir()) / f"task_{task_id}.md"
-        input_file.write_text(f"# {title}\n\n## 查询\n\n{query}\n", encoding="utf-8")
+        input_file.write_text(input_text, encoding="utf-8")
 
         callback = self._attach_stream_callback(task_id)
 
@@ -1533,8 +1650,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             "task_id": task.id,
             "status": task.status.value if hasattr(task.status, "value") else str(task.status),
             "pipeline": task.pipeline_name,
-            "query": query,
-            "title": title,
+            **echo,
         }
 
         if wait:

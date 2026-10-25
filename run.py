@@ -21,6 +21,7 @@ import json
 import os
 import signal
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -286,12 +287,18 @@ def _task_exit_code(task) -> int:
 
 
 def _print_task_summary(args_args: argparse.Namespace, orch: PipelineOrchestrator,
-                        task_id: str, use_legacy: bool) -> None:
+                        task_id: str, use_legacy: bool,
+                        input_file: str | None = None) -> None:
     """打印任务摘要横幅"""
     print(f"\n{'='*60}")
     print(f"任务: {task_id}")
     print(f"流水线: {args_args.pipeline}")
-    print(f"输入: {args_args.input}")
+    # 类型化输入的载荷与渲染出的文档都要看得见：只印 "输入: None" 的横幅让人没法复盘
+    if args_args.inputs_json or args_args.set_input:
+        print(f"输入: {input_file}")
+        print(f"类型化输入: {_cli_typed_inputs(args_args)}")
+    else:
+        print(f"输入: {args_args.input}")
     print(f"模式: {'声明式 DAG' if not use_legacy else 'Legacy'}")
     print(f"Agent: {', '.join(orch.registry.list_agent_names())}")
     if args_args.queries:
@@ -431,6 +438,71 @@ def _render_task_result(args_args: argparse.Namespace, task, task_id: str) -> No
         _run_export(output_path, args_args.export, args_args.export_output)
 
 
+def _cli_typed_inputs(args_args: argparse.Namespace) -> dict:
+    """把 `--inputs-json` / `--set-input` 合成一份载荷对象。
+
+    这里**只解析不校验**：校验只有一条实现（`input_schema`），CLI 再造一套判据必然会和
+    HTTP/MCP 漂移。`--set-input` 的值先按 JSON 解析，失败当字符串——`depth=3` 要落成
+    整数，否则声明 `type: int` 的字段永远过不了门。
+    """
+    inputs: dict = {}
+    if args_args.inputs_json:
+        try:
+            loaded = json.loads(args_args.inputs_json)
+        except ValueError as e:
+            print(f"[run] ✗ --inputs-json 不是合法 JSON: {e}")
+            sys.exit(2)
+        if not isinstance(loaded, dict):
+            print("[run] ✗ --inputs-json 必须是 JSON 对象（键→值）")
+            sys.exit(2)
+        inputs.update(loaded)
+    for pair in args_args.set_input or []:
+        if "=" not in pair:
+            print(f"[run] ✗ --set-input 需要 K=V 形式，实际 {pair!r}")
+            sys.exit(2)
+        key, _, raw = pair.partition("=")
+        if not key.strip():
+            print(f"[run] ✗ --set-input 的键为空: {pair!r}")
+            sys.exit(2)
+        try:
+            inputs[key.strip()] = json.loads(raw)
+        except ValueError:
+            inputs[key.strip()] = raw
+    return inputs
+
+
+def _resolve_cli_input(args_args: argparse.Namespace, plan, task_id: str) -> str:
+    """CLI 提交口的闸门，返回实际使用的 input_file 路径。
+
+    两种输入形状过同一个闸门口子（与 HTTP/MCP 同一实现）：typed 载荷走 `prepare_inputs`
+    （逐字段校验 + 填默认值 + 渲染），位置参数 `input` 那份自由文本走 `gate_freeform`
+    ——流水线一旦声明了类型化输入就拒绝，否则 CLI 会留一条绕过门的路。
+    """
+    from loom_core.input_schema import (
+        InputValidationError,
+        gate_freeform,
+        prepare_inputs,
+    )
+
+    typed = bool(args_args.inputs_json or args_args.set_input)
+    try:
+        if typed:
+            if args_args.input:
+                print("[run] ✗ --inputs-json/--set-input 与位置参数 input 二选一")
+                sys.exit(2)
+            text = prepare_inputs(plan, _cli_typed_inputs(args_args),
+                                  title=plan.pipeline_name)
+            # 与 /api/tasks、MCP 同一形状：载荷渲染成临时 markdown 文档再交给引擎
+            input_file = Path(tempfile.gettempdir()) / f"cli_{task_id}.md"
+            input_file.write_text(text, encoding="utf-8")
+            return str(input_file)
+        gate_freeform(plan, surface="loom 的位置参数 input（输入文档）")
+    except InputValidationError as e:
+        print(f"[run] ✗ {e}")
+        sys.exit(2)
+    return args_args.input
+
+
 def _run_single_task(args_args: argparse.Namespace, orch: PipelineOrchestrator,
                      config: dict):
     """执行单任务：构建 plan/task、等待结果、输出报告。返回终态 task（预览/中断返回 None）"""
@@ -459,7 +531,17 @@ def _run_single_task(args_args: argparse.Namespace, orch: PipelineOrchestrator,
                 sys.exit(1)
         return
 
-    _print_task_summary(args_args, orch, task_id, use_legacy)
+    # 输入闸门（P1 #7）：typed 载荷经校验后渲染成临时输入文档；位置参数 input 那份
+    # 自由文本在流水线声明了 inputs 时会被拒。legacy 回退时没有 plan，也就无源可校验——
+    # 明确报错，不能"校验不了就照跑"（那等于闸门只在顺利的时候存在）。
+    if use_legacy and (args_args.inputs_json or args_args.set_input):
+        print("[run] ✗ 类型化输入需要声明式流水线（拿到了 legacy 回退）："
+              "请检查 --pipeline / pipelines/ 配置，或去掉 --legacy")
+        sys.exit(2)
+    input_file = (args_args.input if use_legacy
+                  else _resolve_cli_input(args_args, plan, task_id))
+
+    _print_task_summary(args_args, orch, task_id, use_legacy, input_file)
 
     run_config = {
         "timeout": args_args.timeout,
@@ -472,7 +554,7 @@ def _run_single_task(args_args: argparse.Namespace, orch: PipelineOrchestrator,
         task = orch.run(
             task_id=task_id,
             pipeline_name=args_args.pipeline,
-            input_file=args_args.input,
+            input_file=input_file,
             config=run_config,
             wait=True,
             resume=args_args.resume,
@@ -487,7 +569,7 @@ def _run_single_task(args_args: argparse.Namespace, orch: PipelineOrchestrator,
             plan.raw.setdefault("pipeline", {})["output"] = args_args.output
         task = orch.run_plan(
             plan=plan,
-            input_file=args_args.input,
+            input_file=input_file,
             task_id=task_id,
             wait=True,
             resume=args_args.resume,
@@ -601,6 +683,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pipeline-file", "-f", default=None, help="pipeline YAML 配置路径")
     parser.add_argument("--queries", "-q", nargs="*", help="检索词（多个）")
     parser.add_argument("--agent", "-a", action="append", help="指定运行的 Agent")
+    parser.add_argument("--inputs-json", default=None, metavar="JSON",
+                        help="类型化运行输入（JSON 对象）：按流水线 pipeline.inputs 声明"
+                             "逐字段校验后渲染成输入文档；与位置参数 input 二选一")
+    parser.add_argument("--set-input", action="append", default=[], metavar="K=V",
+                        help="逐个给类型化输入（可重复，V 先按 JSON 解析、失败当字符串），"
+                             "例：--set-input topic=云成本 --set-input depth=3")
     parser.add_argument("--resume", action="store_true", help="从断点续传")
     parser.add_argument("--timeout", default=600, type=int, help="超时（秒）")
     parser.add_argument("--output", "-o", default=None, help="输出文件")
@@ -701,8 +789,11 @@ def main():
         sys.exit(0)
 
     # 无输入文件时：仅 --check/--mcp/--recover/--replay-*/--triggers*、服务模式与
-    # plan/lock/pack/plugin/demo 动词可用
-    if args.input is None and not args.check and not args.mcp and not args.recover \
+    # plan/lock/pack/plugin/demo 动词可用。类型化输入（--inputs-json/--set-input）
+    # 是"没有输入文件"的另一种输入形式，同样算给了输入。
+    typed_cli = bool(args.inputs_json or args.set_input)
+    if args.input is None and not typed_cli and not args.check and not args.mcp \
+            and not args.recover \
             and not args.replay_run and not args.replay_incomplete \
             and not args.triggers and not args.triggers_dry_run \
             and not args.admin and not args.dashboard and not args.daemon \
@@ -881,7 +972,7 @@ def main():
 
     # 纯服务模式：无输入文件，仅常驻 Admin API（任务经 POST /api/tasks 提交）。
     # plan 动词无输入但只是预览，不得落进服务模式（否则 loom plan 会启 API 常驻）。
-    service_only = args.input is None and not args.plan
+    service_only = args.input is None and not args.plan and not typed_cli
     finished_task = None
     if not service_only:
         finished_task = _run_single_task(args, orch, config)

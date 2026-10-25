@@ -203,7 +203,9 @@ class TestRunWorkflowTool:
         input_file.unlink(missing_ok=True)
 
     def test_render_inputs_doc_shapes(self):
-        from loom_core.mcp_server import _render_inputs_doc
+        # 渲染器归 input_docs 管；mcp_server 里那个别名已随"闸门上移"删掉，
+        # 判据本身（文档形状）不变——从真实出处 import，不再测一个转发别名。
+        from loom_core.input_docs import render_inputs_doc as _render_inputs_doc
         assert _render_inputs_doc("wf", {}) == "# wf\n"
         assert _render_inputs_doc("wf", "") == "# wf\n"
         doc = _render_inputs_doc("wf", {"n": 3, "nested": {"a": 1}, "items": [1, "x"]})

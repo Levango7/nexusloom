@@ -34,7 +34,12 @@ class TestOpenAPISpec:
     def test_task_submit_schema(self, spec):
         schema = spec["components"]["schemas"]["TaskSubmit"]
         assert "query" in schema["properties"]
-        assert "query" in schema["required"]
+        assert "inputs" in schema["properties"]
+        # #7 之后 query 不再是无条件必填：只带合法 inputs 的提交也得是合法的。
+        # 这里验的是"spec 没有反过来禁止真实允许的载荷形状"。
+        branches = [set(b.get("required", [])) for b in schema["anyOf"]]
+        assert {"query"} in branches and {"inputs"} in branches, schema.get("anyOf")
+        assert "required" not in schema, "顶层 required 会把 anyOf 的两条路压回一条"
 
     def test_paths_not_empty(self, spec):
         assert len(spec["paths"]) >= 15

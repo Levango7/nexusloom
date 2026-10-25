@@ -20,6 +20,9 @@ YAML、文档三处各自漂移。要真·完整 JSON Schema 语义得引 `jsons
 `## 键` 分节的文本，而 `dag_executor._extract_queries` 读文档时把所有 `#` 行丢掉——结构在
 渲染那一刻就没了。所以渲染之后再也问不出"哪个字段错了"，只能整篇重解析当第二套判据，
 那一定会漂。恢复/worker 那两条路传的是**已渲染的 `input_file`**，它们不过这道门，也不该过。
+
+入口分两种形状，各自只有一个闸门口子：带键→值对象的走 `prepare_inputs`（真校验），
+只带自由文本的走 `gate_freeform`（流水线一旦声明了 inputs 就拒绝，防止留一条绕过门的路）。
 """
 from __future__ import annotations
 
@@ -252,6 +255,46 @@ def apply_defaults(schema: dict[str, Any], inputs: dict[str, Any]) -> dict[str, 
     return out
 
 
+def declaration(plan: Any) -> dict[str, Any]:
+    """取 plan 上的输入声明；**不是 dict 就当没声明**。
+
+    为什么要有这条：`inputs_schema` 挂在 ExecutionPlan 上，但 plan 也会被替身
+    （测试里的 MagicMock）或第三方 pack 自行构造的对象顶上来。对这类对象
+    `getattr(plan, "inputs_schema")` 返回的是一个**真值但非 dict** 的东西，
+    于是"没声明"会被读成"声明了但内容为空"——自由文本入口就会凭空拒绝，
+    假阳性比没门禁更难查。
+    """
+    schema = getattr(plan, "inputs_schema", None)
+    return schema if isinstance(schema, dict) else {}
+
+
+def gate_freeform(plan: Any, *, surface: str) -> None:
+    """文档形入口（CLI 的 `--input`、`POST /api/tasks` 的 `query`、MCP 的
+    `generate_document`、webhook 的非 JSON 文本载荷）的唯一退路。
+
+    为什么需要这一条：这些入口传的是**自由文本**，没有可供校验的键→值结构。如果让它们
+    照常放行，"声明了类型化输入的流水线"仍然有一条不经过闸门的路——那这道门就是装饰，
+    比没门更糟（看起来有）。所以：
+      - 流水线**没声明** inputs → 原样通过（随包 20 条流水线行为不变）；
+      - 声明了 → 明确拒绝，并指出该用哪个 typed 入口，而不是丢一句"缺少必填 topic"。
+
+    抛的是同一个 `InputValidationError`，因此四个入口的错误形状仍然只有一套。
+    """
+    schema = declaration(plan)
+    if not schema:
+        return
+    props = schema.get("properties")
+    names = sorted(props) if isinstance(props, dict) else []
+    raise InputValidationError([{
+        "field": "inputs",
+        "reason": (f"{surface} 传的是自由文本，无法按声明校验；"
+                   f"流水线 {getattr(plan, 'pipeline_name', '?')} 声明了类型化输入 "
+                   f"{names}，请改用带 inputs 对象的入口"
+                   "（HTTP: POST /api/workflows/{name}/runs，"
+                   "CLI: --inputs-json / --set-input，MCP: run_workflow）")
+    }])
+
+
 def prepare_inputs(plan: Any, inputs: dict[str, Any], *, title: str = "") -> str:
     """三条提交口共用的那一步：校验 → 填默认值 → 渲染成输入文档文本。
 
@@ -260,10 +303,12 @@ def prepare_inputs(plan: Any, inputs: dict[str, Any], *, title: str = "") -> str
     返回**文本**不是文件路径：临时文件归调用方管（MCP/webhook 各自有清理逻辑），
     把文件生命周期也吸进来会让恢复/worker 那条路没法复用同一份校验。
     """
-    schema = getattr(plan, "inputs_schema", None) or {}
+    schema = declaration(plan)
     errors = validate_inputs(schema, inputs)
     if errors:
         raise InputValidationError(errors)
-    effective = apply_defaults(schema, inputs)
+    # 没声明时载荷可以是任意形状（webhook 可能送来整篇文本或 JSON 数组）：
+    # 照旧原样渲染，`default` 填充只对键→值对象有意义
+    effective = apply_defaults(schema, inputs) if isinstance(inputs, dict) else inputs
     return render_inputs_doc(title or getattr(plan, "pipeline_name", "") or "run",
                              effective)

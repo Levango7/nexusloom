@@ -312,8 +312,21 @@ class TestNewTaskId:
         import run as run_mod
         assert "new_task_id()" in inspect.getsource(run_mod._run_single_task)
         assert "uuid.uuid4" not in inspect.getsource(run_mod._run_single_task)
-        assert "new_task_id()" in inspect.getsource(
-            aa.AdminHandler._handle_submit_task)
+        # #7 之后 Admin 的两个提交口共用一条尾巴，task_id 只在尾巴里铸一次。
+        # 判据跟着结构改，但一条都没放宽：入口必须把活交给尾巴（否则等于没接线），
+        # 且入口自己不得再铸 id——两处各铸一个会让临时输入文件与 task_id 错位。
+        tail = inspect.getsource(aa.AdminHandler._launch_from_doc)
+        assert "new_task_id()" in tail, "共享提交尾没铸 task_id"
+        assert "uuid.uuid4" not in tail
+        for entry in ("_handle_submit_task", "_handle_create_run"):
+            src = inspect.getsource(getattr(aa.AdminHandler, entry))
+            assert "_launch_from_doc(" in src, f"{entry} 绕过了共享提交尾"
+            assert "new_task_id()" not in src, f"{entry} 自己铸了第二个 id"
+        # 第三条口（MCP）也仍在同一形状上：单处铸 id、单处写临时文件
+        mcp_tail = inspect.getsource(
+            __import__("loom_core.mcp_server", fromlist=["MCPServer"]).MCPServer
+            ._submit_plan_run)
+        assert mcp_tail.count("new_task_id()") == 1, mcp_tail
 
     def test_dashboard_token_moved_to_session_storage(self):
         dash = Path(__file__).parent.parent / "loom_core" / "dashboard"

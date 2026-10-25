@@ -219,6 +219,22 @@ class TestPrepareAndBoundaries:
         doc = ins.prepare_inputs(p, {"查询": "任意文本"})
         assert "## 查询" in doc and "任意文本" in doc
 
+    def test_duck_typed_plan_is_treated_as_undeclared(self, plan):
+        """替身/第三方 plan 顶上来时，`inputs_schema` 可能是"真值但不是 dict"。
+
+        那必须读成**没声明**：读成"声明了但为空"会让自由文本入口凭空被拒，
+        而门禁假阳性比没门禁更难查（本仓的形状）。
+        """
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        for bogus in (SimpleNamespace(pipeline_name="x", inputs_schema=MagicMock()),
+                      SimpleNamespace(pipeline_name="x", inputs_schema="不是 dict"),
+                      SimpleNamespace(pipeline_name="x")):
+            assert ins.declaration(bogus) == {}, bogus
+            ins.gate_freeform(bogus, surface="judge")        # 不抛 = 照旧放行
+            assert ins.prepare_inputs(bogus, {"任意": "东西"})
+
     def test_declaration_does_not_change_lock_hashes(self, tmp_path, plan):
         """schema 不进锁指纹是**选择**不是遗漏：它一改，随包 20 条流水线全要重锁。
 
