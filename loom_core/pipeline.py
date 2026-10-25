@@ -596,7 +596,7 @@ class PipelineOrchestrator:
         `legacy_runs` = 走的是从不写投影的 legacy 路径（按设计缺，不是故障）。
         读的人把它们混成一个数，就会把 deprecated 兜底路径报成数据丢失。
         """
-        counts = {"incomplete_runs": None, "legacy_runs": None}
+        counts: dict[str, int | None] = {"incomplete_runs": None, "legacy_runs": None}
         try:
             counts["incomplete_runs"] = self.task_queue.count_projection("incomplete")
             counts["legacy_runs"] = self.task_queue.count_projection("legacy")
