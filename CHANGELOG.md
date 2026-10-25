@@ -35,6 +35,106 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Added（2026-10-26·续64，#8 交付账本与锁巡检的只读 HTTP 面）
+
+- **看得见才算接口**：续63 给了 `incomplete` 一个出口（`--replay-run`），但那个出口的
+  输入源——交付账本——只有 CLI 与进程内读得到。本批补三个只读口：`GET /api/deliveries`
+  （`?limit=`，默认 50、夹到 200，逐行带 `projection` 健康位）、
+  `GET /api/deliveries/<run_id>`（整条结构化载荷：逐节点 `status`/`duration_sec`/`artifact_keys`）、
+  `GET /api/locks`（`?pipeline=<name>` 只看一条）。
+- **两条口径写进响应，不给读的人留误读空间**：
+  `/api/locks` 的 `scope` 恒为 `"current files"`——它回答"当前 YAML 与当前锁对不对"，
+  **不回答**"某次运行时用的锁对不对"。实测：`config_hash`/`topology_hash` 从未落库
+  （只在 `verify_lockfile` 那一瞬存在于内存，交付载荷只存 `plan_id` 那个随机 uuid8），
+  所以后者今天无法证据化，也不拿今天的值冒充当时。`matches` 是三值：`true` 比过且一致、
+  `false` 漂移（`issues` 带两侧哈希）、`null` 没有锁可比或 YAML 解析失败——
+  "没发现问题"与"没法判断"不混成一个布尔；缺锁的行不进 `drifted`。
+- **账本没有归属列 ⇒ 可见性逐行问投影**：`_delivery_item` 对非 admin 走 `_scoped_run`
+  那条口径，**越权与不存在同一个 404**（存在性本身就是信息）；CLI 直跑、投影里查无此运行
+  的行 `projection` 报 `unknown` 且只有 admin 看得见。账本读不动给 **503**，不降级成
+  200 空列表——把"读不到"报成"没有交付"是最难被发现的那类假绿。
+- **锁路径解析只留一处**：原来解析规则埋在 `_verify_lock_after_parse` 里、判据是"抛异常"。
+  只读巡检要同一套规则但不抛，于是抽出 `resolve_lock_path`（按流水线名解析，不需要先有
+  plan）+ `lock_drift`（返回问题表）。留在原处再复制一份的话，巡检会报出执行时根本不会
+  发生的漂移——这条由 U9a/U9b 两条变异分别打红。
+- **`GET /api/locks` 全量巡检加了按文件时间戳的复用**（详见下面"实测"）：绑
+  `(yaml, lock)` 的 `(mtime_ns, size)`，不是 TTL；`?pipeline=` 显式单条**恒不读缓存**，
+  因为那一问的语义是"我刚改了，现在到底对不对"。
+
+判据：新增 `tests/test_deliveries_api.py` 22 条，全部走**真 HTTP**（handler 写了但路由没接、
+路由接了但读内存 task、行取对了但越权漏出别人的运行——这三种失败只有真请求分得开）。
+其中两条是口径判据而不是行为判据：`scope == "current files"` 与"锁解析同源"。
+
+窄变异两轮共 26 条，22 条判据**全部被至少一条打死**（零射程判据 0 条）。第一轮 15 条：
+
+| 变异 | 红 | 红的是 |
+|---|---|---|
+| A1 可见性过滤摘掉 | 3 | 越权 404 同形 / 非 admin 只见自己 / 孤儿行对具名 token 不可见 |
+| A2 列表 503 吞成空列表 | 1 | `test_list_unreadable_ledger_is_503_not_an_empty_list` |
+| A3 明细 503 换成 404 | 1 | `test_detail_unreadable_ledger_is_503` |
+| A4 健康位写死成 ok | 4 | 列表 / 明细 / incomplete / 孤儿行 |
+| A5 明细不给逐节点载荷 | 1 | `test_detail_carries_the_node_rows` |
+| A6 `limit` 不夹上限 | 1 | `test_limit_defaults_and_is_clamped` |
+| A7 缺锁也算 `matches: true` | 1 | `test_absent_lock_is_never_reported_as_matching` |
+| A8 `scope` 字段被删 | 1 | `test_scope_is_current_files_and_covers_every_core_pipeline` |
+| A9 缓存不看文件时间戳 | 1 | `test_repeat_poll_is_served_from_the_file_stamps` |
+| A10 显式单条也读缓存 | 1 | `test_explicit_single_ask_never_reads_the_cache`（首轮红 0，见下） |
+| A11 `cached` 谎报成全命中 | 2 | 上面两条缓存判据 |
+| A12 结论算完不写缓存 | 1 | `test_repeat_poll_is_served_from_the_file_stamps` |
+| S1 锁解析不再看 YAML 同目录 | 1 | `test_resolve_prefers_the_directory_beside_the_yaml` |
+| W1 摘掉 `/api/deliveries` 分发 | 6 | 列表系全部 + `test_scope…`（粗变异，只作接线对照） |
+| G0 反向对照：只改日志文案 | **0** | ——证明电池本身不制造红 |
+
+第二轮 11 条专打"第一轮里没有任何变异走到的 9 条判据"：
+
+| 变异 | 红 | 红的是 |
+|---|---|---|
+| U1 非法 run_id 不挡在解析前 | 1 | `test_bad_run_id_is_400_not_a_query_oddity` |
+| U2 巡检把 `issues` 丢掉 | 2 | 漂移给差在哪 / 显式单条给差在哪 |
+| U3 一条坏 YAML 把全口拖成 500 | 1 | `test_one_broken_yaml_does_not_take_down_the_endpoint` |
+| U4 `?pipeline=` 过滤失效 | 1 | `test_pipeline_filter_narrows_and_unknown_name_404s` |
+| U5 问不存在的流水线给 200 空表 | 1 | 同上（另一格） |
+| U6 规范里 `run_id` 参数改名 | 1 | `test_new_verbs_are_listed_in_the_openapi_get_surface` |
+| U7 摘掉 `/api/locks` 分发 | 8 | 巡检全类 + **规范↔handler parity 判据** |
+| U8 摘掉明细分发 | 4 | 明细三条 + parity 判据 |
+| U9a `lock_drift` 恒报一条问题 | 4 | 本批 parity 判据 + `test_lockfile.py` 既有三条 |
+| U9b 执行侧不再拦漂移 | 7 | 本批两条 + `test_lockfile.py` 的 parse/CLI 五条既有判据 |
+| G0 反向对照：只改注释 | **0** | —— |
+
+三条过程上的实情，记下来比修掉更要紧：
+
+- **那条"判据不稳定"的红是真信号，产品有问题**：`/api/locks` 不带过滤时要解析全部 19 条
+  流水线，本机实测（Python 3.14.3、单进程、无并发负载）**冷 7.27s / 再跑 11.23s**。
+  我那个 10s 客户端超时先撞上，症状看起来像 flaky。监控是轮询的，每次轮询付这个钱既不
+  合理也必然超时——所以改的是端点不是超时。加按时间戳的复用后同条件重测：
+  **冷 7.75s、热 0.08s / 0.09s、`?pipeline=` 0.47s**。两条新判据断言的是 `cached` **计数**
+  而不是墙钟耗时（拿耗时当判据在负载轮里一定假红），且跑在临时目录的真文件上——不拿随包
+  流水线的 `three_pass.lock` 做试验品：测试被打断时 `finally` 不执行，会把锁留在脏状态。
+- **电池驱动器自己在骗我**：U2 首轮报 `red=0`（读起来像"那条判据没射程"），现场却是
+  `11 passed, 1 warning, 11 errors in 177.78s`——我的红数只 grep `FAILED`，fixture 崩掉的
+  条目既不计红也不计败。驱动器也是门禁，判成败得看全集：现在 **FAILED 与 ERROR 都计红**
+  并单独标注"这 N 条是夹具崩，不是判据松"。复测 U2 = 2 红。那 11 errors 归因到当次瞬时负载
+  （同一变异单跑 1 failed、G0 复跑 22 passed 无 error），不归因到变异。
+- **两条判据是我自己写成零射程的**：①A10（显式单条读缓存）红 0——判据先改了锁文件，
+  时间戳一变，"读不读缓存"两种实现给同一个答案；补一句"文件没动就问那一条，`cached`
+  必须为 0"之后才有射程。②`TestSpecParity` 的 needle 用了 handler 名和 `"/api/deliveries/"`
+  子串，W1 把路由改成 `/api/deliveries_disabled` 之后两者都还在 ⇒ 摘路由它不红。
+  改成钉**分发表达式**本身（`== "/api/locks"` 等），U7/U8 就是专门验这两根新 needle 的射程。
+
+实测口径（都要带条件读）：
+
+- 本机全量（`Python 3.14.3`、`LOOM_TEST_PG_URL` **未设置**、同机无其他 pytest；
+  两轮电池 00:31 前全部结束、全量 00:32 起手，不重叠 ⇒ 读的树没被打过桩）：
+  `2949 passed, 1 failed, 9 skipped, 6 deselected in 918.10s ≈ 15.3 分钟`。那唯一一条红是
+  README 计数护栏自身；换数后单跑 `tests/test_doc_consistency.py` ⇒ **9 passed**，
+  所以 README 写 **2950 个测试本机全绿**（实际收集 2959 = 2950 + 9 skip）。
+- 本批 22 条单跑：**22 passed in 52.13s**（同机空闲；第一轮那 15 条变异各跑一遍是 55–178s）。
+- `ruff check .` 干净；CI 范围内 `mypy loom_core/` Success；`run.py --check` RC=0；
+  `scripts/check_design_anchors.py` ⇒ `checked=50 mismatched=0`（本批新增 6 条锚点、
+  remap 7 条 `admin_api.py` 位移；其中两条曾被"最近行"挑到同样含该关键字的 docstring/import 行，
+  已改回按整行文本钉死）。
+
+
 ### Added（2026-10-25·续63，RunStore 补账工具：incomplete 运行按交付账本重投影）
 
 - **看得见就得能处理**：续62 只做到"缺口可发现 + 可计数 + 可按 id 查"，本批给那个计数
