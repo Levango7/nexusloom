@@ -53,6 +53,11 @@ NODE_FINISHED = "node.finished"
 RUN_COMPLETED = "run.completed"
 RUN_FAILED = "run.failed"
 RUN_CANCELLED = "run.cancelled"
+#: 事后补账（投影写失败后按交付账本重放）——不是执行事实，必须与原始事件可区分
+RUN_REPLAYED = "run.replayed"
+
+#: 终态投影状态：`close_run` 用它做"至多一条终态事件"的原子裁决
+TERMINAL_STATUSES = ("done", "failed", "cancelled")
 
 #: 审批是一条可变状态（pending → approved/rejected → consumed），
 #: 所以它既有投影又有事件：状态给收件箱读，事件给重放与审计读。
@@ -253,21 +258,28 @@ class RunStore:
     def close_run(self, run_id: str, status: str, *, finished_at: float = 0.0,
                   error: str = "", cost_usd: float = 0.0,
                   quality_score: float = 0.0,
-                  artifacts: list | None = None) -> int:
-        """终态：投影盖章 + 一条终态事件，同一事务。
+                  artifacts: list | None = None) -> int | None:
+        """终态：投影盖章 + 一条终态事件，同一事务。返回事件 seq（没写则 None）。
 
-        "每个运行至多一条终态事件"由调用方的 `_claim_terminal_event` 保证（Stage 0）；
-        这里不重复裁决，因为幂等性要看整条运行历史，不属存储层职责。
+        **"每个运行至多一条终态事件"由这里的条件 UPDATE 原子裁决**：已经是终态的行
+        不再被覆写、也不再追加事件。此前这条约束写在调用方（`_claim_terminal_event`），
+        那是**进程内**的去重——补账、重启后的重放、两个进程同时收尾都绕得过它；而事件流
+        一旦多出一条终态，SSE 重放与审计时间线就多一个无法解释的节点。
+
+        投影行不存在时同样返回 None（`UPDATE` 影响 0 行）：没有行却有终态事件，
+        正是补账要消灭的那种半条事实。
         """
         ts = finished_at or time.time()
         with _Txn(self._pool, self._conn()) as txn:
             conn = txn.conn
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE runs SET status = ?, finished_at = ?, error = ?, "
                 "cost_usd = ?, quality_score = ?, artifacts_json = ? "
-                "WHERE run_id = ?",
+                "WHERE run_id = ? AND status NOT IN (?, ?, ?)",
                 (status, ts, error, float(cost_usd or 0), float(quality_score or 0),
-                 _fast_dumps(artifacts or []), run_id))
+                 _fast_dumps(artifacts or []), run_id) + TERMINAL_STATUSES)
+            if cur.rowcount <= 0:
+                return None
             return self._append(conn, run_id,
                                 _TERMINAL_EVENT.get(status, RUN_COMPLETED),
                                 {"status": status, "error": error}, ts, txn)

@@ -307,6 +307,15 @@ class TaskQueue:
                 (state,)).fetchone()
         return int(row[0]) if row else 0
 
+    def list_by_projection(self, state: str, limit: int = 200) -> list[dict]:
+        """按健康位取行（补账工具用它找 `incomplete` 的那批），按完成时间从旧到新。"""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                f"{_ROW_COLS} WHERE COALESCE(projection, 'ok') = ? "
+                "ORDER BY COALESCE(finished_at, created_at) LIMIT ?",
+                (state, int(limit))).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
     def finish(self, task_id: str, status: str, error: str = "",
                allow_states: tuple = ("running", "pending"),
                projection: str = "ok") -> bool:
