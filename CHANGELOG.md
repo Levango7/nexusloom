@@ -35,6 +35,76 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Added（2026-10-25·续63，RunStore 补账工具：incomplete 运行按交付账本重投影）
+
+- **看得见就得能处理**：续62 只做到"缺口可发现 + 可计数 + 可按 id 查"，本批给那个计数
+  一个出口——`loom --replay-run <id>` / `--replay-incomplete`，配 `--replay-dry-run`
+  先看不动笔。编排侧入口是 `replay_run()` / `replay_incomplete_runs()`。
+- **事实来源只有一个**：交付账本。不读 checkpoint（那是恢复快照，设计 §3 已划出去），
+  不读内存（补账常发生在原进程已死之后）。账本没有的东西就承认没有：账本只存
+  `duration_sec`、从不存节点的绝对时间 ⇒ 补写的 `run_nodes` 行时间列留 0，
+  `run.replayed` 事件里标 `"times": "unavailable"`，而不是拿运行结束时刻倒推一排假时间。
+- **补得诚实的四条边界**（都写成行为，不是文档承诺）：只碰 `marker='incomplete'` 且
+  队列已终态的行；**只补缺**——已有 `run_nodes` 行不被事后重建覆盖；队列 / 账本 / 投影
+  三方口径不一致一律**拒绝**并报两侧值；健康位最后才升格，中途炸掉停在 incomplete，
+  重跑幂等。补账工具一旦开始"顺手纠正"冲突，它自己就成了第二个事实源。
+- **终态事件的"至多一条"从调用方下沉到存储层**：`close_run` 改成事务内
+  `UPDATE … WHERE status NOT IN (done, failed, cancelled)`，影响 0 行就不再追加事件、
+  返回 None。此前这条不变量只在 `_claim_terminal_event` 里，而那是**单个 PipelineTask
+  对象上**的去重——跨进程补账、重启后的重放、两个 worker 同时收尾都绕得过它。
+  投影行不存在时同样返回 None：没有行却有终态事件，正是补账要消灭的半条事实。
+- **顺带修掉收件箱里的一条死待办**（与本批无因果，是验证时撞出来的 main 现存缺口）：
+  取消一个停在审批闸门上的运行，台账里那行会永远留在 `pending`——运行已死、
+  `approve()` 只会回答"未在审批等待中"，但人看到的仍是"等你确认"。现在 `cancel()`
+  把它就地置 `rejected` / `by=system` / `reason=运行已取消`；控制动作不因台账不可用而
+  失败，只告警（与 approve 的 fail-closed 相反是有意的：批准发放执行权，取消只撤工作）。
+
+判据：新增 `tests/test_run_backfill.py` 17 条；`tests/test_state_backend.py` 补一类
+2 条（`close_run` 的条件 UPDATE 与队列按健康位取行都在**真 PG** 上跑——CI 四条腿都带
+PG service，但 RunStore 此前从没被 PG 腿覆盖过）；异步/同步取消那两条各补一句
+"取消后待批必须已结清"。
+
+窄变异 8 条（每条只红它射程内那几条；MB1 带 PG 腿）：
+
+| 变异 | 红 | 红的是 |
+|---|---|---|
+| MB1 `close_run` 回到无条件覆盖 | 3 | `test_already_terminal_only_upgrades_marker` + `TestStoreLevelTerminalClaim::test_second_close_run_writes_no_event` + PG `test_close_run_is_terminal_once` |
+| MB2 不检查健康位（ok/legacy 也补） | 4 | `test_non_incomplete_markers_are_refused` 三个参数化 + `test_second_replay_is_refused_and_emits_nothing` |
+| MB3 不跳过已有节点 | 2 | `test_existing_node_rows_are_not_overwritten` + `test_after_failed_close_restores_terminal_projection` |
+| MB4 队列与账本状态冲突照补 | 1 | `test_status_conflict_is_refused` |
+| MB5 补账不留 `run.replayed` 事件 | 1 | `test_after_failed_close_restores_terminal_projection` |
+| MB6 取消不结清待批 | 2 | 同步与异步那两条取消判据 |
+| MB7 dry-run 照样写 | 1 | `test_dry_run_writes_nothing` |
+| MB8 运行中也能补账 | 1 | `test_running_row_is_refused` |
+
+三条流程上的实情，记下来比修掉更要紧：
+
+- **变异电池的还原不能用 `git checkout -- <文件>`**。本仓的工作方式是"边改边跑电池"，
+  未提交的改动会被 checkout 抹回上一次提交——第一轮就是这么把 `run_store.py` 的本批
+  改动整段清掉的（症状是一句 `module has no attribute TERMINAL_STATUSES`，看着像判据错）。
+  现在还原走"把变异文本换回原文 + 自校验"。
+- **同一份树不能并发跑两条电池**。我把第二轮起早了一步，两份同时在改 `backfill.py`，
+  其中一条报出的"15 条全红"是变异叠加的产物，什么都不能说明；停掉、还原、重跑才是数。
+- **MB1 第一轮只红 PG 那一条**：因为补账里还留着一处"已终态就不必再盖章"的判断，
+  与存储层的新守卫等价。摘掉那处重复判断（只留存储层裁决，`will_close` 降级为
+  dry-run 的预告）之后，MB1 才有 SQLite + PG 两个落点。等价守卫留两条，红的就只有
+  其中一条有射程的那一条。
+
+实测口径（都要带条件读）：
+
+- 本机全量（`Python 3.14.3`、`LOOM_TEST_PG_URL` **未设置**、同机无其他 pytest 在跑；
+  变异电池 20:53 结束、全量 20:58 起手，两者不重叠 ⇒ 这轮读的树没被打过桩）：
+  `2927 passed, 1 failed, 9 skipped, 6 deselected in 906.42s ≈ 15.1 分钟`。那唯一一条红是
+  README 计数护栏自身；换成实测数后单跑 `tests/test_doc_consistency.py` ⇒ **9 passed**，
+  所以 README 写 **2928 个测试本机全绿**（实际收集 2937 = 2928 passed + 9 skip）。
+- 带真 PG 复跑**要推的那份树**（本机起一个与 CI 同镜像同库名的临时 `postgres:16-alpine`、
+  端口 55461、跑完即删）：`tests/test_state_backend.py` + `tests/test_run_backfill.py` +
+  `tests/test_projection_health.py` ⇒ **43 passed in 94.31s**。这一步不能省——续62 那条
+  "CI 四条腿同红、本机全量看不见"的红正来自队列 SQL 的漏改判据，而 CI 的 PG service 与
+  env 挂在 job 级，四条腿都会执行那 7 条 `requires_pg` 判据。
+- 电池还原后本批三套（`test_run_backfill` / `test_async_run_parity` / `test_approvals`，
+  不带 PG）⇒ 35 passed；`python scripts/check_design_anchors.py` ⇒ `checked=44 mismatched=0`。
+
 ### Changed（2026-10-24·续62，RunStore Stage 3b：投影写失败标 incomplete 后继续 + 队列摘掉结果正文）
 
 - **口径落成**（2026-10-24 拍板："标 incomplete 后继续"）：RunStore 终态盖章失败时
