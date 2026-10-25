@@ -92,9 +92,11 @@ EXTERNAL: dict[str, str] = {
 }
 
 #: 标准库补充名单（verify_dist 自己的口径；与 test_layering 的 _stdlib_names 不同源）：
-#: py3.11+ 的 tomllib / 常见网络与运行时件
+#: py3.11+ 的 tomllib / 常见网络与运行时件。fcntl 是 POSIX-only 的标准库——
+#: config.py 的跨进程文件锁用它做 flock，Windows 侧走 O_EXCL 自旋回退，
+#: 不依赖任何第三方包，故登记在此而不是 EXTERNAL（EXTERNAL 是第三方件）。
 STDLIB_EXTRA = frozenset({
-    "atexit", "ipaddress", "socketserver", "struct", "tomllib", "zlib",
+    "atexit", "fcntl", "ipaddress", "socketserver", "struct", "tomllib", "zlib",
 })
 
 
