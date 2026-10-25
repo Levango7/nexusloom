@@ -31,6 +31,7 @@ from .naming import agent_of, family_of
 from .observability import get_logger, get_metrics
 
 if TYPE_CHECKING:
+    from .backfill import RunBackfill
     from .registry import AgentMeta
     from .scheduler import ExecutionNode, ExecutionPlan
 
@@ -610,6 +611,22 @@ class PipelineOrchestrator:
                 "dialect": store.dialect,
                 "schema_version": store.schema_version(), **counts}
 
+    # ── 补账（投影写失败后的重放）────────────────────────
+
+    def _backfill(self) -> RunBackfill:
+        from .backfill import RunBackfill
+        from .deliveries import DeliveryLedger
+
+        return RunBackfill(self.task_queue, DeliveryLedger(), self._runstore)
+
+    def replay_run(self, run_id: str, dry_run: bool = False) -> dict:
+        """把一个 `incomplete` 运行按交付账本重投影（语义与边界见 `backfill.py`）。"""
+        return self._backfill().replay(run_id, dry_run=dry_run)
+
+    def replay_incomplete_runs(self, limit: int = 200, dry_run: bool = False) -> dict:
+        """批量补账：当前所有 `incomplete` 运行。"""
+        return self._backfill().replay_incomplete(limit=limit, dry_run=dry_run)
+
     def _runstore_open(self, task: PipelineTask, plan: ExecutionPlan,
                        input_file: str, trigger: str) -> None:
         store = self._runstore()
@@ -661,8 +678,9 @@ class PipelineOrchestrator:
     def _runstore_close(self, task: PipelineTask, plan: ExecutionPlan) -> bool:
         """给投影盖章，返回**这次盖章是否真的落了**。
 
-        调用方拿这个布尔决定队列行的 `projection` 标记升不升成 ok。False 有两种：
-        写口整个建不起来（`runs.db` 打不开），或 `close_run` 抛了。两种都意味着
+        调用方拿这个布尔决定队列行的 `projection` 标记升不升成 ok。False 有三种：
+        写口整个建不起来（`runs.db` 打不开）、`close_run` 抛了、或投影里没有这条
+        运行的行（`close_run` 的条件 UPDATE 影响 0 行 ⇒ 返回 None）。三种都意味着
         "这次运行在投影里查不到或停在 running"——必须能被发现，而不是只进日志。
         """
         store = self._runstore()
@@ -673,13 +691,13 @@ class PipelineOrchestrator:
         for dag in task.dag_nodes.values():
             keys.update(str(k) for k in (dag.result or {}))
         try:
-            store.close_run(task.id, status,
-                            finished_at=task.finished_at or None,
-                            error=task.error or "", artifacts=sorted(keys))
+            seq = store.close_run(task.id, status,
+                                  finished_at=task.finished_at or None,
+                                  error=task.error or "", artifacts=sorted(keys))
         except Exception as e:  # noqa: BLE001
             self._log("warning", "RunStore 终态投影失败", task_id=task.id, error=str(e))
             return False
-        return True
+        return seq is not None
 
     def _finalize_task_queue(self, task: PipelineTask, config: dict) -> None:
         """任务终态同步任务队列 + 清理临时文件 + 断点保留/删除。
@@ -818,6 +836,7 @@ class PipelineOrchestrator:
 
     def cancel(self, task_id: str) -> bool:
         """取消任务（per-task，不影响其他正在运行的任务）"""
+        cancelled = False
         with self._lock:
             task = self._running_tasks.get(task_id)
             if task and task.status in [TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.PAUSED]:
@@ -826,8 +845,32 @@ class PipelineOrchestrator:
                 if self._claim_terminal_event(task, "task.cancelled"):
                     emit_event("task.cancelled", {"task_id": task_id,
                                                    "pipeline": task.pipeline_name})
-                return True
-        return False
+                cancelled = True
+        if cancelled:
+            # 台账写不能拖着锁做（收件箱是另一条查询路径）
+            self._retire_pending_approvals(task_id, "运行已取消")
+        return cancelled
+
+    def _retire_pending_approvals(self, task_id: str, reason: str) -> None:
+        """取消一个停在闸门上的运行时，把它的待批记录就地结掉。
+
+        不结的后果是收件箱里留一条**点不掉的待办**：运行已经取消，approve 只会得到
+        "未在审批等待中"，而人在收件箱里看到的仍是"等你确认"。结批用 `rejected`
+        （不新增词汇）、`by=system` 且 reason 写明来由——事件流里仍是一条
+        `approval.decided`，审计能看出这是系统结的而不是人批的。
+
+        控制动作不能因为台账不可用而失败：这里只告警，取消本身照常生效。
+        """
+        try:
+            row = self.approvals.pending_for_run(task_id)
+            if not row:
+                return
+            self.approvals.decide(str(row["request_id"]), "rejected",
+                                  by="system", note="", reason=reason)
+            self._log("info", f"取消时结清待批：{reason}", task_id=task_id)
+        except Exception as e:  # noqa: BLE001
+            self._logger.log("warning", "取消时结清待批失败",
+                             task_id=task_id, error=str(e))
 
     def resume(self, task_id: str) -> bool:
         """恢复暂停的任务（从断点续传）。
