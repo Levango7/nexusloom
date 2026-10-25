@@ -98,10 +98,10 @@
 | # | 功能 | 为什么是产品级缺口 | 验收判据 |
 |---|---|---|---|
 | A1 | **审批跨重启 + 待办收件箱** | "人审"是交付型产品的核心；现在重启后闸门永远无法放行（`approve()` 只查内存）。这是把差异化做成一次性演示 | 杀进程重启后 `POST /tasks/{id}/approve` 成功；跨进程两实例可见同一待办；真 PG 同样通过 |
-| A2 | **交付物浏览器（Deliveries）** | `deliveries.db` 已经在记，但用户看不到；交付物的 checksum/来源节点/保留期才是"可验收"的实体 | `GET /api/artifacts?principal=&workflow=` 真 HTTP；UI 可下载并显示 sha256 与产出节点；被淘汰运行仍可查 |
+| A2 | **交付物浏览器（Deliveries）** | `deliveries.db` 已经在记，但用户看不到；交付物的 checksum/来源节点/保留期才是"可验收"的实体 | `GET /api/artifacts?principal=&workflow=` 真 HTTP；UI 可下载并显示 sha256 与产出节点；被淘汰运行仍可查 —— **2026-10-26 读侧已交付（续64）**：落的是 `GET /api/deliveries` 与 `GET /api/deliveries/<run_id>`（真 HTTP 判据、逐行按投影裁决可见性），没另起 `/api/artifacts`——账本行本身就是交付记录，产物键挂在节点上。**未做**：sha256/保留期（要写侧与 A6 一起）、UI 下载呈现（前端批） |
 | A3 | **类型化输入（JSON Schema）** | 现在 inputs 是"文件路径/## 键文档"，无法校验、无法生成表单、无法计费预估；这是所有触发面的共同入口 | `pipeline.inputs` schema 在提交时校验（CLI/HTTP/MCP 同一实现）；非法输入 400 且错误字段可定位；UI 依 schema 生成表单 |
 | A4 | **`loom demo` 60 秒离线体验** | 现在"快速开始"要装 requirements + 网络 + Key；新用户在第一步流失 | 干净 venv 里 `pip install nexusloom && loom demo` 产出一份 docx + 质量报告 + 账本记录，全程无网络无 Key |
-| A5 | **可复现性的人话呈现** | 锁文件是差异化，但用户只看到"拒绝执行" | Run 详情显示 `topology_hash/config_hash` 与"本次与上次的差异项"；`loom plan --diff` 输出人话 |
+| A5 | **可复现性的人话呈现** | 锁文件是差异化，但用户只看到"拒绝执行" | Run 详情显示 `topology_hash/config_hash` 与"本次与上次的差异项"；`loom plan --diff` 输出人话 —— **2026-10-26 半交付（续64）**：`GET /api/locks` 把"拒绝执行"变成逐条可读的问题表（`matches` 三值 + `issues` 带两侧哈希），且巡检与执行共用同一处锁解析。**做不到的那一半要说清**："本次运行用的锁对不对"无法回答——`config_hash`/`topology_hash` 在校验那一瞬只存在于内存，从未落库，所以响应带 `scope: "current files"`，不拿今天的值冒充当时的证据。要补就得动交付载荷（写侧，只惠及今后的运行）——那是一次独立决策，不在本批 |
 | A6 | **保留期与 GC** | 队列/cost/quality/checkpoint 全部无界；`cleanup()` 从未被调度 | 维护循环按配置删除过期运行（含 events/artifacts/cost）；重启后仍执行；判据用假时钟 |
 | A7 | **Python 客户端 SDK** | 集成方现在只能裸 HTTP/MCP | `LoomClient`（submit/status/wait/artifacts/approve）与 OpenAPI 同源；集成测试走真 HTTP |
 
@@ -245,7 +245,10 @@
 ### P1（3–4 周）：把"交付"做成一等对象
 6. RunStore + EventLog 迁移（先 approvals/artifacts/list_runs，再 events；双写期 parity 测试）。
 7. 类型化输入（A3）+ `POST /api/workflows/{name}/runs`。
-8. Deliveries 浏览器（A2）+ 锁指纹差异呈现（A5）。
+8. Deliveries 浏览器（A2）+ 锁指纹差异呈现（A5）。—— **2026-10-26 本项按"读端点"收口**：
+   `GET /api/deliveries`、`GET /api/deliveries/<run_id>`、`GET /api/locks` 三个只读口 + 22 条
+   真 HTTP 判据入库（续64）。剩下两半都要先拍板再动：A2 的 sha256/保留期要跟 A6（GC）
+   一起做，A5 的"逐运行指纹"要在交付载荷里加一个键（写侧改动，且只对今后的运行有效）。
 9. 排程租约 + DLQ 重放 + 保留期 GC（A6/B4）。
 10. Python SDK（A7）。
 

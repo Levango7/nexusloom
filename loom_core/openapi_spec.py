@@ -343,6 +343,33 @@ def _ops_paths() -> dict:
                 "responses": {"200": {"description": "待批列表"}},
             },
         },
+        "/api/deliveries": {
+            "get": {
+                "summary": "交付账本最近若干条（带投影健康位；非 admin 只看投影归属自己的行）",
+                "parameters": [{"name": "limit", "in": "query", "required": False,
+                               "schema": {"type": "integer"}}],
+                "responses": {"200": {"description": "交付列表"},
+                              "503": {"description": "账本读不动"}},
+            },
+        },
+        "/api/deliveries/{run_id}": {
+            "get": {
+                "summary": "单条交付的完整结构化载荷（逐节点状态/耗时/产物键）",
+                "parameters": [{"name": "run_id", "in": "path", "required": True,
+                               "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "交付明细"},
+                              "404": {"description": "账本里没有这条，或不属于你（同一个答案）"}},
+            },
+        },
+        "/api/locks": {
+            "get": {
+                "summary": "锁巡检。scope=current files：比的是当前 YAML 与当前锁，"
+                           "不是某次运行时用的锁（运行时的指纹没有落库）",
+                "parameters": [{"name": "pipeline", "in": "query", "required": False,
+                               "schema": {"type": "string"}}],
+                "responses": {"200": {"description": "逐流水线的漂移问题表"}},
+            },
+        },
         "/api/dashboard": {
             "get": {
                 "summary": "Dashboard 聚合数据（任务含 progress/steps + Agent 摘要；任务按 principal 过滤）",

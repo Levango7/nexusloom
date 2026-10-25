@@ -127,6 +127,31 @@ curl -X POST http://127.0.0.1:8910/api/cache/clear \
 **409** + `{"error": "..."}`——审批是决策动作，"没等在闸门上的批准"必须被拒而不是记 false
 （否则审计里会出现无中生有的决策）。
 
+### 交付账本 / 锁巡检（只读）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/deliveries` | 最近交付，`?limit=`（默认 50，夹到 200）；响应 `deliveries[]` + `count` / `truncated` / `scope` |
+| GET | `/api/deliveries/{run_id}` | 单条交付的完整载荷：`nodes[]`（`node` / `agent` / `status` / `attempts` / `duration_sec` / `error` / `artifact_keys`）+ `plan_id` / `input_file` |
+| GET | `/api/locks` | 逐流水线锁巡检，`?pipeline=<name>` 只看一条；响应 `pipelines[]` + `drifted[]` + `scope` |
+
+每行交付都带 `projection`（`complete` / `incomplete` / `legacy` / `unknown`）——它是
+`GET /api/deliveries` 与补账命令之间唯一的接头：看见 `incomplete` 才去
+`POST` 不了、只能走 CLI 的 `python run.py --replay-run <run_id>`。**能不能补由补账工具判**，
+HTTP 侧不复制那条规则（两处判据一定会分叉）。
+
+两条口径必须随端点一起写，否则响应会被读成别的含义：
+
+- `GET /api/locks` 的 `scope` 恒为 `"current files"`：比的是**当前 YAML 与当前锁**，
+  不是"某次运行时用的锁"。运行时的 `config_hash` / `topology_hash` 从未落库，那件事今天
+  无法证据化，这里不拿当前值冒充当时。`matches` 是三值——`true` 比过且一致、`false` 漂移
+  （`issues` 逐条给差在哪，含 `lock=` / `当前=` 两个哈希）、`null` 没有锁可比或 YAML 解析失败。
+  `lock_present: false` 的行**不进** `drifted`：缺锁不是漂移。
+- 交付账本表里没有归属列，所以非 admin 的可见性逐行反查投影的 `principal`：CLI 直跑、
+  投影里查无此运行的行 `projection` 报 `unknown` 且只有 admin 可见。越权与不存在给**同一个
+  404**（存在性本身就是信息）；账本读不动给 **503** `{"error": "deliveries unavailable"}`，
+  不降级成 200 空列表——把"读不到"报成"没有交付"是最难被发现的那类假绿。
+
 ---
 
 实现位置：全部端点（含 `/api/*` 扩展）在 `loom_core/admin_api.py`（`AdminHandler` 路由分发）。
