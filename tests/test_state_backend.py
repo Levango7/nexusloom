@@ -194,7 +194,10 @@ class TestPostgresTaskQueue:
         q.complete(tid)
         row = q.get(tid)
         assert row["status"] == "done"
-        assert row["result"]["ok"] is True
+        # Stage 3b 摘写之后这条判据在 PG 方言下要读的是健康位，不是结果正文：
+        # "列存在 + COALESCE 读得出"只有真 PG 腿能证明（本机没设 LOOM_TEST_PG_URL 会跳过）。
+        assert "result" not in row, "PG 方言下队列又开始 SELECT 结果正文"
+        assert row["projection"] == "ok"
         assert row["worker_id"] == "w-pg"
         q.close_all()
 

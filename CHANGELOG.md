@@ -91,6 +91,16 @@ worker 端到端那条从"结果没写回队列就查不到产出"改成"兜底�
 M5 是本批唯一"由实测反推出来"的变异：第一版 `projection()` 把 `record()` 放在标记之前，
 注入 `close_run` 失败后仍返回 `complete`——顺序错了等于没有这个读维，所以把它钉成判据。
 
+**还有一条红是 CI 抓回来的，本机看不见**：`tests/test_state_backend.py::
+TestPostgresTaskQueue::test_submit_acquire_complete_principal` 原先断言 `row["result"]["ok"]
+is True`，我改了 `complete()` 的调用却漏改这条断言 ⇒ `KeyError: 'result'`。本机全量抓不到它，
+因为 `LOOM_TEST_PG_URL` 未设时整个类按 `requires_pg` 跳过；而 ci.yml 的 PG service 与该 env 写在
+**job 级**（四条 Python 腿 `3.11/3.12/3.13/3.14` 都带 `postgres:16-alpine`），所以四条腿同时红
+在同一条用例上——不是某条腿的环境差异。改成钉新契约（PG 方言下队列同样不再 SELECT 结果正文、
+`projection` 读得出），复核方式是本机临时起一个与 CI 同镜像同库名的 `postgres:16-alpine`、带
+`LOOM_TEST_PG_URL` 跑这一个文件（18 条全绿）后立刻删容器。**"摘写"的射程取决于有没有跑 PG 腿，
+不在于测试文件有没有被改过**——全仓 PG 门控只有这一个文件，改队列就必须把它跑一遍。
+
 ### Added（2026-10-23·续61，RunStore Stage 3a：审批的事实源换成 runs.db 的投影 + 事件）
 
 - **审批摘写**：待批登记、决策、消费不再写 `approvals.db`，改为写 `runs.db` 的
