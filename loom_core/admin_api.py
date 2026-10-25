@@ -1815,6 +1815,38 @@ class AdminHandler(BaseHTTPRequestHandler):
         item["nodes"] = [n for n in (rec.get("nodes") or []) if isinstance(n, dict)]
         self._json({"delivery": item})
 
+    #: 全量锁巡检要解析每一条流水线：本机实测（Python 3.14.3、单进程、无并发负载）
+    #: 19 条 = 冷 7.27s / 再跑一遍 11.23s。监控是**轮询**的，每次轮询付这个钱既不
+    #: 合理也必然超时，所以按 (yaml, lock) 的 (mtime_ns, size) 记忆单条结论——
+    #: 文件没动就复用，动过立刻重算；`scope: current files` 的语义不变。
+    #: 带 `?pipeline=` 的显式单条**不读缓存**（"我刚改了，现在到底对不对"是那一问的
+    #: 语义），它只多付一条的解析。
+    _LOCKS_SURVEY_CACHE: dict[str, tuple[tuple, dict]] = {}
+
+    @staticmethod
+    def _stamp(path: Path) -> tuple[int, int]:
+        try:
+            st = path.stat()
+        except OSError:
+            return (0, 0)
+        return (int(st.st_mtime_ns), st.st_size)
+
+    @staticmethod
+    def _lock_entry(sched, name: str, yaml_path: Path, source_dir: Path) -> dict:
+        try:
+            plan = sched.parse_file(str(yaml_path), verify_lock=False)
+            drift = sched.lock_drift(plan, source_dir=source_dir)
+            # 三值而不是布尔：`matches: true` 要说的是"比过且一致"，
+            # 没有锁可比时给 true 等于把"没发现问题"和"没法判断"混成一件事。
+            return {"pipeline": name,
+                    "lock_file": Path(drift["lock_file"]).name,
+                    "lock_present": drift["lock_present"],
+                    "matches": (not drift["issues"]) if drift["lock_present"] else None,
+                    "issues": list(drift["issues"])}
+        except Exception as e:  # noqa: BLE001 —— 解析炸了也要报，别把一条拖成全口 500
+            return {"pipeline": name, "lock_file": "", "lock_present": None,
+                    "matches": None, "issues": [f"解析失败: {e}"]}
+
     def _handle_locks(self):
         """`GET /api/locks[?pipeline=<name>]`：**当前文件 vs 当前锁**的漂移巡检。
 
@@ -1830,6 +1862,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         wanted = (parse_qs(urlparse(self.path).query).get("pipeline") or [""])[0]
         entries: list[dict] = []
         seen: set[str] = set()
+        cached_hits = 0
         for d in pipeline_dirs():
             if not d.is_dir():
                 continue
@@ -1839,23 +1872,23 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if name in seen or (wanted and name != wanted):
                     continue
                 seen.add(name)
-                try:
-                    plan = sched.parse_file(str(d / f"{name}.yaml"), verify_lock=False)
-                    drift = sched.lock_drift(plan, source_dir=d)
-                    # 三值而不是布尔：`matches: true` 要说的是"比过且一致"，
-                    # 没有锁可比时给 true 等于把"没发现问题"和"没法判断"混成一件事。
-                    entry = {"pipeline": name,
-                             "lock_file": Path(drift["lock_file"]).name,
-                             "lock_present": drift["lock_present"],
-                             "matches": (not drift["issues"]) if drift["lock_present"] else None,
-                             "issues": list(drift["issues"])}
-                except Exception as e:  # noqa: BLE001 —— 解析炸了也要报，别把一条拖成全口 500
-                    entry = {"pipeline": name, "lock_file": "", "lock_present": None,
-                             "matches": None, "issues": [f"解析失败: {e}"]}
+                yaml_path = d / f"{name}.yaml"
+                key = (str(d), self._stamp(yaml_path),
+                       self._stamp(sched.resolve_lock_path(name, source_dir=d)))
+                if not wanted:
+                    hit = AdminHandler._LOCKS_SURVEY_CACHE.get(name)
+                    if hit is not None and hit[0] == key:
+                        cached_hits += 1
+                        entries.append(hit[1])
+                        continue
+                entry = self._lock_entry(sched, name, yaml_path, d)
+                if not wanted:
+                    AdminHandler._LOCKS_SURVEY_CACHE[name] = (key, entry)
                 entries.append(entry)
         if wanted and not entries:
             return self._json({"error": "pipeline not found"}, 404)
         self._json({"scope": "current files", "pipelines": entries, "count": len(entries),
+                    "cached": cached_hits,
                     "drifted": [e["pipeline"] for e in entries if e.get("matches") is False]})
 
     def _handle_pipeline(self):

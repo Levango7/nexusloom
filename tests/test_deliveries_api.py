@@ -114,12 +114,12 @@ def _start(orch, tokens_file: str):
     return f"http://127.0.0.1:{port}", api
 
 
-def _req(method: str, url: str, token: str | None = None):
+def _req(method: str, url: str, token: str | None = None, timeout: float = 20.0):
     req = urllib.request.Request(url, method=method)
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         raw = e.read().decode()
@@ -285,9 +285,25 @@ class TestDeliveriesHTTP:
 # ─── 2. 锁巡检 ────────────────────────────────────────
 
 class TestLocksHTTP:
+    """`/api/locks` 的判据。
+
+    巡检缓存挂在类上（跨请求复用），所以每条判据前后都要清——否则上一条的
+    结论会串到下一条，尤其是"同一批文件名、不同内容"的两份 lock。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_survey_cache(self):
+        AdminHandler._LOCKS_SURVEY_CACHE.clear()
+        yield
+        AdminHandler._LOCKS_SURVEY_CACHE.clear()
+
+    def _locks(self, base, query: str = ""):
+        """全量巡检要解析 19 条流水线（本机实测冷 7.27s / 再跑 11.23s），给足预算。"""
+        return _req("GET", f"{base}/api/locks{query}", TOK_OPS, timeout=120.0)
+
     def test_scope_is_current_files_and_covers_every_core_pipeline(self, served):
         base, _orch = served
-        code, body = _req("GET", f"{base}/api/locks", TOK_OPS)
+        code, body = self._locks(base)
         assert code == 200, body
         assert body["scope"] == "current files", "口径字段不能被顺手删掉"
         names = {e["pipeline"] for e in body["pipelines"]}
@@ -311,7 +327,7 @@ class TestLocksHTTP:
                         encoding="utf-8")
         import loom_core.pack_manifest as pm
         monkeypatch.setattr(pm, "pipeline_dirs", lambda: [d])
-        code, body = _req("GET", f"{base}/api/locks", TOK_OPS)
+        code, body = self._locks(base)
         assert code == 200, body
         entry = next(e for e in body["pipelines"] if e["pipeline"] == "drift")
         assert entry["lock_present"] is True and entry["matches"] is False, entry
@@ -327,7 +343,7 @@ class TestLocksHTTP:
         (d / "nolock.yaml").write_text(PLAIN_YAML, encoding="utf-8")
         import loom_core.pack_manifest as pm
         monkeypatch.setattr(pm, "pipeline_dirs", lambda: [d])
-        code, body = _req("GET", f"{base}/api/locks", TOK_OPS)
+        code, body = self._locks(base)
         entry = next(e for e in body["pipelines"] if e["pipeline"] == "nolock")
         assert entry["lock_present"] is False, entry
         assert entry["matches"] is None, entry
@@ -341,7 +357,7 @@ class TestLocksHTTP:
         (d / "bad.yaml").write_text("agents: [ {", encoding="utf-8")
         import loom_core.pack_manifest as pm
         monkeypatch.setattr(pm, "pipeline_dirs", lambda: [d])
-        code, body = _req("GET", f"{base}/api/locks", TOK_OPS)
+        code, body = self._locks(base)
         assert code == 200, body
         entry = next(e for e in body["pipelines"] if e["pipeline"] == "bad")
         assert entry["matches"] is None and entry["issues"], entry
@@ -349,11 +365,60 @@ class TestLocksHTTP:
 
     def test_pipeline_filter_narrows_and_unknown_name_404s(self, served):
         base, _orch = served
-        code, body = _req("GET", f"{base}/api/locks?pipeline=three_pass", TOK_OPS)
+        code, body = self._locks(base, "?pipeline=three_pass")
         assert code == 200 and [e["pipeline"] for e in body["pipelines"]] == ["three_pass"], body
-        code, body = _req("GET", f"{base}/api/locks?pipeline=no-such-pipeline", TOK_OPS)
+        code, body = self._locks(base, "?pipeline=no-such-pipeline")
         assert code == 404, body
 
+    def _tmp_pipeline_dir(self, tmp_path, monkeypatch, name="cachecheck"):
+        """巡检的两条缓存判据都跑在临时目录的真文件上。
+
+        不拿 `pipelines/*.lock` 做试验品：测试被打断（Ctrl+C / 超时 kill）时
+        finally 不会执行，那会把一条随包流水线的锁留在脏状态。
+        """
+        d = tmp_path / f"cachedir_{name}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{name}.yaml").write_text(PLAIN_YAML, encoding="utf-8")
+        import loom_core.pack_manifest as pm
+        monkeypatch.setattr(pm, "pipeline_dirs", lambda: [d])
+        return d, name
+
+    def test_repeat_poll_is_served_from_the_file_stamps(self, served, tmp_path,
+                                                        monkeypatch):
+        """轮询不重复付解析钱——但复用绑在文件时间戳上，不是绑在 TTL 上。
+
+        断言的是语义计数（`cached`），不是墙钟：拿耗时当判据在负载轮里一定会假红。
+        """
+        base, _orch = served
+        d, name = self._tmp_pipeline_dir(tmp_path, monkeypatch)
+        _code, first = self._locks(base)
+        assert first["cached"] == 0, "冷启动第一遍就该全量解析，报 cached>0 是假复用"
+        _code, second = self._locks(base)
+        assert second["count"] == 1 and second["cached"] == 1, second
+        # 文件动一个字节 ⇒ 那一条必须重算（缓存不能把"我改了锁"吞掉）
+        (d / f"{name}.lock").write_text(json.dumps({"pipeline": name,
+                                                   "topology_hash": "0" * 12,
+                                                   "agents": {}}), encoding="utf-8")
+        _code, third = self._locks(base)
+        assert third["cached"] == 0, "新建了锁文件还命中旧缓存 = 巡检在读旧事实"
+        entry = third["pipelines"][0]
+        assert entry["lock_present"] is True and entry["matches"] is False, entry
+
+    def test_explicit_single_ask_never_reads_the_cache(self, served, tmp_path,
+                                                       monkeypatch):
+        """`?pipeline=` 的语义是"我刚改了，现在对不对"——读缓存就是另一个答案了。"""
+        base, _orch = served
+        d, name = self._tmp_pipeline_dir(tmp_path, monkeypatch, "singlecheck")
+        _code, primed = self._locks(base)          # 先灌满缓存（此刻还没有锁）
+        assert primed["cached"] == 0 and primed["pipelines"][0]["lock_present"] is False
+        (d / f"{name}.lock").write_text(json.dumps({"pipeline": name,
+                                                   "topology_hash": "a" * 12,
+                                                   "agents": {}}), encoding="utf-8")
+        _code, single = self._locks(base, f"?pipeline={name}")
+        entry = single["pipelines"][0]
+        assert single["cached"] == 0, "显式单条问了还报缓存命中"
+        assert entry["lock_present"] is True and entry["matches"] is False, entry
+        assert entry["issues"], "改了锁要给出差在哪，不只是给个 false"
 
 # ─── 3. 解析规则只有一处（执行侧与巡检侧共用）─────────────
 
@@ -395,11 +460,10 @@ class TestLockResolutionParity:
         pack = self._dir(tmp_path)
         central = tmp_path / "central"
         central.mkdir()
-        plan = self._sched(pack).parse_file(str(pack / "p.yaml"), verify_lock=False)
         (pack / "p.lock").write_text(json.dumps({"pipeline": "p"}), encoding="utf-8")
         sched = self._sched(central)
-        assert sched.resolve_lock_path(plan, source_dir=pack) == pack / "p.lock"
-        assert sched.resolve_lock_path(plan) == central / "p.lock"
+        assert sched.resolve_lock_path("p", source_dir=pack) == pack / "p.lock"
+        assert sched.resolve_lock_path("p") == central / "p.lock"
 
 
 # ─── 4. 规范 ↔ handler：文档里的口要真能走到 ────────────────

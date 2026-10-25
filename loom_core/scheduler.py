@@ -331,7 +331,7 @@ class Scheduler:
             self._verify_lock_after_parse(plan, source_dir=path.parent)
         return plan
 
-    def resolve_lock_path(self, plan: ExecutionPlan,
+    def resolve_lock_path(self, pipeline_name: str,
                           source_dir: Path | None = None) -> Path:
         """这条流水线该用哪个锁文件——**唯一一处解析**，执行侧抛错与读侧巡检共用。
 
@@ -339,13 +339,15 @@ class Scheduler:
         旧布局（集中式 pipelines/ + Scheduler.pipeline_dir）退回查找；
         parse()（按名解析）没有源路径信息，仍走 pipeline_dir。
         没有锁也返回"它该在的位置"：巡检要把"没锁"当成一个事实报出来，而不是抛。
+        按名字解析（不需要 plan）是因为读侧要能在**还没解析流水线**之前就问到锁的
+        时间戳——巡检的缓存键就建在这两个 stamp 上。
         """
         candidates = [source_dir] if source_dir else []
         candidates.append(self.pipeline_dir)
         return next(
-            (d / f"{plan.pipeline_name}.lock" for d in candidates
-             if (d / f"{plan.pipeline_name}.lock").is_file()),
-            candidates[-1] / f"{plan.pipeline_name}.lock",
+            (d / f"{pipeline_name}.lock" for d in candidates
+             if (d / f"{pipeline_name}.lock").is_file()),
+            candidates[-1] / f"{pipeline_name}.lock",
         )
 
     def lock_drift(self, plan: ExecutionPlan, source_dir: Path | None = None) -> dict:
@@ -355,7 +357,7 @@ class Scheduler:
         `LockfileMismatchError`），运维侧要的是"哪条流水线漂了、漂在哪"。同一个判据
         不能写两遍——解析规则一旦分叉，巡检就会报出执行时根本不会发生的漂移。
         """
-        lock_path = self.resolve_lock_path(plan, source_dir)
+        lock_path = self.resolve_lock_path(plan.pipeline_name, source_dir)
         if not lock_path.is_file():
             return {"lock_file": str(lock_path), "lock_present": False, "issues": []}
         return {"lock_file": str(lock_path), "lock_present": True,

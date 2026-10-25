@@ -71,19 +71,19 @@ ANCHORS = [
     ("loom_core/admin_api.py", 1065, "list_runs"),
     ("loom_core/admin_api.py", 1364, "def _task_checkpoint_view"),
     ("loom_core/admin_api.py", 1669, "list_runs"),
-    ("loom_core/admin_api.py", 2122, "list_runs"),
-    ("loom_core/admin_api.py", 2486, "run_plan_async"),
-    ("loom_core/admin_api.py", 2555, "get_callback"),
+    ("loom_core/admin_api.py", 2156, "list_runs"),
+    ("loom_core/admin_api.py", 2520, "task = _aio.run(orch.run_plan_async("),
+    ("loom_core/admin_api.py", 2589, "existing_callback = get_callback(task_id)"),
     # #8：账本与锁的只读 HTTP 面。三条 handler 进表，"文档教了这三个口"才在代码里
     # 有对应物（`test_doc_consistency` 只把文档对到 openapi 规范，规范和 handler
     # 之间没人守——这条就是补那段距离的）。
     ("loom_core/admin_api.py", 1775, "def _handle_deliveries"),
     ("loom_core/admin_api.py", 1793, "def _handle_delivery_detail"),
-    ("loom_core/admin_api.py", 1818, "def _handle_locks"),
+    ("loom_core/admin_api.py", 1850, "def _handle_locks"),
     # 锁路径解析只留一处：巡检口（`lock_drift`）与执行口（`_verify_lock_after_parse`）
     # 各自解析一次就会报出执行时根本不会发生的漂移。
     ("loom_core/scheduler.py", 334, "def resolve_lock_path"),
-    ("loom_core/scheduler.py", 351, "def lock_drift"),
+    ("loom_core/scheduler.py", 353, "def lock_drift"),
     # 账本的读口：`list` 在本批之前**没有任何生产调用者**（只有测试读它）。
     ("loom_core/deliveries.py", 99, "def list(self, limit"),
 ]
