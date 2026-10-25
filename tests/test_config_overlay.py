@@ -274,31 +274,32 @@ print(json.dumps({{"error": err}}))
 '''
 
     def test_two_processes_writing_different_keys_both_land(self, state_dir, tmp_path):
-        """两个真进程并发写不同键：都成功，且两个键都留在文件里。"""
-        script = tmp_path / "cas_child.py"
-        script.write_text(self.CHILD_SRC.format(key="a.k", value=1), encoding="utf-8")
-        script_b = tmp_path / "cas_child_b.py"
-        script_b.write_text(self.CHILD_SRC.format(key="b.k", value=2), encoding="utf-8")
-        procs = [
-            subprocess.Popen(
+        """真进程并发写不同键：都成功，且所有键都留在文件里。
+
+        用 4 个进程而不是 2 个——CI 上 2 进程时抓到过"验证通过后被覆盖"
+        的竞态（P1 读回验证通过 → P2 才写同 revision 覆盖 → 最终只剩
+        一个键）。文件锁（`_overlay_file_lock`）把读-改-写-读回串行化后，
+        无论几个进程并发，键一个都不会丢。
+        """
+        jobs = [("a.k", 1), ("b.k", 2), ("c.k", 3), ("d.k", 4)]
+        procs = []
+        for key, value in jobs:
+            script = tmp_path / f"cas_child_{key.replace('.', '_')}.py"
+            script.write_text(self.CHILD_SRC.format(key=key, value=value),
+                              encoding="utf-8")
+            procs.append(subprocess.Popen(
                 [sys.executable, str(script)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                env={**os.environ, "PYTHONPATH": str(PROJECT)}),
-            subprocess.Popen(
-                [sys.executable, str(script_b)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                env={**os.environ, "PYTHONPATH": str(PROJECT)}),
-        ]
+                env={**os.environ, "PYTHONPATH": str(PROJECT)}))
         try:
-            out_texts = []
             for p in procs:
-                out, err = p.communicate(timeout=120)
+                out, err = p.communicate(timeout=180)
                 assert p.returncode == 0, err[-800:]
                 assert json.loads(out.strip())["error"] is None
-                out_texts.append(out)
             overlay = _overlay(state_dir)
-            assert overlay["values"] == {"a.k": 1, "b.k": 2}, overlay
-            assert overlay["revision"] == 2, overlay
+            expected = {key: value for key, value in jobs}
+            assert overlay["values"] == expected, overlay
+            assert overlay["revision"] == len(jobs), overlay
         finally:
             for p in procs:
                 if p.poll() is None:

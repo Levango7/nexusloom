@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -48,6 +49,71 @@ def _read_overlay(path: Path) -> tuple[dict, int, str]:
     except (TypeError, ValueError):
         return {}, 0, "overlay revision 不是整数"
     return values, revision, ""
+
+
+@contextlib.contextmanager
+def _overlay_file_lock(path: Path, timeout: float = 15.0):
+    """跨进程文件锁——CAS 的读-改-写-读回必须**整体**串行化。
+
+    为什么需要它（CI 抓到的真竞态，本地没暴露）：没有锁时两个进程可以
+    这样交错——P1 写 rev1{a.k} → P1 读回验证通过（那一刻文件确实是 P1 的）
+    → P2 写 rev1{b.k}（同 revision 整份覆盖）→ P2 读回通过。P1 的验证
+    已经过期，最终文件只剩 P2 的键，而**两边都报成功**。读回验证挡不住
+    "验证之后才发生的覆盖"——这正是文件锁存在的理由。
+
+    实现：POSIX 走 fcntl.flock；Windows 走 O_CREAT|O_EXCL 自旋锁，崩溃
+    留下的锁文件按 mtime 超 30s 判定陈旧并抢占（抢占有一个极小的双持有
+    窗口，与 git 锁文件同款取舍，照实写在这里，不装作没有）。
+    """
+    lock_path = path.with_name(path.name + ".lock")
+    try:
+        import fcntl
+    except ImportError:
+        # Windows：O_EXCL 自旋
+        deadline = time.time() + timeout
+        fd = None
+        while True:
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except FileExistsError:
+                try:
+                    age = time.time() - lock_path.stat().st_mtime
+                except OSError:
+                    age = timeout + 1
+                if age > 30:
+                    with contextlib.suppress(OSError):
+                        os.unlink(lock_path)
+                    continue
+                if time.time() > deadline:
+                    raise TimeoutError(
+                        f"配置覆写锁等待超时（{timeout}s）：{lock_path}") from None
+                time.sleep(0.02)
+        try:
+            yield
+        finally:
+            os.close(fd)
+            with contextlib.suppress(OSError):
+                os.unlink(lock_path)
+        return
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    deadline = time.time() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.time() > deadline:
+                os.close(fd)
+                raise TimeoutError(
+                    f"配置覆写锁等待超时（{timeout}s）：{lock_path}") from None
+            time.sleep(0.02)
+    try:
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _write_overlay(path: Path, revision: int, values: dict) -> str | None:
@@ -256,7 +322,20 @@ class ConfigCenter:
         写后必须读回：revision 与 values 都与写入时一致才算成功；不一致
         说明有进程抢跑，**重读重写**（下一轮读到的是抢跑者的新值，把己方
         键并进去再写——所有键最终都落在文件里）。重试仍冲突则如实报错。
+
+        **整段在跨进程文件锁内执行**（`_overlay_file_lock`）：读回验证挡不住
+        "验证之后才发生的覆盖"——CI 上两进程并发写不同键实测抓到过这条
+        （P1 验证通过后 P2 才覆盖，最终文件只剩一个键）。锁把读-改-写-读回
+        串行化，覆盖竞态从机制上消失。
         """
+        try:
+            with _overlay_file_lock(self._overlay_path):
+                return self._cas_write(key, value)
+        except TimeoutError as e:
+            return f"配置覆写锁等待超时：{e}"
+
+    def _cas_write(self, key: str, value) -> str | None:
+        """CAS 写循环本体（持文件锁调用）。"""
         for _attempt in range(CAS_MAX_RETRIES):
             values, revision, error = _read_overlay(self._overlay_path)
             if error:
@@ -285,25 +364,34 @@ class ConfigCenter:
         用于配置文件被外部改动后的人工 reload：本进程 reload() 之外，也要
         把"重新读一次"这件事广播给其他进程。返回 None = 已广播。
         与 `_write_overlay_with` 同一套 CAS：写后读回验证，冲突重读重写
-        （广播"重读"不能被并发发布抢掉——抢跑者的值才是文件里最新的值）。
+        （广播"重读"不能被并发发布抢掉——抢跑者的值才是文件里最新的值），
+        同样整体在跨进程文件锁内执行。
         """
         with self._lock:
-            for _attempt in range(CAS_MAX_RETRIES):
-                values, revision, error = _read_overlay(self._overlay_path)
-                if error:
-                    return error
-                new_rev = revision + 1
-                err = _write_overlay(self._overlay_path, new_rev, values)
-                if err:
-                    return err
-                back_values, back_rev, back_err = _read_overlay(self._overlay_path)
-                if back_err:
-                    return back_err
-                if back_rev == new_rev and back_values == values:
-                    self._overlay_revision = new_rev
-                    return None
-            return (f"配置发布冲突（{CAS_MAX_RETRIES} 次重试后仍有并发推进；"
-                    "请稍后重试）")
+            try:
+                with _overlay_file_lock(self._overlay_path):
+                    return self._cas_publish()
+            except TimeoutError as e:
+                return f"配置发布锁等待超时：{e}"
+
+    def _cas_publish(self) -> str | None:
+        """发布循环本体（持文件锁调用）。"""
+        for _attempt in range(CAS_MAX_RETRIES):
+            values, revision, error = _read_overlay(self._overlay_path)
+            if error:
+                return error
+            new_rev = revision + 1
+            err = _write_overlay(self._overlay_path, new_rev, values)
+            if err:
+                return err
+            back_values, back_rev, back_err = _read_overlay(self._overlay_path)
+            if back_err:
+                return back_err
+            if back_rev == new_rev and back_values == values:
+                self._overlay_revision = new_rev
+                return None
+        return (f"配置发布冲突（{CAS_MAX_RETRIES} 次重试后仍有并发推进；"
+                "请稍后重试）")
 
     @property
     def revision(self) -> int:
