@@ -30,6 +30,7 @@ pipeline:
       depth: {type: int, minimum: 1, maximum: 5, default: 3}
       tags: {type: list, items: {type: str}}
       mode: {enum: [fast, full]}
+      stage: {type: str, enum: [draft, final]}
       spec:
         type: dict
         required: [region]
@@ -56,6 +57,7 @@ BARE_YAML = DEMO_YAML.replace("""  inputs:
       depth: {type: int, minimum: 1, maximum: 5, default: 3}
       tags: {type: list, items: {type: str}}
       mode: {enum: [fast, full]}
+      stage: {type: str, enum: [draft, final]}
       spec:
         type: dict
         required: [region]
@@ -85,7 +87,7 @@ class TestDeclarationPhase:
     def test_plan_carries_the_declaration(self, plan):
         assert plan.inputs_schema, "解析没把 pipeline.inputs 带进 plan——提交口就无源可校验"
         props = plan.inputs_schema["properties"]
-        assert sorted(props) == ["depth", "mode", "spec", "tags", "topic"]
+        assert sorted(props) == ["depth", "mode", "spec", "stage", "tags", "topic"]
         assert plan.inputs_schema["additionalProperties"] is False
 
     def test_missing_declaration_is_not_an_error(self, tmp_path):
@@ -166,6 +168,17 @@ class TestValueValidation:
         """类型都不对，别再为同一字段叠一串无关话术。"""
         errors = ins.validate_inputs(plan.inputs_schema, {"topic": 12345})
         assert len(errors) == 1, errors
+
+    def test_wrong_type_does_not_stack_the_enum_error(self, plan):
+        """短路的**射程**在这里：`stage` 同时声明了 type 与 enum。
+
+        上一轮变异电池抓到的零射程判据——原短路用例只带 `type` 的字段，把"类型不符后
+        继续查 enum"的变异换成 `pass` 也一样只报一条，等于没在验那件事。整数撞
+        `enum: [draft, final]` 必然落不进枚举，所以不短路就会在同一字段上多冒一条。
+        """
+        errors = ins.validate_inputs(plan.inputs_schema, {"topic": "ok", "stage": 7})
+        assert [e["field"] for e in errors] == ["stage"], errors
+        assert "期望 str" in errors[0]["reason"], errors
 
     def test_multiple_failures_are_all_listed(self, plan):
         errors = ins.validate_inputs(plan.inputs_schema, {"depth": 9, "mode": "slow"})
