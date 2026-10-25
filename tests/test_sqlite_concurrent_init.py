@@ -101,7 +101,7 @@ class TestConcurrentFirstInit:
             assert queue.submit("t-after", "api-report", "in.md", {})
             item = queue.acquire(worker_id="post")
             assert item and item["task_id"] == "t-after"
-            queue.complete("t-after", result={"ok": True})
+            queue.complete("t-after")
             assert queue.get("t-after")["status"] == "done"
         finally:
             queue.close_all()

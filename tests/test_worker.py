@@ -138,7 +138,10 @@ class TestRunOnce:
                                "owner": ""}]  # 队列条目无 principal（无身份世界）→ owner 空串
         row = q.get("t-e2e")
         assert row["status"] == "done"
-        assert row["result"], "结果没写回队列，API 侧就查不到产出"
+        # 这条替身 orchestrator 不跑引擎收尾，所以终态是 worker 兜底那句 finish 写的：
+        # 它对应"投影没盖章"，健康位必须留在 incomplete——否则缺投影的运行读起来
+        # 和正常运行一模一样，正是这批要消灭的静默形状。
+        assert row["projection"] == "incomplete", row
 
     def test_idle_worker_does_nothing(self, tmp_path):
         worker = _worker(tmp_path)
@@ -175,15 +178,20 @@ class TestCancelIsRespected:
         q.acquire(worker_id="w-x")
         q.cancel("t-cancel")
 
-        assert q.finish("t-cancel", "done", result={"writer": {"content": "x"}}) is False
+        assert q.finish("t-cancel", "done", projection="incomplete") is False
         assert q.get("t-cancel")["status"] == "cancelled"
+        assert q.get("t-cancel")["projection"] == "ok", "被跳过的 finish 不许改任何列"
 
     def test_finish_writes_when_still_running(self, tmp_path):
         q = _queue(tmp_path)
         q.submit("t-run", "test_pipeline", "input.md", {})
         q.acquire(worker_id="w-y")
-        assert q.finish("t-run", "done", result={"a": 1}) is True
-        assert q.get("t-run")["status"] == "done"
+        assert q.finish("t-run", "done", error="", projection="incomplete") is True
+        row = q.get("t-run")
+        assert row["status"] == "done" and row["projection"] == "incomplete"
+        assert q.set_projection("t-run", "ok") is True
+        assert q.get("t-run")["projection"] == "ok", "投影盖章后健康位要升格"
+        assert q.set_projection("t-nope", "ok") is False, "行不存在就是 False，不静默新建"
 
 
 class TestRunForever:

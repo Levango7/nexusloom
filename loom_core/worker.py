@@ -146,7 +146,9 @@ class TaskWorker:
             self.failed += 1
             self.log.error(f"任务 {task_id} 异常: {e}")
             # 收尾没跑成（崩溃在 _finalize 之前）时补写终态；取消过的行不动
-            self.queue.finish(task_id, "failed", error=str(e))
+            # —— 这条分支意味着引擎自己的投影盖章没跑到，标 incomplete 让缺口可见
+            self.queue.finish(task_id, "failed", error=str(e),
+                              projection="incomplete")
         else:
             self.processed += 1
             self.log.info(f"任务 {task_id} 结束，耗时 {time.time() - started:.1f}s")
@@ -178,9 +180,9 @@ class TaskWorker:
             # 标记只在这一次认领生效：失败重试/手动重跑不该再复用旧断点
             self.queue.clear_resume(task_id)
         # _finalize_plan_task 已经写过终态；这里只兜住它没跑到的分支
-        self.queue.finish(task_id, task.status.value,
-                          result=dict(task.result) if task.result else None,
-                          error=task.error)
+        # （行已是终态时 finish 返回 False，什么都不改）。兜到的那条同样缺投影盖章。
+        self.queue.finish(task_id, task.status.value, error=task.error,
+                          projection="incomplete")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

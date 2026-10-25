@@ -190,6 +190,17 @@ def _checkpoint_facts(orch: PipelineOrchestrator, task_id: str) -> dict:
     }
 
 
+def _projection_nodes(orch, task_id: str) -> list[str]:
+    """投影里这条运行的逐节点行（名字，已排序）。
+
+    Stage 3b 起这是节点结果**唯一**的权威位置：队列的 `result_json` 是第三份拷贝
+    且实测全仓无读者（`RunHandle`/`_queue_row` 只用 `status`），已停写。
+    """
+    store = orch._runstore()  # noqa: SLF001
+    assert store is not None, "前提：RunStore 可用，否则 parity 没有可比对象"
+    return sorted(n["node"] for n in store.nodes(task_id))
+
+
 class TestAsyncRegistersSameFacts:
     def test_async_and_sync_leave_the_same_run_facts(self, tmp_path):
         """同一份流水线：同步跑与异步跑的队列行与事件序列必须逐字段对得上。"""
@@ -215,7 +226,14 @@ class TestAsyncRegistersSameFacts:
                 for tid, row in rows.items():
                     assert row["status"] == "done", f"{tid} 队列行不是 done：{row}"
                     assert row["pipeline_name"] == plan_s.pipeline_name, row
-                    assert row["result"].get("tldr"), f"{tid} 队列行没带节点结果：{row}"
+                    # 节点结果正文从队列挪到投影来比（队列那一列已停写，见 helper）
+                    assert row["projection"] == "ok", (
+                        f"{tid} 投影终态盖了却没升格，读起来像缺投影：{row}")
+                names_s = _projection_nodes(sync_orch, "parity_sync")
+                names_a = _projection_nodes(async_orch, "parity_async")
+                assert names_s == names_a, (
+                    f"逐节点投影不同形：sync={names_s} async={names_a}")
+                assert "tldr" in names_s, names_s
         finally:
             sync_orch.shutdown()
             async_orch.shutdown()

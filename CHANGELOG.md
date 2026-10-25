@@ -35,6 +35,72 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Changed（2026-10-24·续62，RunStore Stage 3b：投影写失败标 incomplete 后继续 + 队列摘掉结果正文）
+
+- **口径落成**（2026-10-24 拍板："标 incomplete 后继续"）：RunStore 终态盖章失败时
+  队列终态照写、worker 继续跑，但这次运行**可发现**——队列行新增 `projection` 列，
+  `ok` / `incomplete`（待补账）/ `legacy`（按设计没有投影）。原先的行为是"只留一行
+  warning"，而回落读会把缺口洗成正常：队列有终态、投影查无此运行，接口上与一条成功
+  运行完全同形。
+- **先悲观后升格**：终态先按 `incomplete` 写，`_runstore_close()` 确认盖章落了才升
+  `ok`。反过来（先 ok 再写投影）会开一个"队列说一切正常、投影里没有"的窗口。
+  升格本身失败则停在 `incomplete`——偏保守，宁可多看一条待补账。
+- **`legacy` 与 `incomplete` 是两个值**：`_runstore_open` 只在 `run_plan` /
+  `run_plan_async` 里调用（实测），legacy 的 `run()` 连一行投影都不写。混成一个计数
+  就是把 deprecated 兜底路径报成数据丢失，而误报会让人开始忽略这个指标。
+- **`RunHandle.projection()`**（`complete` / `incomplete` / `legacy` / `unknown`）把
+  标记排在"投影里查得到行"**之前**：盖章失败的运行在 `runs` 里永远停在 `running`，
+  只看有无行会把它读成正常完成（这条顺序不是推演出来的，是第一轮实测撞出来的）。
+  `to_dict()` 带 `projection` 键；`run_store_health()` 与 `/api/health/deep` 报
+  `incomplete_runs` / `legacy_runs`。
+- **队列停写 `result_json`**：实测全仓**没有读者**（`RunHandle.status/exists` 与
+  `_queue_row` 只用 `status`；admin/MCP 的 `result` 来自内存 task），而结果正文的
+  事实源早就是 `run_nodes.result_json` 与本批之前的 `deliveries.payload_json`——
+  队列那一列是第三份拷贝，还是 §5 警告的写放大点。列与老行留在原处（不回填、不 DROP）。
+- **`queue.finish` 保留**，并且**上一批写下的前置是错的**：设计文档 §4 末原先要求
+  "Stage 3b 前先把 `recover()` 改读投影"——实测那条不该做：`recover()` 读的
+  `status='running'` + `owner_pid` 存活 + 新鲜度阈值就是**租约**本身，投影里没有
+  lease 这个概念，改读投影等于把抢占语义搬进观测面。已在设计文档里公开更正。
+- **本批没做的**（写在测试文件头，不留"看起来全做了"的错觉）：补账工具——把一个
+  `incomplete` 运行重新投影进 `runs` 表需要一个幂等的终态重放入口。
+
+判据：新增 `tests/test_projection_health.py` 6 条（盖章炸掉 / 写口建不起来 / 正常升格 /
+legacy 不算故障 / 只有账本的老运行报 unknown / 幽灵 id 报 unknown）；三条旧断言**换成
+钉新契约而不是删**——`test_complete_success` 改钉"队列行不再带 `result` 键"，
+worker 端到端那条从"结果没写回队列就查不到产出"改成"兜底写的终态必须留 incomplete
+痕迹"，`test_async_run_parity` 的逐节点结果比对从队列挪到投影（比较对象没变，权威位置变了）。
+
+窄变异（最终头，只跑这 4 个文件共 42 条用例；每条只该红它射程内那几条）：
+
+| 变异 | 红 | 红的是 |
+|---|---|---|
+| M1 摘掉"先悲观"：终态落地直接按 `ok` 写队列 | 2 | `test_terminal_projection_failure_is_marked_not_swallowed` + `test_store_unavailable_also_marks_incomplete` |
+| M2 盖了章也不升格：所有运行永远读成 incomplete | 2 | `test_successful_run_upgrades_to_ok` + `test_async_and_sync_leave_the_same_run_facts` |
+| M3 盖章失败却 `return True`（健康位被谎报成 ok） | 1 | `test_terminal_projection_failure_is_marked_not_swallowed` |
+| M4 legacy 路径不单独标（用默认值） | 1 | `test_legacy_path_is_marked_legacy_not_incomplete` |
+| M5 `projection()` 判据顺序反过来（先看投影有无行） | 1 | `test_terminal_projection_failure_is_marked_not_swallowed` |
+| M6 `count_projection` 恒为 0（缺口数量看不见） | 3 | `..._marked_not_swallowed` + `..._store_unavailable_also_marks_incomplete` + `..._marked_legacy_not_incomplete` |
+| M7 队列行又开始带 `result` 键（第三份拷贝读回来） | 1 | `test_task_queue.py::test_complete_success` |
+
+两条流程上的实情，记下来免得后来人以为这轮一次就跑对了：
+
+- **M6 首轮漏跑**，且它守的正是本批的核心承诺（"缺口可计数"）——补跑才拿到上面那行数字。
+- **M4 首轮报的是 red=2**，复核后是解析器把一条空名算进去了（`FAILED ` 前缀的行取第 2 段），
+  pytest 自己的汇总一直是 `1 failed`。计数以最终头这次为准，解析器也改成只认带 `::` 的整段 id。
+
+M5 是本批唯一"由实测反推出来"的变异：第一版 `projection()` 把 `record()` 放在标记之前，
+注入 `close_run` 失败后仍返回 `complete`——顺序错了等于没有这个读维，所以把它钉成判据。
+
+**还有一条红是 CI 抓回来的，本机看不见**：`tests/test_state_backend.py::
+TestPostgresTaskQueue::test_submit_acquire_complete_principal` 原先断言 `row["result"]["ok"]
+is True`，我改了 `complete()` 的调用却漏改这条断言 ⇒ `KeyError: 'result'`。本机全量抓不到它，
+因为 `LOOM_TEST_PG_URL` 未设时整个类按 `requires_pg` 跳过；而 ci.yml 的 PG service 与该 env 写在
+**job 级**（四条 Python 腿 `3.11/3.12/3.13/3.14` 都带 `postgres:16-alpine`），所以四条腿同时红
+在同一条用例上——不是某条腿的环境差异。改成钉新契约（PG 方言下队列同样不再 SELECT 结果正文、
+`projection` 读得出），复核方式是本机临时起一个与 CI 同镜像同库名的 `postgres:16-alpine`、带
+`LOOM_TEST_PG_URL` 跑这一个文件（18 条全绿）后立刻删容器。**"摘写"的射程取决于有没有跑 PG 腿，
+不在于测试文件有没有被改过**——全仓 PG 门控只有这一个文件，改队列就必须把它跑一遍。
+
 ### Added（2026-10-23·续61，RunStore Stage 3a：审批的事实源换成 runs.db 的投影 + 事件）
 
 - **审批摘写**：待批登记、决策、消费不再写 `approvals.db`，改为写 `runs.db` 的

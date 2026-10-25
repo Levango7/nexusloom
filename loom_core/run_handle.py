@@ -143,6 +143,31 @@ class RunHandle:
     def is_terminal(self) -> bool:
         return self.status() in TERMINAL_STATUSES
 
+    def projection(self) -> str:
+        """这次运行的投影健康位：`complete` / `incomplete` / `legacy` / `unknown`。
+
+        为什么要单独一个维度：`status()` 能回答"跑成什么样"是靠逐级回落的，回落本身
+        会**掩盖**投影缺失。而且"投影里有一行"也不等于"投影是完整的"——终态盖章写失败
+        时，`runs` 里那行会永远停在 `running`，队列却说 done。所以判据的顺序是：
+
+        1. 队列行标了 `incomplete` → 就报 incomplete（**标记优先于"查得到行"**）；
+        2. 否则 `runs` 里有这条运行 → complete（含仍在跑的）；
+        3. 队列行标 `legacy` → 按设计没有投影（deprecated 兜底路径，不是故障）；
+        4. 都说不清 → unknown（Stage 1 之前的老运行、只在场账本里、或 id 不存在）。
+
+        队列之所以排在第一位：它是投影写不进去时**唯一还活着**的一行。
+        """
+        queue = getattr(self._orch, "task_queue", None)
+        row = queue.get(self._task_id) if queue is not None else None
+        marker = str(row.get("projection") or "") if isinstance(row, dict) else ""
+        if marker == "incomplete":
+            return "incomplete"
+        if self.record() is not None:
+            return "complete"
+        if marker == "legacy":
+            return "legacy"
+        return "unknown"
+
     def wait(self, timeout: float | None = None, poll: float = 0.2) -> str:
         """阻塞到终态或超时，返回最后一次读到的状态。
 
@@ -286,11 +311,12 @@ class RunHandle:
             "id": self.task_id,
             "status": self.status(),
             "terminal": self.is_terminal(),
+            "projection": self.projection(),
         }
         if task is None:
-            # 内存只是缓存：先由 RunStore 投影回答；投影里没有（关掉开关 / Stage 1
-            # 之前的老运行）才回落到交付账本。两边都没有的（节点 result 正文本就
-            # 从不落盘，见 Stage 1 的边界）不编。
+            # 内存只是缓存：先由 RunStore 投影回答；投影里没有（Stage 1 之前的老运行）
+            # 才回落到交付账本。两边都没有的（节点 result 正文本就从不落盘，见 Stage 1
+            # 的边界）不编。
             run = self.record()
             if run is not None:
                 out.update({

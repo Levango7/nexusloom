@@ -21,16 +21,20 @@ ANCHORS = [
     ("loom_core/run_store.py", 288, "def open_approval"),
     ("loom_core/run_store.py", 309, "def decide_approval"),
     ("loom_core/run_store.py", 350, "def consume_approval"),
-    ("loom_core/task_queue.py", 186, "def complete"),
-    ("loom_core/task_queue.py", 110, "add_column_if_missing"),
-    ("loom_core/task_queue.py", 113, "add_column_if_missing"),
-    ("loom_core/task_queue.py", 117, "add_column_if_missing"),
+    # Stage 3b：`complete()` 摘掉 result 参数，整体下移到 203。
+    ("loom_core/task_queue.py", 203, "def complete"),
+    # Stage 3b 给 task_queue 加了第 4 列（projection 健康位），迁移调用也跟着变成 4 处。
+    ("loom_core/task_queue.py", 120, "add_column_if_missing"),
+    ("loom_core/task_queue.py", 123, "add_column_if_missing"),
+    ("loom_core/task_queue.py", 127, "add_column_if_missing"),
+    ("loom_core/task_queue.py", 134, "add_column_if_missing"),
     ("loom_core/checkpoint_manager.py", 38, "def save"),
     ("loom_core/checkpoint_manager.py", 87, "os.replace"),
     ("loom_core/run_handle.py", 124, "def status"),
-    ("loom_core/run_handle.py", 178, "def artifacts"),
-    ("loom_core/run_handle.py", 236, "def _ledger_record"),
-    ("loom_core/run_handle.py", 281, "def to_dict"),
+    # Stage 3b：`projection()` 新读维插在 artifacts 之前，三个方法一起下移 25 行。
+    ("loom_core/run_handle.py", 203, "def artifacts"),
+    ("loom_core/run_handle.py", 261, "def _ledger_record"),
+    ("loom_core/run_handle.py", 306, "def to_dict"),
     ("loom_core/db_backend.py", 81, "add_column_if_missing"),
     ("loom_core/dag_executor.py", 821, "def _merge_resumed_nodes"),
     ("loom_core/dag_executor.py", 952, "def _reuse_completed_node"),
@@ -38,18 +42,20 @@ ANCHORS = [
     # pipeline.py 这一批随 Stage 0（异步并轨）+ Stage 1（双写口）整体下移：Stage 0 插了
     # 4 行字段 + 61 行 helper，Stage 1 又插 7 行 init + 108 行写口。**偏移不是常数**
     # （+4 / +65 / +47 / +95 / +106 并存），所以 remap 只能按整行文本对齐，不能推算。
+    # Stage 3b 再钉一次：`_record_plan_terminal_state` 里的"先悲观后升格"与
+    # `_runstore_close` 让下面的调用点又各自下移（同样不是常数偏移）。
     ("loom_core/pipeline.py", 314, "_max_task_history"),
-    ("loom_core/pipeline.py", 785, "def cancel"),
-    ("loom_core/pipeline.py", 798, "def resume"),
+    ("loom_core/pipeline.py", 819, "def cancel"),
+    ("loom_core/pipeline.py", 832, "def resume"),
     # 原 1290「不更新 task_queue」那句 docstring 已被 Stage 0 改掉——退役它，改钉新增的
     # 共用写口：§2 那条裂缝的"已并轨"结论必须指向一个真实存在的函数。
     ("loom_core/pipeline.py", 512, "def _record_plan_terminal_state"),
-    ("loom_core/pipeline.py", 718, "pipeline.started"),
-    ("loom_core/pipeline.py", 1060, "pipeline.finished"),
-    ("loom_core/pipeline.py", 1513, "pipeline.finished"),
-    ("loom_core/pipeline.py", 1747, "record"),
-    ("loom_core/pipeline.py", 1845, "pipeline.audit"),
-    ("loom_core/pipeline.py", 2012, ".done"),
+    ("loom_core/pipeline.py", 752, "pipeline.started"),      # legacy run() 内
+    ("loom_core/pipeline.py", 1094, "pipeline.finished"),    # _finalize_plan_task 内
+    ("loom_core/pipeline.py", 1547, "pipeline.finished"),    # _finalize_plan_task_async 内
+    ("loom_core/pipeline.py", 1781, "record"),               # _deliver 内 DeliveryLedger().record
+    ("loom_core/pipeline.py", 1879, "pipeline.audit"),
+    ("loom_core/pipeline.py", 2046, ".done"),
     ("loom_core/admin_api.py", 654, "get_task"),
     ("loom_core/admin_api.py", 1038, "list_tasks"),
     # Stage 2：/tasks、dashboard、cost 三处读口从 `list_tasks`（内存）换成

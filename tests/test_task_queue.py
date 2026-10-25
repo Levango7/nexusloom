@@ -40,13 +40,19 @@ class TestTaskQueue:
         assert queue.acquire()["task_id"] == "t3"
 
     def test_complete_success(self, queue):
-        """完成任务"""
+        """完成任务：终态与时间戳落定，**结果正文不在这张表里**（Stage 3b 摘写）。
+
+        `projection` 是这次运行的投影健康位；`complete` 不经引擎，所以它写的是默认
+        升格后的 `ok`——真正标 `incomplete` 的是 worker 兜底那条分支（见 test_worker）。
+        """
         queue.submit("t1", "p", "a.md")
         queue.acquire()
-        queue.complete("t1", result={"output": "done"})
+        queue.complete("t1")
         task = queue.get("t1")
         assert task["status"] == "done"
-        assert task["result"] == {"output": "done"}
+        assert "result" not in task, (
+            "队列又开始承载结果正文了：事实源是 run_nodes.result_json / deliveries")
+        assert task["projection"] == "ok"
         assert task["finished_at"] > 0
 
     def test_complete_with_error(self, queue):
@@ -116,7 +122,7 @@ class TestTaskQueue:
     def test_cleanup(self, queue):
         """清理过期任务"""
         queue.submit("t1", "p", "a.md")
-        queue.complete("t1", result={})
+        queue.complete("t1")
         queue.cleanup(max_age_days=0)
         assert queue.get("t1") is None
 
