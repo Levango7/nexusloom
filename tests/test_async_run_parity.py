@@ -257,6 +257,13 @@ class TestAsyncRegistersSameFacts:
                 assert orch.cancel("cancel_sync") is True
                 rows = _wait_rows(orch, ["cancel_sync"])
                 assert rows and rows["cancel_sync"]["status"] == "cancelled", rows
+                # 取消后待批必须就地结掉：留着就是收件箱里一条点不掉的待办
+                # （运行已死，approve 只会得到"未在审批等待中"）。
+                assert orch.approvals.pending_for_run("cancel_sync") is None
+                retired = orch.approvals.list_for_run("cancel_sync")[0]
+                assert retired["status"] == "rejected", retired
+                assert retired["decided_by"] == "system", retired
+                assert "取消" in retired["reason"], retired
                 got = col.names_for("cancel_sync")
                 assert got.count("task.cancelled") == 1, f"终态事件重复：{got}"
                 assert task.status is TaskStatus.CANCELLED
@@ -277,6 +284,10 @@ class TestAsyncRegistersSameFacts:
                 assert facts["pending"] is True, "运行没停在闸门上"
                 rows = _wait_rows(orch, ["cancel_once"])
                 assert rows and rows["cancel_once"]["status"] == "cancelled", rows
+                # 同一条口径的异步面：取消也要把待批结掉（收件箱不许留死待办）
+                assert orch.approvals.pending_for_run("cancel_once") is None
+                retired = orch.approvals.list_for_run("cancel_once")[0]
+                assert retired["status"] == "rejected" and retired["decided_by"] == "system"
             got = col.names_for("cancel_once")
             assert got.count("task.cancelled") == 1, f"终态事件重复：{got}"
         finally:
