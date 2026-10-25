@@ -269,11 +269,20 @@ class TestMessageBusHardCap:
             backpressure_watermark=10000,
         )
         release = threading.Event()
-        bus.subscribe("blk.topic", lambda m: release.wait(10))
+        entered = threading.Event()
+
+        def _block(msg):
+            entered.set()
+            return release.wait(10)
+
+        bus.subscribe("blk.topic", _block)
 
         r = bus.publish("blk.topic", "t", {"occupy": 1})
         assert r["status"] == "sent"
-        time.sleep(0.4)  # 让 worker 取走并在订阅者内阻塞（未投递计数保持）
+        # 等的是**订阅者被进去阻塞**这个状态，不是 0.4s 的运气：负载轮里 worker 起步
+        # 可以远超 0.4s，那时队列还没被占住，下面的断言就是在问一件还没发生的事。
+        assert entered.wait(20), "前提：占用消息已被 worker 取走并阻塞在订阅者里"
+        assert bus.queue_depth() >= 1, "前提：占用尚未 ack（队列被当成满才是这条用例的对象）"
 
         resp = bus.request("any.topic", "a", "b", {}, timeout=5)
         assert isinstance(resp, dict)
@@ -283,7 +292,14 @@ class TestMessageBusHardCap:
             assert not bus._callbacks  # 提前返回未残留等待回调
 
         release.set()
-        time.sleep(0.3)
+        # 排空同样按可观察状态等——而且是等**被测代码自己读的那个数**归零。
+        # ack 走 worker 的批量路径，负载下可以慢过任何固定预算；没等到位就发下一次
+        # request，硬上限会把"还没 ack 的占用"当成队列满，于是用例红在产品根本没错的
+        # 地方（实测：把 ack 拖慢 1s，原来那句 sleep(0.3) 必红）。
+        deadline = time.monotonic() + 20
+        while bus.queue_depth() > 0 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert bus.queue_depth() == 0, "占用消息未在 20s 内排空"
 
         bus.subscribe("ok.topic", lambda m: {"fine": True})
         resp_ok = bus.request("ok.topic", "a", "b", {}, timeout=5)
