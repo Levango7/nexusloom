@@ -317,3 +317,39 @@ class TestPostgresTaskQueue:
             assert row["status"] == "done", (
                 f"任务 {p}-{i} 未在两实例共享 PG 上跑完: {row}")
         q.close_all()
+
+
+@requires_pg
+class TestPostgresRunStoreSql:
+    """补账这批新增/改动的两条 SQL 在 PG 方言下必须成立。
+
+    为什么单列一类：CI 四条 test 腿都带 PG service（job 级 env），但 **RunStore 从没被
+    PG 腿覆盖过**——`close_run` 现在带条件 UPDATE、队列多了按健康位取行，方言翻译
+    （`?`→`%s`、`NOT IN (%s,%s,%s)`、`COALESCE` 排序）只有真 PG 能证明。
+    """
+
+    def test_close_run_is_terminal_once(self):
+        from loom_core.run_store import RunStore
+        store = RunStore(PG_URL)
+        rid = f"pg{uuid.uuid4().hex[:10]}"
+        store.open_run(rid, workflow="w", started_at=1000.0)
+        first = store.close_run(rid, "done", finished_at=1001.0)
+        assert isinstance(first, int), first
+        # 晚到的第二次收尾：不覆写、不追加事件（补账/重启重放都会走到这里）
+        assert store.close_run(rid, "failed", finished_at=1002.0) is None
+        run = store.get_run(rid)
+        assert run["status"] == "done" and run["finished_at"] == 1001.0
+        types = [e["type"] for e in store.events(rid)]
+        assert types.count("run.completed") == 1
+        assert "run.failed" not in types
+
+    def test_queue_list_by_projection(self):
+        q = TaskQueue(PG_URL)
+        p = f"t{uuid.uuid4().hex[:10]}"
+        for tid, proj in ((f"{p}-bad", "incomplete"), (f"{p}-ok", "ok")):
+            q.submit(tid, "test_pipeline", "x.md")
+            q.acquire()
+            assert q.finish(tid, "done", projection=proj) is True
+        ids = {r["task_id"] for r in q.list_by_projection("incomplete", limit=100)}
+        assert f"{p}-bad" in ids and f"{p}-ok" not in ids
+        q.close_all()

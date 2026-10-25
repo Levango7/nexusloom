@@ -18,9 +18,15 @@ ANCHORS = [
     ("loom_core/deliveries.py", 61, "def record"),
     # Stage 3a：审批的三个写点从 approvals.py 搬进了 RunStore（投影 + 同事务事件）。
     # §1 那一行"审批本身就是一个写面"的结论必须指向新位置，而不是退役成无处可指。
-    ("loom_core/run_store.py", 288, "def open_approval"),
-    ("loom_core/run_store.py", 309, "def decide_approval"),
-    ("loom_core/run_store.py", 350, "def consume_approval"),
+    # Stage 3c 补账把这三口整体下推 12 行（`close_run` 长成条件裁决版）。
+    ("loom_core/run_store.py", 300, "def open_approval"),
+    ("loom_core/run_store.py", 321, "def decide_approval"),
+    ("loom_core/run_store.py", 362, "def consume_approval"),
+    # Stage 3c（补账）的两处新落点：设计文档 §4 末"至多一条终态事件已下沉到存储层"
+    # 这句话必须指向一个真实存在的函数，而不是只写在文档里。
+    ("loom_core/run_store.py", 258, "def close_run"),
+    ("loom_core/backfill.py", 35, "class RunBackfill"),
+    ("loom_core/backfill.py", 59, "def replay"),
     # Stage 3b：`complete()` 摘掉 result 参数，整体下移到 203。
     ("loom_core/task_queue.py", 203, "def complete"),
     # Stage 3b 给 task_queue 加了第 4 列（projection 健康位），迁移调用也跟着变成 4 处。
@@ -44,18 +50,19 @@ ANCHORS = [
     # （+4 / +65 / +47 / +95 / +106 并存），所以 remap 只能按整行文本对齐，不能推算。
     # Stage 3b 再钉一次：`_record_plan_terminal_state` 里的"先悲观后升格"与
     # `_runstore_close` 让下面的调用点又各自下移（同样不是常数偏移）。
-    ("loom_core/pipeline.py", 314, "_max_task_history"),
-    ("loom_core/pipeline.py", 819, "def cancel"),
-    ("loom_core/pipeline.py", 832, "def resume"),
+    # Stage 3c 再钉一次：cancel() 结清待批 + 补账两个入口把 pipeline.py 又推了 18~43 行。
+    ("loom_core/pipeline.py", 315, "_max_task_history"),
+    ("loom_core/pipeline.py", 837, "def cancel"),
+    ("loom_core/pipeline.py", 875, "def resume"),
     # 原 1290「不更新 task_queue」那句 docstring 已被 Stage 0 改掉——退役它，改钉新增的
     # 共用写口：§2 那条裂缝的"已并轨"结论必须指向一个真实存在的函数。
-    ("loom_core/pipeline.py", 512, "def _record_plan_terminal_state"),
-    ("loom_core/pipeline.py", 752, "pipeline.started"),      # legacy run() 内
-    ("loom_core/pipeline.py", 1094, "pipeline.finished"),    # _finalize_plan_task 内
-    ("loom_core/pipeline.py", 1547, "pipeline.finished"),    # _finalize_plan_task_async 内
-    ("loom_core/pipeline.py", 1781, "record"),               # _deliver 内 DeliveryLedger().record
-    ("loom_core/pipeline.py", 1879, "pipeline.audit"),
-    ("loom_core/pipeline.py", 2046, ".done"),
+    ("loom_core/pipeline.py", 513, "def _record_plan_terminal_state"),
+    ("loom_core/pipeline.py", 770, "pipeline.started"),      # legacy run() 内
+    ("loom_core/pipeline.py", 1137, "pipeline.finished"),    # _finalize_plan_task 内
+    ("loom_core/pipeline.py", 1590, "pipeline.finished"),    # _finalize_plan_task_async 内
+    ("loom_core/pipeline.py", 1824, "record"),               # _deliver 内 DeliveryLedger().record
+    ("loom_core/pipeline.py", 1922, "pipeline.audit"),
+    ("loom_core/pipeline.py", 2089, ".done"),
     ("loom_core/admin_api.py", 654, "get_task"),
     ("loom_core/admin_api.py", 1038, "list_tasks"),
     # Stage 2：/tasks、dashboard、cost 三处读口从 `list_tasks`（内存）换成

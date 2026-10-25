@@ -756,6 +756,27 @@ artifact_keys），但**不给 `result` 正文本**——它从不落盘（投�
 运行没结束就尾随到终态；**重连不会重新起一条流水线**。逐 chunk 的正文流从不落盘，
 不在重放范围内——重放给的是"这次运行发生过什么"，不是正文。
 
+**看得见就得能处理**（2026-10-25 补账工具）：`incomplete` 的运行用命令重投影，事实
+来源只有交付账本：
+
+```bash
+python run.py --replay-incomplete --replay-dry-run   # 先看会补什么（一个字节都不写）
+python run.py --replay-incomplete                    # 全部补账
+python run.py --replay-run <run_id>                  # 按 id 补一条
+```
+
+边界照实写：只碰队列里 `projection='incomplete'` **且已终态**的行（运行中的行不补，
+那是与执行方抢写）；**只补缺**——已有的 `run_nodes` 行不被事后重建覆盖；账本没有节点
+的绝对时间，所以补写的节点行时间列留 0（读侧因此不显示时长，事件里记
+`"times": "unavailable"`）；队列 / 账本 / 投影三方口径不一致一律**拒绝**，不猜哪个对。
+每次成功补账追加一条 `run.replayed` 事件——事后重建必须与原始执行分得开。
+退出码：`--replay-run` 被拒绝或失败 ⇒ 1，别让脚本把"没补"当成"补过了"。
+
+同批把**终态事件"至多一条"从调用方约定下沉成存储层的原子裁决**：`close_run` 现在带
+`WHERE status NOT IN (done, failed, cancelled)`，所以补账、重启后的重放、两个进程同时
+收尾都不会再往审计里塞第二条终态事件（此前只靠 `_claim_terminal_event`，那是**进程内**
+的去重，跨进程与事后重放都绕过它）。
+
 ### 定时触发（Cron）
 
 按 `triggers.yaml` 的 cron 常驻调度（本地时间；**错过不补跑**，跳过窗口会打印出来）：
@@ -981,15 +1002,23 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**2911 个测试本机全绿**（`2911 passed, 7 skipped, 6 deselected`，2026-10-25 本机全量实测；
-现场读到的数是 `2910 passed, 1 failed`——那唯一一条红就是这条计数护栏自身，把本行换成
-本批实测数之后它才转绿，选中 2918 条不变，护栏按 `collected − declared ≤ 10` 判；
-本轮口径：`Python 3.14.3`、`LOOM_TEST_PG_URL` 未设置、我这侧同机没有其他 pytest 在跑，
-全量 **1178.48s ≈ 19.6 分钟**（上一批同机负载轮 2394.77s、再上一批 1226.74s、静默基线
-753.83s——读这几个数请带各自的负载条件，别互相换算）；上一行写的 2905 是 Stage 3a 审批摘写
-**+16 条**（`tests/test_runstore_approvals.py`：投影与事件同事务、台账是决定形状的唯一来源、
-老台账的四条数据边界、写侧不可用时 fail-closed；8 条窄变异逐条红在预期用例上，见
-CHANGELOG 续61）后的数，本批 Stage 3b 队列收口 **+6 条**（`tests/test_projection_health.py`：
+**2928 个测试本机全绿**（`2928 passed, 9 skipped, 6 deselected`，2026-10-25 本机全量实测；
+现场读到的数是 `2927 passed, 1 failed`——那唯一一条红就是这条计数护栏自身，把本行换成
+本批实测数之后它才转绿，实际收集 2937 条不变，护栏按 `collected − declared ≤ 10` 判（本行
+差值 9，正好是 9 条 `requires_pg` 跳过）；本轮口径：`Python 3.14.3`、`LOOM_TEST_PG_URL` 未设置、
+我这侧同机没有其他 pytest 在跑（变异电池 20:53 结束、全量 20:58 起手，两者不重叠，
+所以这轮的数没有被打过桩的源码污染），全量 **906.42s ≈ 15.1 分钟**（上一批 1178.48s ≈ 19.6 分钟、
+再上一批 2394.77s、静默基线 753.83s——读这几个数请带各自的负载条件，别互相换算）；
+上一行写的 2911 之后的本批 Stage 3c 补账工具 **+17 条**（`tests/test_run_backfill.py`：
+真把投影炸掉再补回 / 只补缺不覆盖 / 三方口径冲突一律拒绝 / 时间不编（事件里写
+`times: unavailable`）/ `run.replayed` 与原始执行事件分得开 / 健康位最后一步升格所以中途
+炸掉还能重跑 / 存储层"至多一条终态事件"两条 / CLI 退出码；8 条窄变异 MB1–MB8 逐条红在
+预期用例上、无零射程，见 CHANGELOG 续63）+ **2 条真 PG 判据**（`TestPostgresRunStoreSql`：
+`close_run` 在 PG 方言下同样只盖一次、队列按健康位取行——本机没设 `LOOM_TEST_PG_URL` 时跳过，
+所以不进上面的通过数，CI 四条腿都挂真 PG 会执行）；
+再往前，2911 = Stage 3a 审批摘写 **+16 条**（`tests/test_runstore_approvals.py`：投影与事件同事务、
+台账是决定形状的唯一来源、老台账的四条数据边界、写侧不可用时 fail-closed；8 条窄变异逐条红在
+预期用例上，见 CHANGELOG 续61）之后，Stage 3b 队列收口 **+6 条**（`tests/test_projection_health.py`：
 盖章炸掉 / 写口建不起来 / 正常升格 / legacy 不算故障 / 只有账本的老运行报 unknown /
 幽灵 id 报 unknown；7 条窄变异各自只红在射程内，含首轮漏跑、补跑才拿到数字的 M6，见
 CHANGELOG 续62；另有 3 条旧断言换成钉新契约而不是删）；
@@ -1004,8 +1033,11 @@ JSON-RPC internal error，已收紧成 `isinstance(row, dict)`；
 "属时序窗口争用不是产品缺陷"是错的**——根因是池满拒答带着未读请求字节 close ⇒ 内核发 RST
 把 503 吞了（WinError 10053，缺陷原样时 20 轮红 9 轮），续57 已修并把等待条件换成
 `_server.inflight` 探针，最终头该全类 10 轮 0 红；
-本轮 `LOOM_TEST_PG_URL` 未设置 ⇒ 5 条真 Postgres 判据按 `requires_pg` 跳过；
-设了该变量的口径应比本行数多出那 5 条执行（2026-10-14 那次 2801 passed / 2 skipped 含真 PG）；
+本轮 `LOOM_TEST_PG_URL` 未设置 ⇒ 9 条跳过里 7 条是真 Postgres 判据（`requires_pg`，
+现测：`pytest "tests/test_state_backend.py::TestPostgresTaskQueue"
+"tests/test_state_backend.py::TestPostgresRunStoreSql" --co -q` ⇒ 7 collected），
+另 2 条是 `test_e2e_real` 的环境门；设了该变量的口径应比本行数多出那 7 条执行
+（CI 四条 test 腿都带 PG service 与 job 级 env，所以那里跑的是 7 条）；
 工具层迁出 artesian 后 19 条 fast_json 用例随库走，等价判据在新库加强至 35 条；
 嵌入层与知识库迁出后 74 条用例随库走，等价判据在新库加强至 91 条；
 搜索引擎迁出后 91 条用例随库走，等价判据在新库加强至 92 条，另配 30 条缓存/env 底座判据；

@@ -614,6 +614,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fix-ascii", action="store_true", help="将文档中的 ASCII 图转换为 Mermaid 图")
     parser.add_argument("--mcp", action="store_true", help="启动 MCP server（stdio JSON-RPC，供 AI agent 调度）")
     parser.add_argument("--recover", action="store_true", help="恢复中断的任务（重启后把 running 改回 pending 并重新执行）")
+    parser.add_argument("--replay-run", default=None, metavar="RUN_ID",
+                        help="补账：把一个 projection=incomplete 的运行按交付账本重投影后退出")
+    parser.add_argument("--replay-incomplete", action="store_true",
+                        help="补账：把所有 projection=incomplete 的运行重投影后退出")
+    parser.add_argument("--replay-dry-run", action="store_true",
+                        help="配合 --replay-run/--replay-incomplete：只报告将补什么，不写任何东西")
     parser.add_argument("--worker", action="store_true",
                         help="以常驻 worker 身份消费任务队列（claim → 执行 → 落状态）")
     parser.add_argument("--worker-id", default="", help="worker 标识，写进队列的 worker_id 列")
@@ -668,9 +674,10 @@ def main():
             f"--lease-stale={args.lease_stale}",
         ]))
 
-    # 无输入文件时：仅 --check/--mcp/--recover/--triggers*、服务模式与
+    # 无输入文件时：仅 --check/--mcp/--recover/--replay-*/--triggers*、服务模式与
     # plan/lock/pack/plugin 动词可用
     if args.input is None and not args.check and not args.mcp and not args.recover \
+            and not args.replay_run and not args.replay_incomplete \
             and not args.triggers and not args.triggers_dry_run \
             and not args.admin and not args.dashboard and not args.daemon \
             and verb_action not in ("plan", "lock", "pack_list", "plugin_list"):
@@ -730,6 +737,34 @@ def main():
         return
 
     # ─── 恢复中断任务 ──────────────────────
+    # ─── 补账：投影写失败后的重放（loom_core/backfill.py）──────────
+    if args.replay_run or args.replay_incomplete:
+        project_root = Path(__file__).parent
+        orch = _get_orchestrator(project_root)
+        dry = bool(args.replay_dry_run)
+        failed = False
+        try:
+            if args.replay_run:
+                res = orch.replay_run(args.replay_run, dry_run=dry)
+                print(f"[replay] {res['run_id']}: {res['action']} — {res['reason']}")
+                print(f"         投影行建立={res['created_run']} "
+                      f"节点补写={res['nodes_written']} 终态事件={res['closed']}"
+                      f"{'（dry-run，未写入）' if dry else ''}")
+                failed = res["action"] in ("failed", "refused")
+            else:
+                res = orch.replay_incomplete_runs(dry_run=dry)
+                for r in res["results"]:
+                    print(f"[replay] {r['run_id']}: {r['action']} — {r['reason']}")
+                print(f"[replay] 检查 {res['checked']} 条，已补 {res['replayed']} 条，"
+                      f"拒绝 {len(res['refused'])} 条，失败 {len(res['failed'])} 条"
+                      f"{'（dry-run，未写入）' if dry else ''}")
+                if not res["checked"]:
+                    print("[replay] 没有 projection=incomplete 的运行")
+                failed = bool(res["failed"])
+        finally:
+            orch.shutdown()
+        sys.exit(1 if failed else 0)
+
     if args.recover:
         project_root = Path(__file__).parent
         orch = _get_orchestrator(project_root)
