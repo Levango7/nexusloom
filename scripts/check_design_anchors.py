@@ -25,9 +25,12 @@ ANCHORS = [
     # Stage 3c（补账）的两处新落点：设计文档 §4 末"至多一条终态事件已下沉到存储层"
     # 这句话必须指向一个真实存在的函数，而不是只写在文档里。
     ("loom_core/" + "run_store.py", 271, "def close_run"),
-    # B4 触发租约的新写口：设计文档 §3.1 的 schedules 行必须指向真实存在的方法。
-    # 行号随 A6 的 cleanup 插入整体下推 13 行（DDL 加 13 行）+ cleanup 方法加 55 行。
+    # B4 触发租约的新写口：设计文档 §3.1 的 schedules 行必须指向真实存在的方法——
+    # 注册（register）与取租约（acquire）是两个方法，**只钉一个会让另一半结论无处可指**
+    # （合并 #65 收口时 main 上就只剩了 register 这条，acquire 被合并掉了）。
+    # 实测行号 570/587（早先写的 573/590 偏 3 行；本脚本不进 CI，所以偏了没人红）。
     ("loom_core/run_store.py", 570, "def register_schedule"),
+    ("loom_core/run_store.py", 587, "def acquire_schedule_lease"),
     ("loom_core/backfill.py", 35, "class RunBackfill"),
     ("loom_core/backfill.py", 59, "def replay"),
     # Stage 3b：`complete()` 摘掉 result 参数，整体下移到 203。
