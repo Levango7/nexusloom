@@ -93,6 +93,36 @@ def _schemas() -> dict:
                 },
             },
         },
+        "ApproveRequest": {
+            "type": "object",
+            "description": "审批放行请求体；整体可省略（空 body 即放行）",
+            "properties": {
+                "note": {"type": "string", "description": "放行备注（进审计）"},
+            },
+        },
+        "RejectRequest": {
+            "type": "object",
+            "description": "审批驳回请求体；整体可省略（空 body 即驳回）",
+            "properties": {
+                "reason": {"type": "string", "description": "驳回原因（进任务 error 与审计）"},
+            },
+        },
+        "ApproveResponse": {
+            "type": "object",
+            "properties": {
+                "approved": {"type": "boolean"},
+                "task_id": {"type": "string"},
+                "note": {"type": "string"},
+            },
+        },
+        "RejectResponse": {
+            "type": "object",
+            "properties": {
+                "rejected": {"type": "boolean"},
+                "task_id": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+        },
     }
 
 
@@ -239,6 +269,46 @@ def _task_paths() -> dict:
                 "responses": {
                     "200": {"description": "恢复结果"},
                     "404": {"description": "任务不存在", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                },
+            },
+        },
+        "/tasks/{task_id}/approve": {
+            "post": {
+                "summary": "审批放行（只受理审批等待中的任务；不在等待中时 409，审计不出现无中生有的决策）",
+                "parameters": [{"name": "task_id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "requestBody": {
+                    "required": False,
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApproveRequest"}}},
+                },
+                "responses": {
+                    "200": {"description": "放行成功",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApproveResponse"}}}},
+                    "400": {"description": "请求体不是合法 JSON",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                    "404": {"description": "任务不存在",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                    "409": {"description": "不在审批等待中（fail-closed）",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                },
+            },
+        },
+        "/tasks/{task_id}/reject": {
+            "post": {
+                "summary": "审批驳回（驳回=终止；原因进任务 error 与审计）",
+                "parameters": [{"name": "task_id", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "requestBody": {
+                    "required": False,
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RejectRequest"}}},
+                },
+                "responses": {
+                    "200": {"description": "驳回成功",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RejectResponse"}}}},
+                    "400": {"description": "请求体不是合法 JSON",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                    "404": {"description": "任务不存在",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                    "409": {"description": "不在审批等待中（fail-closed）",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
                 },
             },
         },

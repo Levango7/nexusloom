@@ -24,6 +24,7 @@ DAG 编排、消息总线、重试/熔断/限流、检查点与 Agent 加载。
 __version__ = "3.13.0"
 
 from .agent_loader import AgentLoader
+from .client import LoomClient, LoomError, LoomTimeoutError
 from .alert_manager import alert, clear_alerts, get_alerts
 from .base_agent import AgentLogger, BaseAgent
 from .bootstrap import StartupReport, quick_check, run_startup_check
@@ -84,4 +85,5 @@ __all__ = [
     "CircuitBreakerRegistry", "backoff_with_jitter",
     "generate_spec",
     "QualityFeedback", "get_quality_feedback", "record_quality",
+    "LoomClient", "LoomError", "LoomTimeoutError",
 ]
