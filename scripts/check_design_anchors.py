@@ -27,12 +27,7 @@ ANCHORS = [
     ("loom_core/" + "run_store.py", 271, "def close_run"),
     # B4 触发租约的新写口：设计文档 §3.1 的 schedules 行必须指向真实存在的方法。
     # 行号随 A6 的 cleanup 插入整体下推 13 行（DDL 加 13 行）+ cleanup 方法加 55 行。
-    ("loom_core/" + "run_store.py", 573, "def register_schedule"),
-    ("loom_core/" + "run_store.py", 590, "def acquire_schedule_lease"),
-    # B4 触发租约的新写口：设计文档 §3.1 的 schedules 行必须指向真实存在的方法。
-    # 行号随 A6 的 cleanup 插入整体下推 13 行（DDL 加 13 行）+ cleanup 方法加 55 行。
-    ("loom_core/run_store.py", 573, "def register_schedule"),
-    ("loom_core/run_store.py", 590, "def acquire_schedule_lease"),
+    ("loom_core/run_store.py", 570, "def register_schedule"),
     ("loom_core/backfill.py", 35, "class RunBackfill"),
     ("loom_core/backfill.py", 59, "def replay"),
     # Stage 3b：`complete()` 摘掉 result 参数，整体下移到 203。
