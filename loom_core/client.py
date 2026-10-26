@@ -112,7 +112,8 @@ class LoomClient:
                 if not raw:
                     return {}
                 try:
-                    return json.loads(raw.decode("utf-8"))
+                    parsed: dict = json.loads(raw.decode("utf-8"))
+                    return parsed
                 except ValueError:
                     return {"raw": raw.decode("utf-8", errors="replace")}
         except urllib.error.HTTPError as e:
@@ -243,7 +244,9 @@ class LoomClient:
 
     def delivery(self, run_id: str) -> dict:
         """单次交付的整条结构化载荷（含逐节点历史与健康位）。"""
-        return self._get(f"/api/deliveries/{run_id}")["delivery"]
+        payload: dict = self._get(f"/api/deliveries/{run_id}")
+        delivery: dict = payload["delivery"]
+        return delivery
 
     def locks(self, pipeline: str | None = None) -> list:
         """锁漂移巡检：当前流水线 YAML vs 当前锁文件对不对得上。
