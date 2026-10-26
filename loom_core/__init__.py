@@ -24,13 +24,13 @@ DAG 编排、消息总线、重试/熔断/限流、检查点与 Agent 加载。
 __version__ = "3.13.0"
 
 from .agent_loader import AgentLoader
-from .client import LoomClient, LoomError, LoomTimeoutError
 from .alert_manager import alert, clear_alerts, get_alerts
 from .base_agent import AgentLogger, BaseAgent
 from .bootstrap import StartupReport, quick_check, run_startup_check
 from .cache_manager import CacheManager, all_stats, clear_all_caches, get_cache
 from .checkpoint_manager import CheckpointManager
 from .circuit_breaker import CircuitBreakerRegistry, backoff_with_jitter
+from .client import LoomClient, LoomError, LoomTimeoutError
 from .config import ConfigCenter
 from .cost_tracker import CostTracker, calc_cost, estimate_tokens, get_cost_tracker
 from .dag_executor import DAGExecutor

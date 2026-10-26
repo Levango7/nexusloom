@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import hashlib
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -265,7 +264,7 @@ class TestWaitTimeout:
         try:
             client = LoomClient(base, token=TOK_ADMIN)
 
-            task = _make_approval_task(orch, "paused_task_1")
+            _make_approval_task(orch, "paused_task_1")
 
             with pytest.raises(LoomTimeoutError) as exc_info:
                 client.wait("paused_task_1", timeout=0.5, poll_interval=0.1)
