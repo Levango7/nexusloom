@@ -32,7 +32,7 @@ from artesian.fast_json import loads as _fast_loads
 from . import audit
 from . import scheduler as _scheduler_mod
 from .ids import new_task_id
-from .input_docs import render_inputs_doc
+from .input_schema import InputValidationError, prepare_inputs
 
 _logger = logging.getLogger(__name__)
 
@@ -200,19 +200,32 @@ def handle_inbound(name: str, registry: Mapping[str, Webhook], body: bytes, *,
         return _finish(401, {"error": "unauthorized"},
                        {"outcome": "rejected", "reason": "bad_credentials"})
 
-    # payload → 输入文档：JSON 对象按「## 键」分节，其余（非 JSON / 数组等）原样
+    # payload → 输入文档：JSON 对象按「## 键」分节，其余（非 JSON / 数组等）原样。
+    # **先 parse 再过闸门**：校验要读 plan.inputs_schema，而渲染成文档之后键→值结构
+    # 就没了（见 input_schema 模块注释）。没声明 inputs 的流水线走的是与昨天同一份
+    # render_inputs_doc 输出——prepare_inputs 在无 schema 时只做透传。
     inputs: Any = body.decode("utf-8", errors="replace")
     with contextlib.suppress(Exception):
         parsed = _fast_loads(body) if body else None
         if isinstance(parsed, (dict, list)):
             inputs = parsed
-    input_text = render_inputs_doc(webhook.name, inputs)
 
     task_id = new_task_id()
+    try:
+        plan = _scheduler_mod.Scheduler().parse(webhook.pipeline)
+    except Exception as e:
+        return _finish(500, {"error": f"pipeline parse failed: {e}"},
+                       {"outcome": "error", "reason": "parse_failed", "scheme": scheme})
+    try:
+        input_text = prepare_inputs(plan, inputs, title=webhook.name)
+    except InputValidationError as e:
+        return _finish(400, e.to_dict(),
+                       {"outcome": "rejected", "reason": "invalid_inputs",
+                        "scheme": scheme})
+
     input_file = Path(tempfile.gettempdir()) / f"webhook_{webhook.name}_{task_id}.md"
     input_file.write_text(input_text, encoding="utf-8")
     try:
-        plan = _scheduler_mod.Scheduler().parse(webhook.pipeline)
         if webhook.output:
             plan.raw.setdefault("pipeline", {})["output"] = webhook.output
         task = orch.run_plan(plan, input_file=str(input_file),

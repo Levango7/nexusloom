@@ -35,6 +35,99 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Added（2026-10-26·续65，#7 类型化输入：声明式子集 + 四条提交口共用一道闸门）
+
+- **inputs 第一次有形状**。流水线可以在 YAML 里写 `pipeline.inputs`，四个调用面在提交
+  那一刻按同一份声明校验，非法载荷被拒且**错误定位到字段**（`spec.region`、`tags[1]`
+  这样的点号/下标路径）。落点只有一处：`loom_core/input_schema.py`。
+- **声明式子集，不是完整 JSON Schema**：支持的 keyword 是
+  `type`/`required`/`enum`/`pattern`/`minimum`/`maximum`/`minLength`/`maxLength`/`default`/
+  `items`/`properties`/`additionalProperties`。不引 `jsonschema`（新增依赖是独立决策，
+  不在这一条线里替你决定），`type` 沿用引擎既有词表（`str`/`int`/`float`/`bool`/`list`/
+  `dict`）而不是 JSON Schema 的 `string`/`integer`——同一个值在本仓只该有一种叫法。
+- **未知 keyword 在解析期红**，不留到提交期：把 `maxLength` 写成 `max_length` 时，忽略
+  等于那条约束**从没存在过**，而运行照常提交。同理 `required` 指向没声明的名字、
+  `pattern` 是坏正则、边界不是数值，全部在 `Scheduler._build_plan` 里抛
+  `SchemaDeclarationError`（错误带 `<pipeline>.pipeline.inputs.properties.<字段>` 全路径）。
+- **先 parse 再过闸门**这个顺序是刻意的：`render_inputs_doc` 把 dict 拍成 `## 键` 分节的
+  文本，而 `dag_executor._extract_queries` 读文档时把所有 `#` 行丢掉——结构在渲染那一瞬
+  就没了，渲染之后再也问不出"哪个字段错了"。所以 MCP 的共享提交尾与 webhook 都改成
+  解析→校验→渲染→落盘。
+- **自由文本入口不留旁路**（`gate_freeform`）：`POST /api/tasks` 的 `query`、MCP
+  `generate_document`、CLI 的位置参数 `input`、webhook 的非 JSON 文本载荷传的是整篇文本，
+  没有可校验的键→值结构。流水线一旦声明了 `inputs`，这些入口明确拒绝并指出该用哪个口。
+  理由：留一条不经过门的路，声明就是装饰——而**门禁假阳性比没门禁更难查**。
+- **新增面**：HTTP `POST /api/workflows/{name}/runs`（类型化提交口，400 带 `fields`）、
+  `GET /api/workflows/{name}/inputs`（读回声明，`declared: false` 而不是报错，客户端据此
+  生成表单）、`/api/tasks` 可选 `inputs`、CLI `--inputs-json` / `--set-input k=v`
+  （值先按 JSON 解析，`depth=3` 落真整数）、MCP `get_pipeline_info` 返回 `inputs` 声明。
+  Admin 侧两个提交口抽出共享尾巴 `_launch_from_doc`：wait 语义、SSE callback 摘挂、
+  异步输入文件的 reaper、`owner=principal.id` 只在一处。
+- **三条边界照实写**：① 声明**不进锁指纹**（`config_hash`/`topology_hash` 都不含它）——
+  代价是改 schema 不会被锁拦下，收益是随包 20 条流水线不必因此全部重锁，这条选择由
+  `test_declaration_does_not_change_lock_hashes` 钉住；② 没声明的流水线一律不受影响
+  （渲染出的文档逐字节相同，四处都有反向对照判据）；③ 恢复（`--recover`）与 worker 拿的是
+  **已渲染的 input_file**，不过这道门——它们重放的是当初已过校验的载荷，再校验一次只会
+  因为 schema 演进把老任务卡死。
+
+判据：**+78 条**（`tests/test_input_schema.py` 38 条 + `tests/test_typed_input_surfaces.py`
+40 条）。后者的分组方式是"每条口都要有'确实到达闸门'的证据"——单测 `input_schema` 全绿
+只证明校验实现是对的，不证明 CLI/HTTP/MCP/webhook 真去调它。每条口三条：非法载荷必须拒
+**且引擎没被调用**（拒绝要在执行之前）、合法载荷要看到闸门产出的文档（含 `default` 填上）、
+没声明的照旧。另有一条真 HTTP 端到端、一条真 CLI 子进程、以及"闸门只有一处实现"的结构
+判据（含"不许出现第二套 `validate_inputs`"）。
+
+窄变异电池 26 条，**26 条全部有射程**（G0 反向对照 0 红 / 78 passed，G-end 还原后复跑 0 红）：
+
+| 变异 | 红 | 红的是 |
+|---|---|---|
+| V1 required 检查摘掉 | 7 | 四条口的 400 判据 + 错误表 + 真 CLI |
+| V2 未声明键放行 | 2 | `extra` 字段判据 / HTTP 错误体形状 |
+| V3 maxLength 摘掉 | 1 | 参数化表里那一条 |
+| V4 类型不符不短路 | 1 | **第二轮才有红**（见下面的招供①） |
+| V5 bool 被当 int 收 | 1 | `test_bool_is_not_an_int` |
+| V6 enum 摘掉 / V7 嵌套 required 摘掉 / V8 下标路径丢 / V9 载荷非对象放行 | 2/1/1/1 | 各自那条约束的判据 |
+| D1 未知 keyword 不报 | 2 | 声明期两条（含"错误要带字段全路径"） |
+| D2 required 悬空不报 / D3 default 覆盖显式值 | 1/1 | 声明期判据 / `test_explicit_value_is_never_overwritten` |
+| G1 `prepare_inputs` 不校验 | 12 | 四条口的所有"先拒后跑"判据 |
+| G2 `gate_freeform` 空转 | 3 | 三条自由文本旁路判据 |
+| G3 `declaration()` 的 isinstance 守卫摘掉 | 1 | 替身 plan 那条（见招供②） |
+| G4 解析期不载入声明 | 49 | 整个提交面（没有源就无话可校验） |
+| M1/W1/H1/H2/C1/C2 各口跳过闸门 | 4/4/5/1/4/1 | 对应那条口的判据 + 结构同源判据 |
+| H3 路由不分发 `runs` | 2 | dispatch 判据 + 真 HTTP |
+| H4 错误体丢 `code` | 5 | 四条口读同一形状的那几条 |
+| H5 新端点不走共享尾巴 | 5 | owner/echo/异步收尾 |
+| S1 schema 进锁指纹 | 1 | "不进锁"这条边界判据 |
+
+两处自我伤害要说清，否则这轮结论会被读大：
+
+① **首轮 V4 是零射程**：我把"类型不符就 `return errors`"换成 `pass`，78 条判据一条都没红。
+不是判据写错，是**被测形状不存在**——fixture 里没有任何字段同时声明 `type` 和 `enum`，
+而短路只在"后面还有会冒出来的约束"时才看得见。补了 `stage: {type: str, enum: [...]}` 与
+一条要求同一字段只报一条的判据，再整条电池重跑一轮才有上面这张表（第一轮的数字不作数）。
+② **闸门上线时把三条既有用例打红了**：`gate_freeform` 用 `getattr(plan, "inputs_schema")`
+判"有没有声明"，而测试替身（MagicMock）返回的是**真值但不是 dict**，于是"没声明"被读成
+"声明了但内容为空"，自由文本入口凭空被拒。修成 `declaration()` 只认 dict，并补
+`test_duck_typed_plan_is_treated_as_undeclared`——假阳性比没门禁更难查，这条不只是测试卫生。
+③ **电池驱动器自己的还原自检骗了我一次**：H4 那条变异的 `new` 是 `old` 的前缀，
+"还原后确认文件里已无变异痕迹"的写法（`new not in back`）在**还原成功**的情况下仍然判失败，
+整轮电池在第一轮崩溃中断。核对方式是拿 `git show HEAD` 的字节与归一化后的工作树逐文件比
+（六个文件 `normalized_equal=True` ⇒ 只剩行尾抖动，没有残留变异），随后改成"逐字节写回原文件"
+并断言字节相等。第二轮 G-end 复跑 0 红是这条修正的证据。
+
+三条既有判据因为 #7 合法地改了契约而被同步改掉（不是为了让门禁闭嘴）：
+`test_openapi_spec.py::test_task_submit_schema`（spec 原来写死 `required: ["query"]`，
+现在 `query`/`inputs` 二选一用 `anyOf`，判据改成"spec 不得反过来禁止真实允许的载荷形状"）、
+`test_security_hardening.py::test_all_three_call_sites_wired`（`new_task_id()` 从入口移进
+共享尾巴；判据改严而不是改松：入口必须走尾巴、且自己不得再铸第二个 id）、
+`test_mcp_server.py::test_render_inputs_doc_shapes`（原来 import 的是 mcp_server 里的转发别名，
+别名随闸门上移删掉，改成从真实出处 `input_docs` import）。
+
+**没做的那一半**：A3 的第三小句"UI 依 schema 生成表单"只交付了前提（声明已能从 HTTP 与
+MCP 读到），控制台的表单本体没做，和 #8 剩下的"产物 sha256/保留期""逐运行锁指纹""控制台
+呈现"排在同一批待拍板。另记一条既有事实：`/api/tasks` 的 `output` 字段**只校验白名单、
+不参与落盘**（改动前就是这样）——把它接成真按客户端路径写文件是另一件事，本批没顺手做。
+
 ### Added（2026-10-26·续64，#8 交付账本与锁巡检的只读 HTTP 面）
 
 - **看得见才算接口**：续63 给了 `incomplete` 一个出口（`--replay-run`），但那个出口的

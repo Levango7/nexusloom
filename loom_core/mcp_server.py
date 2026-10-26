@@ -42,7 +42,7 @@ from . import __version__ as SERVER_VERSION
 from . import scheduler as _scheduler_mod
 from .artifacts import task_output
 from .ids import new_task_id
-from .input_docs import render_inputs_doc as _render_inputs_doc
+from .input_schema import InputValidationError, gate_freeform, prepare_inputs
 from .scheduler import resolve_pipeline_name
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -125,7 +125,7 @@ TOOLS = [
     },
     {
         "name": "run_workflow",
-        "description": "运行任意已安装流水线（通用入口，不限于文档场景）。inputs 会作为本次运行的输入文档写入输入文件——对象按「## 键」分节序列化、字符串原样写入，流水线首层 Agent 经由输入文档/查询词读取它们。",
+        "description": "运行任意已安装流水线（通用入口，不限于文档场景）。inputs 会作为本次运行的输入文档写入输入文件——对象按「## 键」分节序列化、字符串原样写入，流水线首层 Agent 经由输入文档/查询词读取它们。流水线在 YAML 里声明了 pipeline.inputs（类型化输入）时，inputs 先按声明逐字段校验，不合法会以带字段名的错误表返回（可用 get_pipeline_info 读声明）。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -295,15 +295,17 @@ class MCPServer:
 
         input_text = f"# {title}\n\n## 查询\n\n{query}\n"
         return self._submit_plan_run(
-            req_id, resolved, input_text, wait,
+            req_id, resolved, wait,
             self._resolve_target_path(output_arg),
-            {"query": query, "title": title})
+            {"query": query, "title": title},
+            freeform=input_text, surface="MCP generate_document")
 
     def _tool_run_workflow(self, req_id: Any, args: dict) -> dict:
         """通用入口：跑任意已安装流水线，inputs 渲染成输入文档。
 
-        与 generate_document 的差异只在"输入文档怎么写"：这里不假设文档语义，
-        对象按 `## 键` 分节序列化（见 `_render_inputs_doc`），字符串原样落盘。
+        与 generate_document 的差异只在"输入怎么给"：这里给的是**键→值对象**，
+        所以它会过 `prepare_inputs` 这道类型化闸门（流水线声明了 `pipeline.inputs`
+        时逐字段校验，错误带可定位字段）；generate_document 给的是自由文本。
         """
         name = str(args.get("name", "")).strip()
         if not name:
@@ -325,11 +327,11 @@ class MCPServer:
         if err:
             return self._tool_error(req_id, err)
 
-        input_text = _render_inputs_doc(resolved, inputs)
         return self._submit_plan_run(
-            req_id, resolved, input_text, wait,
+            req_id, resolved, wait,
             self._resolve_target_path(output_arg),
-            {"inputs": inputs})
+            {"inputs": inputs},
+            inputs=inputs)
 
     @staticmethod
     def _resolve_target_path(output_arg: str) -> Path | None:
@@ -338,25 +340,43 @@ class MCPServer:
         candidate = Path(output_arg)
         return candidate if candidate.is_absolute() else PROJECT_ROOT / candidate
 
-    def _submit_plan_run(self, req_id: Any, pipeline_name: str, input_text: str,
+    def _submit_plan_run(self, req_id: Any, pipeline_name: str,
                          wait: bool, target_path: Path | None,
-                         extra: dict) -> dict:
-        """共享提交尾：临时输入文件 → 解析 plan → run_plan → 同步/异步收尾。
+                         extra: dict, *,
+                         inputs: Any = None, freeform: str | None = None,
+                         surface: str = "") -> dict:
+        """共享提交尾：解析 plan → 过输入闸门 → 临时输入文件 → run_plan → 收尾。
 
         generate_document 与 run_workflow 共用这一段——wait 语义、watcher 与
         临时文件清理只在单处维护，不在两条工具里各写一份。
+
+        **先 parse 再渲染**是刻意的：类型化校验要读 `plan.inputs_schema`，而载荷一旦
+        渲染成文档，键→值结构就没了（见 `input_schema` 模块注释）。`inputs` 与
+        `freeform` 二选一，对应两种入口形状；自由文本在流水线声明了 inputs 时会被
+        `gate_freeform` 直接拒——不留能绕过闸门的门。
         """
         task_id = new_task_id()
-        input_file = Path(tempfile.gettempdir()) / f"mcp_{task_id}.md"
-        input_file.write_text(input_text, encoding="utf-8")
 
         try:
             from .scheduler import Scheduler
             sched = Scheduler()
             plan = sched.parse(pipeline_name)
         except Exception as e:
-            self._cleanup_temp_input(input_file)
             return self._tool_error(req_id, f"Failed to parse pipeline: {e}")
+
+        try:
+            if inputs is not None:
+                input_text = prepare_inputs(plan, inputs, title=pipeline_name)
+            else:
+                gate_freeform(plan, surface=surface or "MCP")
+                input_text = freeform or ""
+        except InputValidationError as e:
+            return self._tool_error(req_id, str(e))
+        except Exception as e:
+            return self._tool_error(req_id, f"Failed to prepare inputs: {e}")
+
+        input_file = Path(tempfile.gettempdir()) / f"mcp_{task_id}.md"
+        input_file.write_text(input_text, encoding="utf-8")
 
         try:
             task = self.orch.run_plan(plan, input_file=str(input_file),
@@ -525,6 +545,8 @@ class MCPServer:
                     }
                     for n in nodes
                 ],
+                # 声明出来的类型化输入：客户端据此生成表单，不用再去猜有哪些键
+                "inputs": plan.inputs_schema,
             }
             return self._tool_result(req_id, result)
         except Exception as e:

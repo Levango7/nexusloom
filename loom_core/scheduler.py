@@ -175,6 +175,10 @@ class ExecutionPlan:
     raw: dict = field(default_factory=dict)
     fail_fast: bool = False
     checkpoint: dict = field(default_factory=dict)
+    #: `pipeline.inputs` 的类型化声明（P1 #7）。空 = 这条流水线没声明，提交口不校验。
+    #: **故意不进锁指纹**（`_node_config_hash`/`_topology_hash` 都不含它）：进锁会让随包
+    #: 20 条流水线全部要重锁。代价照实说——改 schema 不会被锁拦下，这是已知边界。
+    inputs_schema: dict = field(default_factory=dict)
 
     @property
     def max_level(self) -> int:
@@ -577,6 +581,11 @@ class Scheduler:
 
         # ── 4. 构建 ExecutionPlan ──
         node_count = sum(len(level) for level in levels)
+        # 声明写错就在这里抛：声明写错的流水线若照常放行，等于它从来没有 schema。
+        from .input_schema import load_declaration
+        inputs_schema = load_declaration(
+            raw.get("pipeline", {}).get("inputs"),
+            who=f"{pipeline_name}.pipeline.inputs")
         return ExecutionPlan(
             plan_id=plan_id,
             pipeline_name=pipeline_name,
@@ -585,6 +594,7 @@ class Scheduler:
             raw=raw,
             fail_fast=raw.get("pipeline", {}).get("fail_fast", False),
             checkpoint=raw.get("pipeline", {}).get("checkpoint", {}),
+            inputs_schema=inputs_schema,
         )
 
     # ── 子流水线内联（call） ───────────────────

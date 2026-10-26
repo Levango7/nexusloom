@@ -802,6 +802,52 @@ python run.py --replay-run <run_id>                  # 按 id 补一条
 看到 `projection: "incomplete"` 就走到上面那条 `python run.py --replay-run <run_id>`——
 **能不能补由补账工具判**（它拒绝时会说清是运行中、三方冲突还是已升格），这里不复制那条规则。
 
+### 类型化运行输入（2026-10-26，#7）
+
+流水线可以在 YAML 里声明运行输入的**结构与约束**，四个调用面（CLI / HTTP / MCP / webhook）
+在提交那一刻按同一份声明校验，非法载荷被拒且错误**定位到字段**：
+
+```yaml
+pipeline:
+  inputs:
+    type: object
+    required: [topic]
+    additionalProperties: false      # 本实现只支持 true/false
+    properties:
+      topic: {type: str, minLength: 2, maxLength: 40}
+      depth: {type: int, minimum: 1, maximum: 5, default: 3}
+      tags:  {type: list, items: {type: str}}
+      mode:  {enum: [fast, full]}
+```
+
+```bash
+python run.py -p mypipe --set-input topic=云成本 --set-input depth=3
+python run.py -p mypipe --inputs-json '{"topic": "云成本", "tags": ["a", "b"]}'
+curl -X POST localhost:8080/api/workflows/mypipe/runs \
+     -H "Authorization: Bearer $ADMIN_API_KEY" -d '{"inputs": {"topic": "云成本"}}'
+curl localhost:8080/api/workflows/mypipe/inputs     # 读回声明，客户端据此生成表单
+```
+
+支持的 keyword 是**声明式子集**（`type`/`required`/`enum`/`pattern`/`minimum`/`maximum`/
+`minLength`/`maxLength`/`default`/`items`/`properties`/`additionalProperties`），不是完整
+JSON Schema：本仓不为此新增第三方依赖，`type` 沿用引擎既有类型名（`str`/`int`/`float`/
+`bool`/`list`/`dict`），同一个值只有一种叫法。写在这套子集之外的 keyword（含拼错的
+`max_length`）在**解析流水线时**就报错——被静默忽略的约束等于那条约束从没存在过。
+
+三条边界要说在前面：
+
+- **声明不进锁指纹**（`config_hash` / `topology_hash` 都不含它）。代价照实说：改 schema
+  不会被锁拦下。收益是随包 20 条流水线不必因为加了这个字段而全部重锁。
+- **声明写错 = 解析期红**，不留到提交期：一条拼错名的流水线如果照常放行，它从来没有
+  过 schema，而没人会去查。
+- **自由文本入口在声明存在时被拒绝**。`POST /api/tasks` 的 `query`、MCP
+  `generate_document`、CLI 的位置参数 `input`、webhook 的非 JSON 文本载荷传的是整篇
+  文本，没有可校验的键→值结构；流水线一旦声明了 `inputs`，这些入口会明确拒并指出该用
+  哪个口。**没有声明的流水线一切照旧**（随包 20 条行为不变，含渲染出的文档逐字节相同）。
+
+恢复（`--recover`）与 worker 取的是**已渲染的输入文件**，不过这道门——它们重放的是
+当初已经通过校验的那份载荷，再校验一次只会因为 schema 演进把老任务卡死。
+
 ### 定时触发（Cron）
 
 按 `triggers.yaml` 的 cron 常驻调度（本地时间；**错过不补跑**，跳过窗口会打印出来）：
@@ -1027,21 +1073,22 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**2999 个测试本机全绿**（`2999 passed, 10 skipped, 6 deselected`，2026-10-26 本机全量实测；
-本轮把 §3.1 的 A4/A6 与 §3.2 的 B4/B6 四项工程欠账一次交付，全部有判据
-（变异对照见 CHANGELOG 续65–续68；A3 类型化输入由并行 PR #65 交付，本分支
-不重复携带）：A4 `loom demo` 沙盒 5 秒跑完一次完整交付（质量门 82/100，
-确定性离线），干净 venv 验收通过；A6 保留期 GC 接进 worker 循环（重启后
-继续）并有一次性维护命令；B4 cron 触发租约、B6 配置覆写 CAS 各有真跨进程
-判据；另含全量跑抓到的进程级副作用收口（demo 环境变量还原）与 A6 单例
-污染修复；
-护栏口径不变：`collected − declared ≤ 10`，本行差值 10，恰好是 10 条 skipif
-（`LOOM_TEST_PG_URL` 未设时跳过，CI 四条腿都挂真 PG 会执行）；
-口径：`Python 3.14.3`、`LOOM_TEST_PG_URL` 未设置、`pytest -p no:cacheprovider`；
-计数从 2950 涨到 2999（+49 条：B4 租约 20、A4 demo 13、B6 CAS 3、A6 维护 17、
-既有套件补齐若干）；
-下一批见产品复核文档的"实施状态"头（A2/A5/A7 与 P2 生态线仍在开放清单上）。
-
+**3077 个测试本机全绿**（`3077 passed, 10 skipped, 6 deselected`，2026-10-26 本机全量实测；
+现场读到的数是 `3027 passed, 1 failed`——那唯一一条红就是这条计数护栏自身，把本行换成
+本批实测数之后它才转绿，实际收集 3037 条，护栏按 `collected − declared ≤ 10` 判（本行
+差值 9 = 7 条 `requires_pg` + 2 条 `test_e2e_real` 的环境门）；本轮口径：`Python 3.14.3`、
+`LOOM_TEST_PG_URL` 未设置、我这侧同机没有其他 pytest 在跑，且**这一轮跑在未被打桩的最终头
+`451ad86` 上**（两轮变异电池都在它之前结束 ⇒ 数没被变异污染；代价是第一轮的电池数字不作数，
+见 CHANGELOG 续65 招供①），全量 **1473.05s ≈ 24.6 分钟**
+（上一批 918.10s ≈ 15.3 分钟、再上一批 1178.48s ≈ 19.6 分钟、静默基线 753.83s——读这几个数
+请带各自的负载条件，别互相换算；本批比上一批慢 9.5 分钟主要是 40 条新判据里有 3 条走真子进程
+CLI、5 条走真 HTTP 往返）；
+上一行写的 2950 之后的本批 #7 类型化输入 **+78 条**（`tests/test_input_schema.py` 38 +
+`tests/test_typed_input_surfaces.py` 40：声明期四类写错都要在解析时红且带字段全路径 /
+载荷期每类约束各红一条且错误**可定位**（`tags[1]`、`spec.region`）/ `default` 只填没给的 /
+四条口逐条证明"确实到达闸门"（非法必拒且**引擎没被调用**、合法要看到闸门产出的文档、
+没声明的照旧=反向对照）/ 一条真 HTTP 端到端 + 一条真 CLI 子进程 + 闸门只有一处实现的结构判据；
+26 条窄变异全部有射程，含首轮那条零射程变异逼出来的"类型不符即短路"补判据，见 CHANGELOG 续65）；
 上一行写的 2928 之后的本批 #8 只读 HTTP 面 **+22 条**（`tests/test_deliveries_api.py`：
 账本列表/明细走**真 HTTP**（handler 写了但路由没接、路由接了但读内存 task、行取对了但
 越权漏出别人这三种失败只有真请求分得开）/ 逐行按投影裁决可见性 / 越权与不存在同一个 404 /

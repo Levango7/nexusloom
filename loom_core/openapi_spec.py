@@ -20,9 +20,17 @@ def _schemas() -> dict:
     return {
         "TaskSubmit": {
             "type": "object",
-            "required": ["query"],
+            # `query` 与 `inputs` 二选一：写死 required:["query"] 会对"只带类型化载荷"
+            # 这条合法提交说不，所以用 anyOf 表达"至少给一个"。
+            "anyOf": [{"required": ["query"]}, {"required": ["inputs"]}],
             "properties": {
-                "query": {"type": "string", "description": "文档主题/查询"},
+                "query": {"type": "string", "description": "文档主题/查询（自由文本形）"},
+                "inputs": {
+                    "type": "object",
+                    "description": "类型化载荷（与 query 二选一）：流水线声明了 "
+                                   "pipeline.inputs 时逐字段校验，不合法返回 400 + fields；"
+                                   "声明未给的流水线按「## 键」分节渲染成输入文档",
+                },
                 "title": {"type": "string", "description": "文档标题"},
                 "pipeline": {
                     "type": "string",
@@ -62,6 +70,27 @@ def _schemas() -> dict:
             "type": "object",
             "properties": {
                 "error": {"type": "string"},
+            },
+        },
+        "InvalidInputs": {
+            "type": "object",
+            "description": "类型化输入校验未通过（input_schema.InputValidationError.to_dict）",
+            "properties": {
+                "error": {"type": "string"},
+                "code": {"type": "string", "enum": ["invalid_inputs"]},
+                "fields": {
+                    "type": "array",
+                    "description": "每条都能定位到字段：点号路径（spec.region）与"
+                                   "下标路径（tags[1]），顶层为空串表示载荷整体不是对象",
+                    "items": {
+                        "type": "object",
+                        "required": ["field", "reason"],
+                        "properties": {
+                            "field": {"type": "string"},
+                            "reason": {"type": "string"},
+                        },
+                    },
+                },
             },
         },
     }
@@ -126,31 +155,51 @@ def _task_paths() -> dict:
         },
         "/api/tasks": {
             "post": {
-                "summary": "提交新文档生成任务",
+                "summary": "提交新文档生成任务（query 自由文本 或 inputs 类型化载荷）",
                 "requestBody": {
                     "required": True,
                     "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TaskSubmit"}}},
                 },
                 "responses": {
                     "200": {"description": "任务已提交/完成"},
-                    "400": {"description": "参数错误", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                    "400": {"description": "参数错误或输入不符合声明",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InvalidInputs"}}}},
                 },
             },
         },
-        "/api/workflows/" + "{workflow_name}" + "/runs": {
+        "/api/workflows/{name}/runs": {
             "post": {
-                "summary": "类型化输入提交运行（A3）",
-                "parameters": [{"name": "workflow_name", "in": "path", "required": True, "schema": {"type": "string"}}],
+                "summary": "通用提交口：按流水线声明校验 inputs 后开一次运行（P1 #7）",
+                "parameters": [{"name": "name", "in": "path", "required": True,
+                               "schema": {"type": "string",
+                                          "enum": _available_pipelines()}}],
                 "requestBody": {
                     "required": True,
-                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WorkflowRunSubmit"}}},
+                    "content": {"application/json": {"schema": {
+                        "type": "object",
+                        "required": ["inputs"],
+                        "properties": {
+                            "inputs": {"type": "object"},
+                            "wait": {"type": "boolean", "default": False},
+                            "output": {"type": "string"},
+                        }}}},
                 },
                 "responses": {
-                    "200": {"description": "运行已提交"},
-                    "400": {"description": "输入不满足流水线 inputs schema（fields 给出字段路径）", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-                    "404": {"description": "流水线不存在", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-                    "409": {"description": "流水线锁漂移", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                    "200": {"description": "运行已创建（wait=false 时返回 task_id 供轮询）"},
+                    "400": {"description": "流水线名未知 / 输入不符合声明（fields 定位到字段）",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InvalidInputs"}}}},
                 },
+            },
+        },
+        "/api/workflows/{name}/inputs": {
+            "get": {
+                "summary": "读回某条流水线的类型化输入声明（客户端据此生成表单；"
+                           "没声明时 declared=false，退回自由文本）",
+                "parameters": [{"name": "name", "in": "path", "required": True,
+                               "schema": {"type": "string",
+                                          "enum": _available_pipelines()}}],
+                "responses": {"200": {"description": "声明的副本"},
+                              "404": {"description": "流水线不存在"}},
             },
         },
         "/tasks/{task_id}/cancel": {
