@@ -1073,7 +1073,7 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3028 个测试本机全绿**（`3028 passed, 9 skipped, 6 deselected`，2026-10-26 本机全量实测；
+**3077 个测试本机全绿**（`3077 passed, 10 skipped, 6 deselected`，2026-10-26 本机全量实测；
 现场读到的数是 `3027 passed, 1 failed`——那唯一一条红就是这条计数护栏自身，把本行换成
 本批实测数之后它才转绿，实际收集 3037 条，护栏按 `collected − declared ≤ 10` 判（本行
 差值 9 = 7 条 `requires_pg` + 2 条 `test_e2e_real` 的环境门）；本轮口径：`Python 3.14.3`、
