@@ -258,10 +258,6 @@
 
 ### P1（3–4 周）：把"交付"做成一等对象
 6. RunStore + EventLog 迁移（先 approvals/artifacts/list_runs，再 events；双写期 parity 测试）。
-<<<<<<< HEAD
-7. 类型化输入（A3）+ `POST /api/workflows/{name}/runs`。
-8. Deliveries 浏览器（A2）+ 锁指纹差异呈现（A5）。
-=======
 7. 类型化输入（A3）+ `POST /api/workflows/{name}/runs`。—— **2026-10-26 本项按"闸门 + 四条口"
    收口**（续65）：`loom_core/input_schema.py` 是声明式子集（11 个 keyword，不引 `jsonschema`），
    `pipeline.inputs` 在**解析期**验声明、在**提交期**验载荷；CLI（`--inputs-json` /
@@ -274,7 +270,6 @@
    `GET /api/deliveries`、`GET /api/deliveries/<run_id>`、`GET /api/locks` 三个只读口 + 22 条
    真 HTTP 判据入库（续64）。剩下两半都要先拍板再动：A2 的 sha256/保留期要跟 A6（GC）
    一起做，A5 的"逐运行指纹"要在交付载荷里加一个键（写侧改动，且只对今后的运行有效）。
->>>>>>> d9f6ca3 (docs(#7): 类型化输入的对外口径 + 锚点表 13 条 remap)
 9. 排程租约 + DLQ 重放 + 保留期 GC（A6/B4）。
 10. Python SDK（A7）。
 
