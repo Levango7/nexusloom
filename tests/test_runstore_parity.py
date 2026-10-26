@@ -143,18 +143,17 @@ def _reconcile(store: RunStore, orch: PipelineOrchestrator, task_id: str,
                expect_status: str) -> dict:
     """四个来源逐字段对账；任何一处不一致就 AssertionError 带两侧实际值。
 
-    顺序有讲究：**先等到队列行落进终态**再读投影。反过来读会拿到 `running`——
-    那是在断言一个由收尾链自己会抹掉的中间态（同一个形状在 #52 里刚修过一条，
-    别在门禁里再造一条）。
+    顺序有讲究：**先等到账本行落地**再读投影。收尾链的顺序是 队列终态 →
+    终态事件 → 投影（`close_run`）→ `_deliver`（账本）——账本是三步里的
+    **最后一步**，它到了投影必已盖章。此前投影在队列终态一落就读，读到的是
+    "队列已 cancelled、投影还没写"的中间态（2026-10-26 release 轮
+    pypi-verify 全量负载下撞上的正是这条：runs.status=running != cancelled，
+    而同一时刻账本行已到——断言用的还是提前抓的旧快照）。
     """
     queue_row = _wait_terminal_row(orch, task_id)
     assert queue_row is not None, "队列行没进终态"
     assert queue_row["status"] == expect_status, queue_row
 
-    run = store.get_run(task_id)
-    assert run is not None, (
-        f"运行 {task_id} 在 runs 里没有投影行——但事件流里有东西吗："
-        f"{[e['type'] for e in store.events(task_id)]}")
     # `DeliveryLedger.get()` 返回的就是那份结构化记录本身（payload_json 解开的样子），
     # 不是 {"payload": ...} 的套娃——读错键会让节点集合恒空，断言白给。
     t_ledger = time.time()
@@ -162,6 +161,11 @@ def _reconcile(store: RunStore, orch: PipelineOrchestrator, task_id: str,
     assert ledger is not None, (
         f"等 {time.time() - t_ledger:.1f}s 账本这行仍没出现（收尾链在 _deliver 前中断了？）"
         f" 队列行={queue_row.get('status')}")
+
+    run = store.get_run(task_id)
+    assert run is not None, (
+        f"运行 {task_id} 在 runs 里没有投影行——但事件流里有东西吗："
+        f"{[e['type'] for e in store.events(task_id)]}")
 
     # 1) 终态三处必须同值——"事件说完成、投影说运行中"就是这个断言抓的
     assert run["status"] == expect_status, (
