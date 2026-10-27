@@ -180,3 +180,89 @@ class TestVerbSmoke:
         args_verb = parser.parse_args(rest)
         assert args_bare.input == args_verb.input == "x.md"
         assert args_bare.queries == args_verb.queries == ["a b"]
+
+
+class TestPlanDiffFlag:
+    """A5: `loom plan --diff` CLI 判据。
+
+    `--diff` 是锁指纹比对的运维入口：比对当前流水线与 .lock 文件，
+    输出人话差异项后退出（不执行）。覆盖三种场景：
+      - 无锁文件 → 如实报告"无锁文件"并退出 0；
+      - 锁一致 → 如实报告"锁一致，无漂移"并退出 0；
+      - 锁漂移 → 逐条列出差异项并退出 0（不抛、不执行）。
+    """
+
+    def test_diff_flag_registered(self):
+        """--diff 必须在 arg parser 里注册（门面判据）。"""
+        parser = _run_module().build_arg_parser()
+        args = parser.parse_args(["x.md", "--diff"])
+        assert args.diff is True
+        args2 = parser.parse_args(["x.md"])
+        assert args2.diff is False
+
+    def test_plan_diff_no_lock_file(self, tmp_path):
+        """无锁文件时：如实报告，退出 0（不报错——这是运维巡检，不是执行）。"""
+        src = PROJECT / "pipelines" / "three_pass.yaml"
+        sandbox = tmp_path / "sandbox"
+        sandbox.mkdir()
+        target = sandbox / "three_pass.yaml"
+        target.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        proc = subprocess.run(
+            [sys.executable, str(PROJECT / "run.py"),
+             "plan", "--pipeline-file", str(target), "--diff"],
+            capture_output=True, text=True, timeout=120, cwd=str(tmp_path))
+        assert proc.returncode == 0, proc.stderr[-800:]
+        assert "无锁文件" in proc.stdout
+        assert "loom lock" in proc.stdout, "应提示用 loom lock 生成锁文件"
+
+    def test_plan_diff_lock_consistent(self, tmp_path):
+        """锁一致时：如实报告"锁一致，无漂移"，退出 0。
+
+        先 lock 再 diff——用仓库里的 three_pass 流水线。
+        """
+        src = PROJECT / "pipelines" / "three_pass.yaml"
+        sandbox = tmp_path / "sandbox"
+        sandbox.mkdir()
+        target = sandbox / "three_pass.yaml"
+        target.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        lock_proc = subprocess.run(
+            [sys.executable, str(PROJECT / "run.py"),
+             "lock", "--pipeline-file", str(target)],
+            capture_output=True, text=True, timeout=120, cwd=str(tmp_path))
+        assert lock_proc.returncode == 0, lock_proc.stderr[-800:]
+        assert (sandbox / "three_pass.lock").exists(), "前提：锁文件没写出来"
+        diff_proc = subprocess.run(
+            [sys.executable, str(PROJECT / "run.py"),
+             "plan", "--pipeline-file", str(target), "--diff"],
+            capture_output=True, text=True, timeout=120, cwd=str(tmp_path))
+        assert diff_proc.returncode == 0, diff_proc.stderr[-800:]
+        assert "锁一致" in diff_proc.stdout
+        assert "无漂移" in diff_proc.stdout
+
+    def test_plan_diff_detects_drift(self, tmp_path):
+        """锁漂移时：逐条列出差异项，退出 0（不抛、不执行）。
+
+        锁刚写完时一致，改了 YAML 的 agent config 后锁应当报漂移。
+        """
+        src = PROJECT / "pipelines" / "three_pass.yaml"
+        sandbox = tmp_path / "sandbox"
+        sandbox.mkdir()
+        target = sandbox / "three_pass.yaml"
+        target.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        lock_proc = subprocess.run(
+            [sys.executable, str(PROJECT / "run.py"),
+             "lock", "--pipeline-file", str(target)],
+            capture_output=True, text=True, timeout=120, cwd=str(tmp_path))
+        assert lock_proc.returncode == 0, lock_proc.stderr[-800:]
+        # 改 YAML：改 researcher 的 max_results（改了 config → config_hash 漂）
+        original = src.read_text(encoding="utf-8")
+        drifted = original.replace("max_results: 20", "max_results: 99", 1)
+        target.write_text(drifted, encoding="utf-8")
+        diff_proc = subprocess.run(
+            [sys.executable, str(PROJECT / "run.py"),
+             "plan", "--pipeline-file", str(target), "--diff"],
+            capture_output=True, text=True, timeout=120, cwd=str(tmp_path))
+        assert diff_proc.returncode == 0, diff_proc.stderr[-800:]
+        assert "漂移" in diff_proc.stdout, \
+            f"改了 agent config 后 --diff 应当报漂移，stdout={diff_proc.stdout[-400:]}"
+        assert "检测到" in diff_proc.stdout, "应当报告检测到 N 项漂移"

@@ -1076,15 +1076,15 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3106 个测试本机全绿**（`3106 passed, 10 skipped, 6 deselected`，2026-10-27 本机全量实测；
-现场读到的数是 `3100 passed, 1 failed`——那唯一一条红就是这条计数护栏自身，把本行换成
-本批实测数之后它才转绿，实际收集 **3107** 条，护栏按 `collected − declared ≤ 10` 判（本行
-差值 **1** = CI 与本机的平台差 1 条，`requires_pg` 用例在 CI 挂真 PG 会执行、本机 skip）；
-**本批 +11 条**（2026-10-27 `tests/test_state_backend.py` B5）：RunStore 双后端真 PG 腿——
+**3119 个测试本机全绿**（`3119 passed, 1 skipped, 6 deselected`，2026-10-27 本机全量实测；
+实际收集 **3119** 条，护栏按 `collected − declared ≤ 10` 判；
+**本批 +12 条**（2026-10-27 A5/A2 交付指纹与清理）：
+- A5 指纹：`topology_hash` + 逐 agent `config_hashes` 进交付记录（复用 Scheduler 静态方法，两处各算一遍必然漂）
+- A2 `output_sha256`：交付产物内容哈希（64 位 hex，无产物时空串）
+- A5 `loom plan --diff`：CLI flag，比对当前流水线与锁文件，报告漂移项
+- A2 `DeliveryLedger.cleanup()`：双判据（retention_days + max_runs），接入 `gc_runs()`；
+**上一批 +11 条**（2026-10-27 `tests/test_state_backend.py` B5）：RunStore 双后端真 PG 腿——
 六表 schema 幂等 / open_run 生命周期 / events after_seq+limit / record_nodes 批量 upsert /
-upsert 幂等 / 审批全生命周期 / 排程租约互斥 / seq 取号并发 8 线程×5 / cleanup 级联删 /
-retention_days 判删 / list_runs principal 作用域；此前只有 2 条最小 SQL 形状测试，PG 路径
-从未被真 PG 验证过（设计评审 §288 预警的正是这个）；
 **上一批 +7 条**（2026-10-27 `tests/test_client_sdk.py`）：LoomClient Python SDK（产品评审 A7）
 的真 HTTP 集成测试——submit-cancel-wait 链 / approve-reject 收件箱链 / 生命周期 404 作用域 /
 OpenAPI 路由同源门禁 / submit 参数校验 / run_workflow 400 / paused 任务 wait 超时；AdminAPI

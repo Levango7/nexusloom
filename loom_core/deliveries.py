@@ -108,6 +108,38 @@ class DeliveryLedger:
             conn.close()
         return [_fast_loads(r[0]) for r in rows]
 
+    def cleanup(self, retention_days: int = 0, max_runs: int = 0,
+                now: float | None = None) -> int:
+        """按保留期判据清理交付账本。返回删除行数。
+
+        与 run_store.cleanup 同一双判据口径：
+        - retention_days > 0：删除 finished_at 早于 now - days*86400 的记录
+        - max_runs > 0：只保留 finished_at 最新的 N 条，其余删除
+        两个判据可同时生效（年龄判据在保留集内也适用）。
+        """
+        import time as _time
+        if retention_days <= 0 and max_runs <= 0:
+            return 0
+        now_ts = now if now is not None else _time.time()
+        conn = self._conn()
+        try:
+            with conn:
+                deleted = 0
+                if retention_days > 0:
+                    cutoff = now_ts - retention_days * 86400
+                    cur = conn.execute(
+                        "DELETE FROM deliveries WHERE finished_at < ?", (cutoff,))
+                    deleted += cur.rowcount
+                if max_runs > 0:
+                    cur = conn.execute(
+                        "DELETE FROM deliveries WHERE run_id NOT IN "
+                        "(SELECT run_id FROM deliveries ORDER BY finished_at DESC LIMIT ?)",
+                        (max_runs,))
+                    deleted += cur.rowcount
+            return deleted
+        finally:
+            conn.close()
+
 
 def _as_float_or_none(value: Any) -> float | None:
     try:
