@@ -20,8 +20,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-import pytest
-
 from loom_core.pipeline import PipelineOrchestrator
 from loom_core.scheduler import Scheduler
 
@@ -126,7 +124,7 @@ class TestProcessExecutorEndToEnd:
             "# 标题\n\n这是一段足够长的内容用于测试。" * 5, encoding="utf-8"
         )
 
-        task = orch.run_plan(
+        orch.run_plan(
             plan, input_file=str(input_file), task_id="proc_single_test", wait=False
         )
         row = _wait_done(orch, "proc_single_test")
@@ -177,7 +175,7 @@ class TestProcessExecutorEndToEnd:
             "# 标题\n\n这是一段足够长的内容用于测试。" * 5, encoding="utf-8"
         )
 
-        task = orch.run_plan(
+        orch.run_plan(
             plan, input_file=str(input_file), task_id="proc_thread_test", wait=False
         )
         row = _wait_done(orch, "proc_thread_test")
@@ -202,7 +200,7 @@ class TestProcessExecutorWithoutChildContext:
             "# 标题\n\n这是一段足够长的内容用于测试。" * 5, encoding="utf-8"
         )
 
-        task = orch.run_plan(
+        orch.run_plan(
             plan, input_file=str(input_file), task_id="proc_no_ctx_test", wait=False
         )
         row = _wait_done(orch, "proc_no_ctx_test")
