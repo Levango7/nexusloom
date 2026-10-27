@@ -801,7 +801,7 @@ class TestPostgresDeliveryCostQuality:
         tracker.set_budget(0.002)
         try:
             tracker.ensure_budget()
-            assert False, "超预算应抛 BudgetExceededError"
+            raise AssertionError("超预算应抛 BudgetExceededError")
         except Exception as e:
             assert "预算已耗尽" in str(e)
 
@@ -814,7 +814,7 @@ class TestPostgresDeliveryCostQuality:
         qf = QualityFeedback(PG_URL)
         rid = f"pg{uuid.uuid4().hex[:10]}"
         # 写 4 条，其中 3 条低于 WEAK_THRESHOLD(70)
-        for i, score in enumerate([60, 55, 80, 65]):
+        for _i, score in enumerate([60, 55, 80, 65]):
             qf.record(rid, {"completeness": score}, section_types=["概述"])
 
         weak = qf.get_weak_patterns(min_samples=3)
