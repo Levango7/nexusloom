@@ -743,16 +743,26 @@ class TestPostgresDeliveryCostQuality:
 
     @pytest.fixture(autouse=True)
     def _clean_tables(self):
-        """PG 表跨运行持久：开跑前清三张表，避免历史残留污染判据。"""
-        import psycopg
-        conn = psycopg.connect(PG_URL)
-        conn.autocommit = True
-        cur = conn.cursor()
-        cur.execute("DELETE FROM deliveries")
-        cur.execute("DELETE FROM cost_log")
-        cur.execute("DELETE FROM quality_history")
-        cur.close()
-        conn.close()
+        """PG 表跨运行持久：开跑前清三张表，避免历史残留污染判据。
+
+        先建实例触发 schema DDL（CI 上 PG 数据库是新鲜的，表尚未存在），
+        再用各自 pool 连接清表。
+        """
+        from loom_core.deliveries import DeliveryLedger as _DL
+        from loom_core.cost_tracker import CostTracker as _CT
+        from loom_core.quality_feedback import QualityFeedback as _QF
+        dl = _DL(PG_URL)
+        with dl._pool.conn() as conn:
+            conn.execute("DELETE FROM deliveries")
+        dl.close()
+        ct = _CT(PG_URL)
+        with ct._conn() as conn:
+            conn.execute("DELETE FROM cost_log")
+        ct.close()
+        qf = _QF(PG_URL)
+        with qf._conn() as conn:
+            conn.execute("DELETE FROM quality_history")
+        qf.close()
         yield
 
     def test_delivery_ledger_pg(self):
