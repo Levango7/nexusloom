@@ -71,10 +71,14 @@ class TestCostTracker:
         `_init_db` 只在构造时建表；同进程内文件被换掉后，每个操作都会撞
         `no such table: cost_log`。2026-10-21 在测试隔离场景里实测到这条，
         生产侧的同类场景是"服务在跑、状态目录被清"。
+
+        pool 的 thread-local 连接持有文件句柄，Windows 下必须先 close 再 unlink。
+        close 后 pool 的 _probe 检测到文件消失，重建连接并触发 schema_init 自愈。
         """
         db = tmp_path / "wiped.db"
         tracker = CostTracker(db_path=str(db))
         tracker.record("cloudflare", 10, 5, cost=0.01)
+        tracker.close()
         db.unlink()
         tracker.record("cloudflare", 10, 5, cost=0.02)
         assert tracker.total_cost() == pytest.approx(0.02)
@@ -197,7 +201,7 @@ class TestConnectionLifecycle:
     def test_all_connections_closed_after_ops(self, tmp_path, monkeypatch):
         import sqlite3
 
-        import loom_core.cost_tracker as ct_mod
+        import loom_core.db_backend as db_mod
 
         created = []
         real_connect = sqlite3.connect
@@ -207,13 +211,14 @@ class TestConnectionLifecycle:
             created.append(conn)
             return conn
 
-        monkeypatch.setattr(ct_mod.sqlite3, "connect", _spy)
+        monkeypatch.setattr(db_mod.sqlite3, "connect", _spy)
         t = CostTracker(db_path=str(tmp_path / "lifecycle.db"))
         t.record("openai", 100, 50, cost=0.001, task_id="t1")
         t.total_cost()
         t.stats()
         t.stats_by_task("t1")
         t.cleanup(max_age_days=9999)
+        t.close()  # pool 缓存连接需显式关闭
 
         assert created, "应创建过 SQLite 连接"
         for conn in created:

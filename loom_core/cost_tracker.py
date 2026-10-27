@@ -4,7 +4,7 @@
   - 每次调用记录：供应商/token 数/花费/任务 ID
   - 实时统计：按供应商/任务/时间维度
   - 预算熔断：超预算时拒绝调用
-  - 持久化：SQLite 存储，重启不丢
+  - 持久化：经 db_backend 走 SQLite/Postgres 双方言，重启不丢
 
 用法：
     tracker = get_cost_tracker()
@@ -19,19 +19,15 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
-import sqlite3
 import threading
 import time
 from collections.abc import Iterator
-from pathlib import Path
+from typing import Any
 
 from . import state_paths
-from .sqlite_util import enable_wal
+from .db_backend import resolve_backend
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_DB = os.path.join(Path(__file__).parent.parent.absolute(), "bus_data", "cost.db")
 
 
 class BudgetExceededError(RuntimeError):
@@ -82,76 +78,55 @@ def calc_cost(provider: str, prompt_tokens: int, completion_tokens: int) -> floa
 
 
 class CostTracker:
-    """LLM 成本追踪器（线程安全，SQLite 持久化）"""
+    """LLM 成本追踪器（双方言持久化，pool 管理并发）"""
 
     def __init__(self, db_path: str = ""):
-        db_path = db_path or state_paths.store_path("cost.db")
-        self._db_path = db_path
-        self._lock = threading.Lock()
+        self._db_path = db_path or state_paths.store_path("cost.db")
+        self._pool = resolve_backend(self._db_path, "cost.db",
+                                    schema_init=self._ensure_schema)
         self._budget: float = 0  # 0 = 无限制
         self._init_db()
 
     @contextlib.contextmanager
-    def _conn(self) -> Iterator[sqlite3.Connection]:
-        """每操作独立连接：with 块内提交事务，退出时保证关闭。
+    def _conn(self) -> Iterator[Any]:
+        """当前线程连接（pool 管理生命周期与并发）。
 
-        注意 sqlite3 的 ``with conn`` 只提交事务、不关闭连接，此处用
-        contextmanager 包一层确保用完即关，避免连接泄漏
-        （ResourceWarning: unclosed database）。
+        pool 的 thread-local 连接自带 WAL + busy_timeout（SQLite 侧），
+        PG 侧由 MVCC 提供并发控制。事务由 ``with conn:`` 块管理。
         """
-        # 文件在 `_init_db` 之后被删/换过（state 目录迁移、清理、测试隔离）时，
-        # 新连接拿到的是一个空库 —— 不补建表的话每个操作都报 "no such table: cost_log"。
-        created = not Path(self._db_path).exists()
-        conn = sqlite3.connect(self._db_path, timeout=5, check_same_thread=False)
-        try:
-            # 并发首建同一库时 SQLite 切 WAL 不走 busy handler，
-            # 直接抛 "database is locked"，必须自带重试（见 sqlite_util 模块头）。
-            enable_wal(conn)
-            conn.execute("PRAGMA busy_timeout=3000")
-            if created:
-                self._ensure_schema(conn)
-            with conn:
-                yield conn
-        finally:
-            conn.close()
+        with self._pool.conn() as conn:
+            yield conn
 
     @staticmethod
-    def _ensure_schema(conn: sqlite3.Connection) -> None:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS cost_log (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp       REAL NOT NULL,
-                provider        TEXT NOT NULL,
-                prompt_tokens   INTEGER NOT NULL,
-                completion_tokens INTEGER NOT NULL,
-                cost            REAL NOT NULL,
-                task_id         TEXT DEFAULT '',
-                model           TEXT DEFAULT ''
-            )
-        """)
+    def _ensure_schema(conn: Any) -> None:
+        """建表 + 索引（幂等；DDL 不可参数化，表名/列名全为常量）"""
+        conn.execute(  # nosec B608
+            "CREATE TABLE IF NOT EXISTS cost_log "
+            "(id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "timestamp REAL NOT NULL, provider TEXT NOT NULL, "
+            "prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL, "
+            "cost REAL NOT NULL, task_id TEXT DEFAULT '', model TEXT DEFAULT '')"
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cost_provider ON cost_log(provider)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cost_task ON cost_log(task_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cost_ts ON cost_log(timestamp)")
 
     def _init_db(self):
-        Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        with self._conn() as conn:
-            self._ensure_schema(conn)
+        self._ensure_schema(self._pool.conn())
 
     def set_budget(self, max_cost: float):
         """设置预算上限（USD）。0 = 无限制"""
-        with self._lock:
-            self._budget = max_cost
+        self._budget = max_cost
 
     def total_cost(self, task_ids: set[str] | None = None) -> float:
-        """已花费总额（实例锁保证与 record 写入互斥，读值原子）
+        """已花费总额（pool 连接互斥，读值原子）
 
         `task_ids` 非 None 时只统计这些任务（token 身份的作用域过滤，spec §5.4）。
 
         残余窗口：check_budget 的「读总额→比对」与并发 record 之间无在途预留，
         高并发下多个调用可同时通过检查，存在轻微超预算可能（check-then-act）。
         """
-        with self._lock, self._conn() as conn:
+        with self._conn() as conn:
             if task_ids is None:
                 row = conn.execute("SELECT COALESCE(SUM(cost), 0) FROM cost_log").fetchone()
                 return row[0] if row else 0
@@ -187,7 +162,7 @@ class CostTracker:
         """记录一次 LLM 调用"""
         if cost is None:
             cost = calc_cost(provider, prompt_tokens, completion_tokens)
-        with self._lock, self._conn() as conn:
+        with self._conn() as conn:
             conn.execute(
                 "INSERT INTO cost_log (timestamp, provider, prompt_tokens, completion_tokens, "
                 "cost, task_id, model) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -269,7 +244,7 @@ class CostTracker:
     def cleanup(self, max_age_days: int = 90, max_rows: int = 0) -> int:
         """清理过期记录（双判据并集；0 的语义与 TaskQueue 同口径）。"""
         cutoff = time.time() - max_age_days * 86400
-        with self._lock, self._conn() as conn:
+        with self._conn() as conn:
             cur = conn.execute("DELETE FROM cost_log WHERE timestamp < ?",
                                (cutoff,))
             dropped = cur.rowcount
@@ -279,6 +254,10 @@ class CostTracker:
                     "ORDER BY timestamp DESC LIMIT ?)", (max_rows,))
                 dropped += cur.rowcount
         return dropped
+
+    def close(self) -> None:
+        """关闭当前线程的连接（测试清理用）。"""
+        self._pool.close()
 
 
 _tracker_instance: CostTracker | None = None
