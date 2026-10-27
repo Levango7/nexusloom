@@ -247,7 +247,7 @@ class CostTracker:
         with self._conn() as conn:
             cur = conn.execute("DELETE FROM cost_log WHERE timestamp < ?",
                                (cutoff,))
-            dropped = cur.rowcount
+            dropped: int = cur.rowcount
             if max_rows > 0:
                 cur = conn.execute(
                     "DELETE FROM cost_log WHERE id NOT IN (SELECT id FROM cost_log "

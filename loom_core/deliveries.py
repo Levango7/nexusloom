@@ -14,7 +14,7 @@ LOOM_STATE_DIR 隔离，测试互不污染。PG 由 ``LOOM_DATABASE_URL`` 或显
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from artesian.fast_json import dumps as _fast_dumps
 from artesian.fast_json import loads as _fast_loads
@@ -84,7 +84,7 @@ class DeliveryLedger:
             (run_id,)).fetchone()
         if not row:
             return None
-        return _fast_loads(row[0])
+        return cast(dict[str, Any], _fast_loads(row[0]))
 
     def list(self, limit: int = 50) -> list[dict[str, Any]]:
         """最近的交付记录（按 finished_at 降序），返回完整载荷。"""
@@ -92,7 +92,7 @@ class DeliveryLedger:
         rows = self._pool.conn().execute(
             "SELECT payload_json FROM deliveries "
             "ORDER BY finished_at DESC LIMIT ?", (limit,)).fetchall()
-        return [_fast_loads(r[0]) for r in rows]
+        return [cast(dict[str, Any], _fast_loads(r[0])) for r in rows]
 
     def cleanup(self, retention_days: int = 0, max_runs: int = 0,
                 now: float | None = None) -> int:
