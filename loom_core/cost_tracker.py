@@ -84,6 +84,7 @@ class CostTracker:
         self._db_path = db_path or state_paths.store_path("cost.db")
         self._pool = resolve_backend(self._db_path, "cost.db",
                                     schema_init=self._ensure_schema)
+        self._lock = threading.Lock()
         self._budget: float = 0  # 0 = 无限制
         self._init_db()
 

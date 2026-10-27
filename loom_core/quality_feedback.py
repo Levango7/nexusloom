@@ -33,6 +33,7 @@ class QualityFeedback:
         self._db_path = db_path or state_paths.store_path("quality.db")
         self._pool = resolve_backend(self._db_path, "quality.db",
                                     schema_init=self._ensure_schema)
+        self._lock = threading.Lock()
         self._init_db()
 
     @contextlib.contextmanager
