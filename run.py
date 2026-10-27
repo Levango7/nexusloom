@@ -525,6 +525,7 @@ def _run_single_task(args_args: argparse.Namespace, orch: PipelineOrchestrator,
             # 锁指纹差异（A5）：比对当前流水线与 .lock 文件，输出人话差异项
             if plan:
                 from pathlib import Path
+
                 from loom_core.scheduler import Scheduler
                 sched = Scheduler()
                 # --pipeline-file 时，锁文件在同目录；按名解析时锁在 pipelines/

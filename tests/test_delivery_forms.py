@@ -312,8 +312,8 @@ class TestDeliverEndToEnd:
                              task_id=task_id, wait=True)
         assert task.status.value == "done", task.error
 
-        from loom_core.scheduler import Scheduler
         from loom_core.deliveries import DeliveryLedger
+        from loom_core.scheduler import Scheduler
 
         row = DeliveryLedger().get(task_id)
         assert row is not None
