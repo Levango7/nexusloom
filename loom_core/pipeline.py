@@ -426,55 +426,6 @@ class PipelineOrchestrator:
     def _circuit_breaker_success(self, node):
         self._executor._circuit_breaker_success(node)
 
-    # ─── DAG 并行执行（内部） ─────────────────────────────
-
-    def _run_dag_parallel(self, task: PipelineTask, input_file: str, config: dict) -> bool:
-        """并行执行 DAG（统一节点模型，无 SimpleNamespace 转换）"""
-        from types import SimpleNamespace
-
-        agent_order = self._legacy_agent_order()
-        nodes, execution_order = self._build_dag(agent_order, config)
-
-        task.dag_nodes = nodes
-        task.execution_order = execution_order
-        total_nodes = len(nodes)
-        completed = 0
-
-        cb_cfg = config.get("circuit_breaker", {}) if config else {}
-
-        # 为每个 TaskNode 填充 agent_config（统一模型，无需 SimpleNamespace）
-        for _name, node in nodes.items():
-            node.agent_config = NodeConfig(
-                config=config or {},
-                pool_size=1,
-                rate_limit=node.rate_limit,
-                circuit_breaker=cb_cfg,
-            )
-
-        # 使用执行器工厂：支持 thread（默认）或 process（多进程水平扩展）
-        executor_type = (config or {}).get("executor_type", "thread")
-        max_workers = max(len(level) for level in execution_order) if execution_order else 1
-        with create_executor(max_workers=max_workers, executor_type=executor_type) as executor:
-            for _level_idx, level_names in enumerate(execution_order):
-                # 直接使用 TaskNode（已兼容 ExecutionNode 接口）
-                level_nodes = [nodes[name] for name in level_names if name in nodes]
-
-                plan_ns = SimpleNamespace(
-                    pipeline_name=task.pipeline_name,
-                    checkpoint=config if isinstance(config, dict) else {},
-                    fail_fast=config.get("fail_fast", True) if isinstance(config, dict) else True,
-                    raw=config if isinstance(config, dict) else {},
-                )
-
-                if not self._execute_level(task, level_nodes, input_file, plan_ns, executor):  # type: ignore[arg-type]
-                    return False
-
-                completed += len(level_names)
-                task.current_step = completed
-                task.progress = int((completed / total_nodes) * 100)
-
-        return True
-
     # ─── 流水线执行 ─────────────────────────────
 
     def _claim_terminal_event(self, task: PipelineTask, name: str) -> bool:
@@ -495,20 +446,6 @@ class PipelineOrchestrator:
         return {TaskStatus.DONE: "task.completed",
                 TaskStatus.FAILED: "task.failed",
                 TaskStatus.CANCELLED: "task.cancelled"}.get(status, "")
-
-    def _emit_task_events(self, task: PipelineTask, pipeline_name: str) -> None:
-        """触发 legacy 路径的终态事件钩子（每个运行至多一条，见 `_claim_terminal_event`）。"""
-        name = self._terminal_event_name(task.status)
-        if not self._claim_terminal_event(task, name):
-            return
-        payload: dict = {"task_id": task.id, "pipeline": pipeline_name}
-        if name == "task.completed":
-            payload["duration"] = task.finished_at - task.started_at
-            payload["result_keys"] = list(task.result.keys())
-        elif name == "task.failed":
-            payload["error"] = task.error
-            payload["duration"] = task.finished_at - task.started_at
-        emit_event(name, payload)
 
     def _record_plan_terminal_state(self, task: PipelineTask, plan: ExecutionPlan) -> None:
         """声明式路径收尾里"运行事实"的两笔写入：队列终态 + 终态事件 + 投影盖章。
@@ -699,121 +636,94 @@ class PipelineOrchestrator:
             return False
         return seq is not None
 
-    def _finalize_task_queue(self, task: PipelineTask, config: dict) -> None:
-        """任务终态同步任务队列 + 清理临时文件 + 断点保留/删除。
+    def _legacy_plan_from_config(self, pipeline_name: str, config: dict) -> ExecutionPlan:
+        """从 legacy config 构建 ExecutionPlan（B8 引擎收敛：legacy run() → run_plan()）。
 
-        legacy 路径**从不写投影**（`_runstore_open`/`_runstore_nodes` 只在
-        `run_plan` / `run_plan_async` 里调用），所以这里的行标 `legacy` 而不是
-        `incomplete`：那条是"按设计没有投影"，后者是"想写没写成、要补账"，
-        混成一个值就会让健康检查把 deprecated 路径报成数据丢失。
+        legacy 路径不读 pipelines/*.yaml，DAG 由 registry.deps_order() 构建。
+        这里把 legacy 的 TaskNode + execution_order 转换为 ExecutionPlan，
+        让 run_plan() 的统一引擎执行——legacy 因此获得 RunStore 投影、交付契约
+        检查、审批闸门支持等全部声明式能力。
+
+        配置入口统一：plan.raw = {"pipeline": config}，使得 _execute_plan 里的
+        ``plan.raw.get("pipeline", {}).get("executor_type")`` 与 legacy 的
+        ``config.get("executor_type")`` 等价。
         """
-        try:
-            self.task_queue.finish(
-                task.id,
-                task.status.value if hasattr(task.status, "value") else str(task.status),
-                error=task.error,
-                projection="legacy",
-            )
-        except Exception as e:
-            self._logger.log("warning", "task_queue.finish 失败",
-                             task_id=task.id, error=str(e))
-        self._cleanup_task_temp(task)
-        if task.status == TaskStatus.PAUSED:
-            try:
-                self._save_checkpoint(task)
-            except Exception as e:
-                self._logger.log("warning", "保存 PAUSED 断点失败",
-                                 task_id=task.id, error=str(e))
-        elif task.status == TaskStatus.DONE:
-            keep = bool((config or {}).get("checkpoint", {}).get("keep_on_success", False))
-            if not keep:
-                self._remove_checkpoint(task.id)
+        from .scheduler import AgentConfig, ExecutionNode, ExecutionPlan
+
+        agent_order = self._legacy_agent_order()
+        nodes, execution_order = self._build_dag(agent_order, config)
+
+        cb_cfg = config.get("circuit_breaker", {}) if config else {}
+        levels: list[list[ExecutionNode]] = []
+        for level_names in execution_order:
+            level: list[ExecutionNode] = []
+            for name in level_names:
+                tn = nodes.get(name)
+                if tn is None:
+                    continue
+                ac = AgentConfig(
+                    name=name,
+                    config=config or {},
+                    pool_size=1,
+                    rate_limit=tn.rate_limit,
+                    circuit_breaker=cb_cfg,
+                    timeout=tn.timeout,
+                    retry={"max_retries": tn.max_retries} if tn.max_retries else {},
+                    dependencies=list(tn.dependencies),
+                )
+                level.append(ExecutionNode(
+                    agent_name=name,
+                    agent_config=ac,
+                    dependencies=list(tn.dependencies),
+                    timeout=tn.timeout,
+                    max_retries=tn.max_retries,
+                    backoff=tn.backoff,
+                    initial_delay=tn.initial_delay,
+                ))
+            levels.append(level)
+
+        return ExecutionPlan(
+            plan_id=f"legacy-{pipeline_name}",
+            pipeline_name=pipeline_name,
+            node_count=len(nodes),
+            levels=levels,
+            raw={"pipeline": config or {}},
+            fail_fast=config.get("fail_fast", True) if config else True,
+            checkpoint=config or {},
+        )
 
     def run(self, task_id: str | None = None, pipeline_name: str = "",
             input_file: str = "", config: dict | None = None,
             wait: bool = True, resume: bool = False, owner: str = "") -> PipelineTask:
-        """执行流水线（支持 DAG 并行）
+        """执行流水线（统一入口：YAML 声明式优先，legacy config 兜底）。
 
-        .. deprecated::
-            Legacy 路径：DAG 由 agent 注册元数据（registry.deps_order）构建，
-            按设计绕过 pipelines/ YAML 与 Scheduler（无 lockfile 校验、无 per-node
-            config）。仅保留为 --legacy 与 YAML 加载失败时的兜底；新能力只进
-            run_plan()。两条路径的漂移由 tests/test_dual_path_parity.py 护栏。
+        B8 引擎收敛后，本方法是唯一入口：
+        1. 有 ``config`` → 走 legacy 注册表依赖序（不读 pipelines/*.yaml）
+        2. 无 ``config`` 但有 ``pipeline_name`` → 尝试 Scheduler.parse() 加载 YAML
+        3. YAML 加载失败 → 回落到 legacy ``_legacy_plan_from_config()``
+
+        两条路径最终都委托给 ``run_plan()`` 统一引擎执行。
         """
-        task_id = task_id or str(uuid.uuid4())[:8]
-
-        if resume:
-            task = self._load_checkpoint(task_id)
-            if task:
-                self._logger.log("info", "从断点恢复", task_id=task_id)
-            else:
-                task = PipelineTask(task_id, pipeline_name, input_file, config or {},
-                                owner=owner)
-        else:
-            task = PipelineTask(task_id, pipeline_name, input_file, config or {},
-                                owner=owner)
-
-        task.checkpoint_file = str(self.checkpoint_dir / f"{task_id}.json")
-
-        with self._lock:
-            self._running_tasks[task.id] = task
-
-        self.task_queue.submit(task.id, pipeline_name, input_file,
-                               (config or {}).get("pipeline", {}),
-                               principal=str(getattr(task, "owner", "") or ""))
-
-        task.started_at = time.time()
-
-        emit_event("task.created", {"task_id": task.id, "pipeline": pipeline_name, "input_file": input_file})
-        emit_event("task.started", {"task_id": task.id, "pipeline": pipeline_name, "started_at": task.started_at})
-
-        self.bus.publish("pipeline.started", "orchestrator", {
-            "task_id": task.id,
-            "pipeline": pipeline_name,
-            "input_file": input_file,
-            "config": _redact_config(config),
-        })
-
-        def run_steps():
+        plan = None
+        if config is not None:
+            # 显式 config → legacy 路径
+            plan = self._legacy_plan_from_config(pipeline_name, config)
+        elif pipeline_name:
+            # 无 config 但有 pipeline_name → 尝试 YAML
             try:
-                # C2：legacy 路径此前全程不设 RUNNING，pause() 要求 RUNNING → 恒 False；
-                # 与 run_plan() (:796/:892) 的状态机对齐
-                if task.status != TaskStatus.CANCELLED:
-                    task.status = TaskStatus.RUNNING
-                self._run_dag_parallel(task, input_file, config or {})
-                if task.status != TaskStatus.FAILED and task.status != TaskStatus.CANCELLED:
-                    task.status = TaskStatus.DONE
-                task.progress = 100 if task.status == TaskStatus.DONE else task.progress
-                task.finished_at = time.time()
-                self._emit_task_events(task, pipeline_name)
-                self._generate_report(task)
-                self._notify_callbacks(task)
-                self.bus.publish("pipeline.finished", "orchestrator", {
-                    "task_id": task.id,
-                    "status": task.status.value,
-                    "result": task.result,
-                    "error": task.error,
-                    "duration": task.finished_at - task.started_at,
-                })
+                from .scheduler import Scheduler
+                scheduler = Scheduler()
+                plan = scheduler.parse(pipeline_name)
             except Exception as e:
-                task.status = TaskStatus.FAILED
-                task.error = str(e)
-                task.finished_at = time.time()
-                self._logger.log("error", "任务执行异常", error=str(e))
-                if self._claim_terminal_event(task, "task.failed"):
-                    emit_event("task.failed", {"task_id": task.id, "pipeline": pipeline_name,
-                               "error": str(e), "duration": task.finished_at - task.started_at})
-            finally:
-                self._finalize_task_queue(task, config or {})
-                with self._lock:
-                    self._trim_task_history()
-
-        if wait:
-            run_steps()
-            return task
+                self._log("info", "YAML 加载失败，回落到 legacy 注册表依赖序",
+                          pipeline=pipeline_name, error=str(e))
+                plan = self._legacy_plan_from_config(pipeline_name, {})
         else:
-            threading.Thread(target=run_steps, daemon=True).start()
-            return task
+            # 既无 config 也无 pipeline_name → 空 plan 走 legacy
+            plan = self._legacy_plan_from_config("", {})
+
+        return self.run_plan(plan, input_file=input_file, task_id=task_id,
+                              wait=wait, resume=resume, owner=owner)
 
     def pause(self, task_id: str) -> bool:
         """暂停任务（在层级边界生效，支持断点续传）。
@@ -1551,6 +1461,7 @@ class PipelineOrchestrator:
             "pipeline": plan.pipeline_name,
             "input_file": input_file,
             "plan_id": plan.plan_id,
+            "config": _redact_config(plan.raw.get("pipeline", {})),
         })
 
         def execute():
@@ -1668,6 +1579,7 @@ class PipelineOrchestrator:
             "pipeline": plan.pipeline_name,
             "input_file": input_file,
             "plan_id": plan.plan_id,
+            "config": _redact_config(plan.raw.get("pipeline", {})),
         })
 
         try:

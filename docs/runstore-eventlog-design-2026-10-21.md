@@ -135,10 +135,13 @@
   **之前**——盖章失败时 `runs` 那行会永远停在 `running`，只看有无行会把它读成 complete
   （这条顺序是第一轮实测撞出来的，也留了变异 M5 钉住）。
 
-**为什么 `legacy` 与 `incomplete` 必须是两个值**：`_runstore_open` 只在 `run_plan` /
-`run_plan_async` 里调用（实测），legacy 路径 `run()` 连一行投影都不写——那是
-"deprecated 兜底，按设计缺观测面"。混成一个数，健康检查就把兜底路径报成数据丢失，
-而**误报的运维代价高于不报**（人会开始忽略这个指标）。
+**为什么 `legacy` 与 `incomplete` 必须是两个值**：设计文档写作时（2026-10-21），
+`_runstore_open` 只在 `run_plan` / `run_plan_async` 里调用（实测），legacy 路径 `run()`
+连一行投影都不写——那是"deprecated 兜底，按设计缺观测面"。**B8 引擎收敛后（2026-10-27），
+此描述已过时**：`run()` 委托给 `run_plan()` 统一引擎执行，legacy 路径现在写真实 RunStore
+投影，`projection` 标记从 `legacy` 升为 `ok`。`legacy` 值仍保留给 Stage 1 之前落账的
+历史运行（那些运行确实没有投影行）。两个值的历史区分仍然有效——只是新运行不再产生
+`legacy` 标记。
 
 **上一批没做的、本批做完了**：补账工具——把一个 `incomplete` 运行重新投影进 `runs` 表
 需要的就是"幂等的终态重放入口"（2026-10-25 交付，见下"Stage 3c"）。`deliveries.db` 与 checkpoint
