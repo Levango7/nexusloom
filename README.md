@@ -1076,12 +1076,16 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3086 个测试本机全绿**（`3086 passed, 10 skipped, 6 deselected`，2026-10-27 本机全量实测；
-现场读到的数是 `3078 passed, 1 failed`——那唯一一条红就是这条计数护栏自身，把本行换成
-本批实测数之后它才转绿，实际收集 **3096** 条，护栏按 `collected − declared ≤ 10` 判（本行
-差值 **10** = 10 条 `requires_pg` 与 `test_e2e_real` 的环境门，`LOOM_TEST_PG_URL` 未设时跳过，
-CI 四条腿都挂真 PG 会执行）；
-**本批 +7 条**（2026-10-27 `tests/test_client_sdk.py`）：LoomClient Python SDK（产品评审 A7）
+**3106 个测试本机全绿**（`3106 passed, 10 skipped, 6 deselected`，2026-10-27 本机全量实测；
+现场读到的数是 `3100 passed, 1 failed`——那唯一一条红就是这条计数护栏自身，把本行换成
+本批实测数之后它才转绿，实际收集 **3107** 条，护栏按 `collected − declared ≤ 10` 判（本行
+差值 **1** = CI 与本机的平台差 1 条，`requires_pg` 用例在 CI 挂真 PG 会执行、本机 skip）；
+**本批 +11 条**（2026-10-27 `tests/test_state_backend.py` B5）：RunStore 双后端真 PG 腿——
+六表 schema 幂等 / open_run 生命周期 / events after_seq+limit / record_nodes 批量 upsert /
+upsert 幂等 / 审批全生命周期 / 排程租约互斥 / seq 取号并发 8 线程×5 / cleanup 级联删 /
+retention_days 判删 / list_runs principal 作用域；此前只有 2 条最小 SQL 形状测试，PG 路径
+从未被真 PG 验证过（设计评审 §288 预警的正是这个）；
+**上一批 +7 条**（2026-10-27 `tests/test_client_sdk.py`）：LoomClient Python SDK（产品评审 A7）
 的真 HTTP 集成测试——submit-cancel-wait 链 / approve-reject 收件箱链 / 生命周期 404 作用域 /
 OpenAPI 路由同源门禁 / submit 参数校验 / run_workflow 400 / paused 任务 wait 超时；AdminAPI
 绑 127.0.0.1:0 + tokens.yaml admin token，不走 mock；

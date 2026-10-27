@@ -582,9 +582,8 @@ class TestPostgresRunStoreSql:
         # register（幂等）
         store.register_schedule(name, pipeline="p", cron="0 * * * *", enabled=True)
         store.register_schedule(name, pipeline="p", cron="0 * * * *", enabled=True)
-        scheds = store.list_schedules()
+        scheds = [s for s in store.list_schedules() if s["name"] == name]
         assert len(scheds) == 1
-        assert scheds[0]["name"] == name
         assert scheds[0]["cron"] == "0 * * * *"
         assert scheds[0]["enabled"] is True
         # owner A 抢租约
@@ -605,7 +604,7 @@ class TestPostgresRunStoreSql:
         assert store.release_schedule_lease(name, "owner-A") is False
         # 记一次触发
         store.record_schedule_fire(name, fired_at=1031.0, next_fire=3600.0)
-        scheds = store.list_schedules()
+        scheds = [s for s in store.list_schedules() if s["name"] == name]
         assert len(scheds) == 1
         s = scheds[0]
         assert s["last_fire"] == 1031.0
@@ -654,8 +653,10 @@ class TestPostgresRunStoreSql:
         from loom_core.run_store import RunStore
         store = RunStore(PG_URL)
         # 造 3 个终态运行
+        run_ids = []
         for i, ts in enumerate([1000.0, 2000.0, 3000.0]):
             rid = f"pgc{uuid.uuid4().hex[:8]}-{i}"
+            run_ids.append(rid)
             store.open_run(rid, workflow="wf", started_at=ts)
             store.record_nodes(rid, [{"node": "n", "status": "done",
                                       "attempts": 1, "started_at": ts,
@@ -670,12 +671,11 @@ class TestPostgresRunStoreSql:
         assert result["events"] >= 6, f"至少删 6 条事件，实得 {result['events']}"
         assert result["run_nodes"] >= 2, f"至少删 2 条节点，实得 {result['run_nodes']}"
         assert result["approvals"] >= 2, f"至少删 2 条审批，实得 {result['approvals']}"
-        # 保留的 run 还在
-        remaining = store.list_runs(limit=100)
-        terminal = [r for r in remaining if r["status"] == "done"]
-        assert len(terminal) == 1, f"终态运行应剩 1 条，实得 {len(terminal)}"
-        # 被删运行已从 runs 表消失，list_runs 不会返回它们；
-        # 级联删由上面的 rowcount 断言保证（events/nodes/approvals 计数 ≥2）。
+        # PG 库共享：list_runs 返回全量，用 run_id 成员判而不是计数
+        remaining_ids = {r["run_id"] for r in store.list_runs(limit=1000)}
+        assert run_ids[2] in remaining_ids, "最新终态运行应保留"
+        assert run_ids[0] not in remaining_ids, "旧终态运行应被删"
+        assert run_ids[1] not in remaining_ids, "旧终态运行应被删"
 
     def test_cleanup_retention_days(self):
         """cleanup 的 retention_days 判据在 PG 上成立。
@@ -716,9 +716,14 @@ class TestPostgresRunStoreSql:
         rid_b = f"pg{uuid.uuid4().hex[:10]}"
         store.open_run(rid_a, workflow="wf", principal="alice", started_at=1000.0)
         store.open_run(rid_b, workflow="wf", principal="bob", started_at=2000.0)
-        all_runs = store.list_runs(limit=100)
-        alice_runs = store.list_runs(principal="alice", limit=100)
-        bob_runs = store.list_runs(principal="bob", limit=100)
+        all_runs = store.list_runs(limit=1000)
+        alice_runs = store.list_runs(principal="alice", limit=1000)
+        bob_runs = store.list_runs(principal="bob", limit=1000)
+        alice_ids = {r["run_id"] for r in alice_runs}
+        bob_ids = {r["run_id"] for r in bob_runs}
         assert len(all_runs) >= 2
-        assert {r["run_id"] for r in alice_runs} == {rid_a}
-        assert {r["run_id"] for r in bob_runs} == {rid_b}
+        # PG 库共享：用成员判而非精确集合相等（其他测试可能留下同名 principal 的行）
+        assert rid_a in alice_ids, "alice 应看到自己的运行"
+        assert rid_b not in alice_ids, "alice 不应看到 bob 的运行"
+        assert rid_b in bob_ids, "bob 应看到自己的运行"
+        assert rid_a not in bob_ids, "bob 不应看到 alice 的运行"
