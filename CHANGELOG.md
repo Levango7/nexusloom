@@ -35,6 +35,30 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+## [3.14.0] - 2026-10-27
+
+### Added（2026-10-27，A7：LoomClient Python SDK）
+
+- **`LoomClient` 正式成为包导出符号**：`pip install nexusloom` 后 `from nexusloom import LoomClient`
+  即可用——Admin API 的 Python 客户端，覆盖 submit / cancel / wait / approve / reject /
+  run_workflow 全链路。此前 SDK 代码在仓里但没导出，用户得 `from loom_core.client import LoomClient`
+  绕一圈。现在 `loom_core/__init__.py` 的 `__all__` 里有三个新符号：`LoomClient` / `LoomError` /
+  `LoomTimeoutError`。
+- **7 条真 HTTP 集成测试**（`tests/test_client_sdk.py`）：submit-cancel-wait 链 / approve-reject
+  收件箱链 / 生命周期 404 作用域 / OpenAPI 路由同源门禁 / submit 参数校验 / run_workflow 400 /
+  paused 任务 wait 超时。AdminAPI 绑 127.0.0.1:0 + tokens.yaml admin token，不走 mock。
+
+### Added（2026-10-27，B5：RunStore 双后端真 PG 测试腿）
+
+- **11 条真 Postgres RunStore 测试**（`tests/test_state_backend.py::TestPostgresRunStoreSql`）：
+  此前只有 2 条最小 SQL 形状测试，PG 路径从未被真 PG 验证过（设计评审 §288 预警的正是这个）。
+  新测试覆盖六表 schema 幂等 / open_run 生命周期 / events after_seq+limit / record_nodes 批量
+  upsert / upsert 幂等 / 审批全生命周期 / 排程租约互斥 / seq 取号并发 8 线程×5 / cleanup 级联删 /
+  retention_days 判删 / list_runs principal 作用域。
+- **`cleanup()` 从 `executemany` 改为逐行 `execute` 循环**：psycopg3 的 `Connection` 没有
+  `executemany`（只有 `Cursor` 有），而 `_Conn` 包装的 `execute` 在两边都能用。这是 PG 路径
+  第一次被真 PG 测出来的缺陷——SQLite 侧 `executemany` 一直可用，所以本地永远绿。
+
 ### Changed（2026-10-27，B8 引擎收敛：run vs run_plan 两套引擎合并为一条）
 
 - **`orch.run()` 委托给 `run_plan()`**：legacy 路径不再自己跑 DAG 循环，而是构建
