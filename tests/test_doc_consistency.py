@@ -22,20 +22,37 @@ ROOT = Path(__file__).parent.parent
 
 # ─── 1. README 的测试数必须等于实际收集数 ───────────────────
 
-def _readme_declared_pass_count() -> int | None:
+def _readme_counts() -> tuple[int, int] | None:
+    """README 那一行里的一对数：声明通过数 + 声明跳过数。
+
+    跳过数也读出来，是因为它才是"允许差多少"的依据——容差写死成 10 的时候，
+    `requires_pg` 那批环境门涨到 21 条，护栏就把一个**正确**的数字判成了过期。
+    容差改成「README 自报的 skipped + 平台差」，两个数同源就不会各说各话。
+    """
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     m = re.search(r"\*\*(\d+)\s*个测试本机全绿\*\*（`\1 passed", text)
-    return int(m.group(1)) if m else None
+    if not m:
+        return None
+    passed = int(m.group(1))
+    m2 = re.search(r"`\d+ passed, (\d+) skipped", text)
+    if not m2:
+        return None
+    return passed, int(m2.group(1))
+
+
+#: 同一份 README 在两个平台上的收集数会有 1~4 条差（skipif 语义差异）
+PLATFORM_SLACK = 5
 
 
 @pytest.mark.slow
 def test_readme_test_count_matches_collection():
-    """README 声明的通过数 == 实际收集数（减去 2 条 skipif 用例）。
+    """README 声明的通过数 == 实际收集数（减去环境门 skipif 的那些）。
 
     数字来自 `pytest --co`，不是写死的常量——加测试时忘了改 README 会直接红。
     """
-    declared = _readme_declared_pass_count()
-    assert declared is not None, "README 的测试数句式被改坏了，护栏读不到数字"
+    counts = _readme_counts()
+    assert counts is not None, "README 的测试数句式被改坏了，护栏读不到数字"
+    declared, declared_skipped = counts
 
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/", "--co", "-q",
@@ -52,11 +69,14 @@ def test_readme_test_count_matches_collection():
         assert m2, f"读不懂 --co 的汇总行：{tail!r}"
         collected = int(m2.group(1))
 
-    # skipif 的用例被收集但不执行，所以 declared 允许比 collected 小的部分
-    # 只可能是这些 skip；差超过 10 条就说明数字确实过期了。
-    assert 0 <= collected - declared <= 10, (
-        f"README 写 {declared} passed，而实际收集 {collected} 条；"
-        f"差值 {collected - declared} 超出「仅 skipif」的容忍范围，请更新 README 的测试一节")
+    # skipif 的用例被收集但不执行，所以 declared 允许比 collected 小的部分只能
+    # 是这些 skip——上界取 README 自报的 skipped 数（+ 平台差），不写死常量：
+    # 环境门涨了却没人改 README，这里会红；改了 README 的 skipped 数，上界跟着动。
+    budget = declared_skipped + PLATFORM_SLACK
+    assert 0 <= collected - declared <= budget, (
+        f"README 写 {declared} passed / {declared_skipped} skipped，而实际收集 "
+        f"{collected} 条；差值 {collected - declared} 超出「仅环境门 skip」的上界 "
+        f"{budget}，请更新 README 的测试一节")
 
 
 # ─── 2. 文档里教的 METHOD+路径必须真存在 ────────────────────
