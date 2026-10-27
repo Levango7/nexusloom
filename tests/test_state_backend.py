@@ -365,7 +365,7 @@ class TestPostgresRunStoreSql:
         第一次 init 建表，第二次 init 是 no-op（IF NOT EXISTS 不报错、
         不重跑迁移）。SQLite 侧跑过同一条路径，PG 侧必须同样成立。
         """
-        from loom_core.run_store import RunStore, SCHEMA_VERSION
+        from loom_core.run_store import SCHEMA_VERSION, RunStore
         store1 = RunStore(PG_URL)
         assert store1.schema_version() == SCHEMA_VERSION
         # 第二次：不炸、版本不变
@@ -382,7 +382,9 @@ class TestPostgresRunStoreSql:
         "事件在、投影没跟上"的中间态。
         """
         from loom_core.run_store import (
-            RunStore, RUN_OPENED, RUN_STARTED,
+            RUN_OPENED,
+            RUN_STARTED,
+            RunStore,
         )
         store = RunStore(PG_URL)
         rid = f"pg{uuid.uuid4().hex[:10]}"
@@ -442,7 +444,7 @@ class TestPostgresRunStoreSql:
         两条 SQL 走方言翻译（PG: ON CONFLICT DO NOTHING），每个节点追加
         一条 NODE_FINISHED 事件。nodes() 读回必须看到全部节点。
         """
-        from loom_core.run_store import RunStore, NODE_FINISHED
+        from loom_core.run_store import NODE_FINISHED, RunStore
         store = RunStore(PG_URL)
         rid = f"pg{uuid.uuid4().hex[:10]}"
         store.open_run(rid, workflow="wf", started_at=1000.0)
@@ -506,8 +508,12 @@ class TestPostgresRunStoreSql:
         对非 pending 行返回 None。consume_approval 标记 consumed=1。
         """
         from loom_core.run_store import (
-            RunStore, PENDING, APPROVED, APPROVAL_REQUESTED,
-            APPROVAL_DECIDED, APPROVAL_CONSUMED,
+            APPROVAL_CONSUMED,
+            APPROVAL_DECIDED,
+            APPROVAL_REQUESTED,
+            APPROVED,
+            PENDING,
+            RunStore,
         )
         store = RunStore(PG_URL)
         rid = f"pg{uuid.uuid4().hex[:10]}"
@@ -668,10 +674,8 @@ class TestPostgresRunStoreSql:
         remaining = store.list_runs(limit=100)
         terminal = [r for r in remaining if r["status"] == "done"]
         assert len(terminal) == 1, f"终态运行应剩 1 条，实得 {len(terminal)}"
-        # 被删运行的事件查询返回空
-        deleted = [r for r in remaining if r["run_id"] not in
-                   {x["run_id"] for x in terminal}]
-        # （被删的已经查不到了，list_runs 里不会有它们）
+        # 被删运行已从 runs 表消失，list_runs 不会返回它们；
+        # 级联删由上面的 rowcount 断言保证（events/nodes/approvals 计数 ≥2）。
 
     def test_cleanup_retention_days(self):
         """cleanup 的 retention_days 判据在 PG 上成立。
