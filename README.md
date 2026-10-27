@@ -1073,15 +1073,19 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3079 个测试本机全绿**（`3079 passed, 10 skipped, 6 deselected`，2026-10-26 本机全量实测；
+**3086 个测试本机全绿**（`3086 passed, 10 skipped, 6 deselected`，2026-10-27 本机全量实测；
 现场读到的数是 `3078 passed, 1 failed`——那唯一一条红就是这条计数护栏自身，把本行换成
-本批实测数之后它才转绿，实际收集 **3089** 条，护栏按 `collected − declared ≤ 10` 判（本行
+本批实测数之后它才转绿，实际收集 **3096** 条，护栏按 `collected − declared ≤ 10` 判（本行
 差值 **10** = 10 条 `requires_pg` 与 `test_e2e_real` 的环境门，`LOOM_TEST_PG_URL` 未设时跳过，
 CI 四条腿都挂真 PG 会执行）；
-**本批 +2 条**（2026-10-26 `tests/test_repo_hygiene.py`）：冲突标记不许进库——起因是 main 上
+**本批 +7 条**（2026-10-27 `tests/test_client_sdk.py`）：LoomClient Python SDK（产品评审 A7）
+的真 HTTP 集成测试——submit-cancel-wait 链 / approve-reject 收件箱链 / 生命周期 404 作用域 /
+OpenAPI 路由同源门禁 / submit 参数校验 / run_workflow 400 / paused 任务 wait 超时；AdminAPI
+绑 127.0.0.1:0 + tokens.yaml admin token，不走 mock；
+**上一批 +2 条**（2026-10-26 `tests/test_repo_hygiene.py`）：冲突标记不许进库——起因是 main 上
 真出现过一次带 `<<<<<<<` 的文档被合进去而六条 required 全绿（没有任何门禁扫 `.md`）；判据
 扫 `git ls-files` 全量、并且**自带射程自证**（对构造样本必须命中，否则扫描器写成永远返回空
-也会一直绿）。上一轮这段把"实际收集"写成 3037（与 3077 自相矛盾），一并按实测改正为 3089；
+也会一直绿）。上一轮这段把"实际收集"写成 3037（与 3077 自相矛盾），一并按实测改正为 3096；
 本轮口径：`Python 3.14.3`、`LOOM_TEST_PG_URL` 未设置、同机无并发 pytest，全量
 **1522.40s ≈ 25.4 分钟**（上一批 1473.05s ≈ 24.6 分钟、再上一批 918.10s ≈ 15.3 分钟；
 读这几个数请带各自的负载条件，别互相换算）；
