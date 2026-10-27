@@ -33,6 +33,30 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 - 命名清理第一步：banner/CLI 文案去领域味；发行更名 nexusloom。
 - spec 诚实口径：扩展来源轴回归 2（自家内置件不再充数第三方）。
 
+## [3.15.0] - 2026-10-27
+
+### Added（2026-10-27，A5：交付指纹）
+
+- **交付记录新增 `topology_hash` + `config_hashes`**：`_build_delivery_record` 复用
+  `Scheduler._topology_hash(plan)` 与 `Scheduler._node_config_hash(ac)` 静态方法计算
+  拓扑指纹与逐 agent 配置指纹——与 lockfile 生成/校验同一实现，避免两处各算一遍漂移。
+- **`loom plan --diff` CLI flag**：比对当前流水线与锁文件，报告漂移项（无锁/一致/漂移三态）。
+  `--diff` 绕过锁校验但不写锁文件（`skip_lock_verify` 区分 `write_lock` 与 `diff`）。
+
+### Added（2026-10-27，A2：交付产物哈希与清理）
+
+- **交付记录新增 `output_sha256`**：交付产物文件内容哈希（64 位 hex），无产物时空串——
+  区分「无输出」与「输出但文件丢失」。
+- **`DeliveryLedger.cleanup()`**：双判据（`retention_days` + `max_runs`），与 `run_store.cleanup`
+  同一口径，两个判据可同时生效。接入 `gc_runs()` 的 `summary["deliveries"]`。
+
+### Tests（+21 条，3106→3118）
+
+- `test_delivery_forms.py`: 指纹格式验证 / 跨账本对齐 / 失败运行也带指纹 / 直接比对 Scheduler
+  静态方法 / 跨运行稳定性（+3）
+- `test_cli_verbs.py`: `--diff` flag 注册 / 无锁文件 / 锁一致 / 漂移检测（+4）
+- `test_maintenance.py`: cleanup 年龄判删 / 最大保留 / 双判据 / 禁用 / gc_runs 接线 / 失败隔离（+6）
+
 ## [Unreleased]
 
 ## [3.14.0] - 2026-10-27
