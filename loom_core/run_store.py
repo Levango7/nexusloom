@@ -547,17 +547,20 @@ class RunStore:
             to_delete = sorted(set(to_delete))
             if not to_delete:
                 return {"runs": 0, "run_nodes": 0, "events": 0, "approvals": 0}
-            # executemany 而不是拼 IN (…)：SQL 文本零插值（bandit B608 的
-            # 判定点就是 f-string 拼查询）；rowcount 是两表删除的总行数。
-            rows_args = [(rid,) for rid in to_delete]
-            n_nodes = conn.executemany(
-                "DELETE FROM run_nodes WHERE run_id = ?", rows_args).rowcount
-            n_events = conn.executemany(
-                "DELETE FROM events WHERE run_id = ?", rows_args).rowcount
-            n_approvals = conn.executemany(
-                "DELETE FROM approvals WHERE run_id = ?", rows_args).rowcount
-            n_runs = conn.executemany(
-                "DELETE FROM runs WHERE run_id = ?", rows_args).rowcount
+            # 逐行 DELETE 而非 executemany：psycopg3 的 Connection 没有
+            # executemany（只有 Cursor 有），而 _Conn 包装的 execute 在两边
+            # 都能用。参数化占位符 ?→%s 由方言翻译层处理，SQL 文本零插值
+            # （bandit B608 的判定点就是 f-string 拼查询）。
+            n_nodes = n_events = n_approvals = n_runs = 0
+            for rid in to_delete:
+                n_nodes += conn.execute(
+                    "DELETE FROM run_nodes WHERE run_id = ?", (rid,)).rowcount
+                n_events += conn.execute(
+                    "DELETE FROM events WHERE run_id = ?", (rid,)).rowcount
+                n_approvals += conn.execute(
+                    "DELETE FROM approvals WHERE run_id = ?", (rid,)).rowcount
+                n_runs += conn.execute(
+                    "DELETE FROM runs WHERE run_id = ?", (rid,)).rowcount
         return {"runs": n_runs, "run_nodes": n_nodes, "events": n_events,
                 "approvals": n_approvals}
 
