@@ -1076,8 +1076,8 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3119 个测试本机全绿**（`3119 passed, 1 skipped, 6 deselected`，2026-10-27 本机全量实测；
-实际收集 **3119** 条，护栏按 `collected − declared ≤ 10` 判；
+**3118 个测试本机全绿**（`3118 passed, 2 skipped, 6 deselected`，2026-10-27 本机全量实测；
+实际收集 **3120** 条，护栏按 `collected − declared ≤ 10` 判；
 **本批 +12 条**（2026-10-27 A5/A2 交付指纹与清理）：
 - A5 指纹：`topology_hash` + 逐 agent `config_hashes` 进交付记录（复用 Scheduler 静态方法，两处各算一遍必然漂）
 - A2 `output_sha256`：交付产物内容哈希（64 位 hex，无产物时空串）
