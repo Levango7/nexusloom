@@ -134,12 +134,16 @@ class TestIncompleteMarker:
         # 否则标记可以随便写而不反映任何事实。
         assert orch._runstore().get_run("ph_ok") is not None
 
-    def test_legacy_path_is_marked_legacy_not_incomplete(self, tmp_path, monkeypatch):
-        """legacy 路径从不写投影（open/nodes/close 都不调）——那是"按设计缺"。
+    def test_legacy_path_now_writes_real_projection(self, tmp_path, monkeypatch):
+        """B8 引擎收敛后：legacy run() 委托给 run_plan()，写真实 RunStore 投影。
 
-        把它算进 incomplete 就是把 deprecated 兜底报成数据丢失。
-        这里只钉健康位，不钉运行结果：legacy 走的是注册表依赖序（真 docgen 链路，
-        可能因环境判 failed），终态写没写成都会经过 `_finalize_task_queue`。
+        收敛前 legacy 路径从不调 open/nodes/close（按设计缺，标记为 "legacy"）；
+        收敛后 legacy 经由 run_plan() 的统一引擎执行，投影标记升为 "ok"，
+        run_handle().projection() 报 "complete"。这里钉住的是"legacy 不再
+        是投影缺失的代名词"——incomplete 计数仍为 0，但 legacy_runs 也为 0。
+
+        运行结果不钉死：legacy 走注册表依赖序（真 docgen 链路，可能因环境判 failed），
+        终态写没写成都会经过 _finalize_plan_task。
         """
         _state_dir(monkeypatch, tmp_path)
         orch = _orch(tmp_path)
@@ -149,12 +153,14 @@ class TestIncompleteMarker:
                         input_file=str(inp), wait=True)
         assert task.status.value in ("done", "failed", "cancelled"), task.status.value
 
-        row = _wait_projection(orch, "ph_legacy", "legacy")
+        row = _wait_projection(orch, "ph_legacy", "ok")
         assert row["status"] in ("done", "failed", "cancelled"), row
         health = orch.run_store_health()
         assert health["incomplete_runs"] == 0, health
-        assert health["legacy_runs"] == 1, health
-        assert orch.run_handle("ph_legacy").projection() == "legacy"
+        assert health["legacy_runs"] == 0, health
+        assert orch.run_handle("ph_legacy").projection() == "complete"
+        # 投影里确实在：legacy 不再是"按设计缺投影"，而是有真实运行行
+        assert orch._runstore().get_run("ph_legacy") is not None
 
 
 class TestHandleReportsIt:

@@ -170,11 +170,10 @@ python run.py test_input.md --dashboard
 | `--worker` | 常驻 worker：消费 `task_queue` 里的 pending 任务（claim → 执行 → 落状态）；配 `--once` 只消费一条，`--poll-interval` / `--idle-timeout` / `--lease-stale` 控制节奏与崩溃租约回收 |
 | `--config, -c` | 自定义配置文件 |
 | `--json-output` | 输出 JSON 结果（供 wrapper 解析） |
-| `--legacy` | （已冻结，仅兜底）按 Agent 注册元数据执行，不经 Scheduler/YAML；生产请用默认 DAG 模式 |
+| `--legacy` | （兜底）按 Agent 注册元数据执行，不读 pipelines/*.yaml；B8 引擎收敛后，此路径经 `run()` → `run_plan()` 统一引擎执行，仍获得 RunStore 投影、交付契约检查等全部声明式能力 |
 | `--check` | 启动自检后退出：如实报告 HTML 解析内核、LLM 供应商、依赖与目录结构。退出码只反映**结构性故障**——缺 LLM 凭据记 WARN 不记 ERROR，因此 `rc` 可被 CI 直接采信（历史上 CI 从不读这个 rc，只 grep 一行文案） |
 
-> **执行路径说明**：默认走声明式 DAG（`pipelines/*.yaml` + Scheduler，含 lockfile 校验与 per-node 配置）。
-> `--legacy` 是历史兜底路径，已冻结不再演进，两条路径的一致性由 `tests/test_dual_path_parity.py` 护栏。
+> **执行路径说明**：B8 引擎收敛后，`orch.run()` 是唯一入口——有 `--config` 走 legacy 注册表依赖序，无 `--config` 有 `--pipeline` 则先尝试 Scheduler 加载 YAML，加载失败回落 legacy。两条路径最终都委托给 `run_plan()` 统一引擎执行，一致性由 `tests/test_dual_path_parity.py` 护栏。
 
 ---
 
@@ -737,13 +736,17 @@ artifact_keys），但**不给 `result` 正文本**——它从不落盘（投�
 
 **回落会掩盖缺失，所以补了一个健康位**（2026-10-24 Stage 3b）：队列行带 `projection`
 列，`ok` = 投影盖章落了，`incomplete` = 想写没写成（待补账），`legacy` = 走的是从不写
-投影的 legacy 兜底路径（按设计缺，不是故障）。顺序是**先悲观后升格**——终态先按
+投影的历史兜底路径（按设计缺，不是故障）。顺序是**先悲观后升格**——终态先按
 `incomplete` 写队列行，投影确认落地才升 `ok`；反过来会开一个"队列说一切正常、投影里
 查无此运行"的窗口。口径是"标 incomplete 后继续"：观测面故障不放大成可用性故障，但缺口
 必须可发现。`RunHandle.projection()`（`complete` / `incomplete` / `legacy` / `unknown`）
 与 `run_store_health()` 的 `incomplete_runs` / `legacy_runs` 把它报出来，`to_dict()` 里
 也有 `projection` 键。**标记优先于"投影里查得到行"**：终态盖章失败时 `runs` 那一行会
 永远停在 `running`，只看有无行会把它读成正常完成。补账工具（重放终态）本批未做。
+
+> **B8 引擎收敛（2026-10-27）**：`orch.run()` 现在委托给 `run_plan()` 统一引擎执行，
+> legacy 路径不再"按设计缺投影"——它经由 `run_plan()` 写真实 RunStore 投影，`projection`
+> 标记从 `legacy` 升为 `ok`。`legacy` 值仍保留给 Stage 1 之前落账的历史运行。
 
 同批摘掉的一处写面：**队列不再承载结果正文**（`result_json` 列停写、也不再 SELECT）。
 实测全仓没有读者——`RunHandle` 与 `_queue_row` 只用 `status`；结果正文的事实源是

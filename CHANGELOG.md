@@ -33,6 +33,27 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 - 命名清理第一步：banner/CLI 文案去领域味；发行更名 nexusloom。
 - spec 诚实口径：扩展来源轴回归 2（自家内置件不再充数第三方）。
 
+## [Unreleased]
+
+### Changed（2026-10-27，B8 引擎收敛：run vs run_plan 两套引擎合并为一条）
+
+- **`orch.run()` 委托给 `run_plan()`**：legacy 路径不再自己跑 DAG 循环，而是构建
+  `ExecutionPlan` 后委托给声明式引擎。legacy 因此获得 RunStore 投影、交付契约检查、
+  审批闸门支持等全部声明式能力。`_run_dag_parallel` / `_emit_task_events` /
+  `_finalize_task_queue` 三个方法已移除（无调用者）。
+- **配置入口收敛**：`run()` 现在是统一入口——有 `config` 走 legacy 注册表依赖序，
+  无 `config` 有 `pipeline_name` 则先尝试 `Scheduler.parse()` 加载 YAML，加载失败
+  回落 legacy。两条路径最终都走 `run_plan()`。
+- **legacy 路径现在写真实投影**：B8 收敛前，legacy `run()` 从不调 `_runstore_open`/
+  `_runstore_nodes`/`_runstore_close`，`projection` 标记为 `legacy`。收敛后，legacy
+  经由 `run_plan()` 的统一引擎执行，投影标记从 `legacy` 升为 `ok`。`legacy` 值仍保留
+  给 Stage 1 之前落账的历史运行。
+- **`pipeline.started` 事件补回 redacted config**：`run_plan()` 的 `pipeline.started`
+  载荷新增 `config` 键（经 `_redact_config` 脱敏），保持与旧 `run()` 一致的安全可观测性。
+
+判据：`tests/test_projection_health.py` 的 legacy 测试已更新（期望 `ok` 而非 `legacy`）；
+`tests/test_dual_path_parity.py` 2/2 通过；`tests/test_pipeline_redaction.py` 4/4 通过。
+
 ## [3.13.0] - 2026-10-26
 
 本版把 2026-10-20 设计复核列出的 P0/P1 工程欠账一次清完，另含两条独立交付。
