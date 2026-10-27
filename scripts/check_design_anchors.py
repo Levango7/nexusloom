@@ -29,8 +29,8 @@ ANCHORS = [
     # 注册（register）与取租约（acquire）是两个方法，**只钉一个会让另一半结论无处可指**
     # （合并 #65 收口时 main 上就只剩了 register 这条，acquire 被合并掉了）。
     # 实测行号 570/587（早先写的 573/590 偏 3 行；本脚本不进 CI，所以偏了没人红）。
-    ("loom_core/run_store.py", 570, "def register_schedule"),
-    ("loom_core/run_store.py", 587, "def acquire_schedule_lease"),
+    ("loom_core/run_store.py", 573, "def register_schedule"),
+    ("loom_core/run_store.py", 590, "def acquire_schedule_lease"),
     ("loom_core/backfill.py", 35, "class RunBackfill"),
     ("loom_core/backfill.py", 59, "def replay"),
     # Stage 3b：`complete()` 摘掉 result 参数，整体下移到 203。
@@ -58,17 +58,18 @@ ANCHORS = [
     # `_runstore_close` 让下面的调用点又各自下移（同样不是常数偏移）。
     # Stage 3c 再钉一次：cancel() 结清待批 + 补账两个入口把 pipeline.py 又推了 18~43 行。
     ("loom_core/pipeline.py", 315, "_max_task_history"),
-    ("loom_core/pipeline.py", 837, "def cancel"),
-    ("loom_core/pipeline.py", 875, "def resume"),
+    ("loom_core/pipeline.py", 747, "def cancel"),
+    ("loom_core/pipeline.py", 785, "def resume"),
     # 原 1290「不更新 task_queue」那句 docstring 已被 Stage 0 改掉——退役它，改钉新增的
     # 共用写口：§2 那条裂缝的"已并轨"结论必须指向一个真实存在的函数。
-    ("loom_core/pipeline.py", 513, "def _record_plan_terminal_state"),
-    ("loom_core/pipeline.py", 770, "pipeline.started"),      # legacy run() 内
-    ("loom_core/pipeline.py", 1137, "pipeline.finished"),    # _finalize_plan_task 内
-    ("loom_core/pipeline.py", 1590, "pipeline.finished"),    # _finalize_plan_task_async 内
-    ("loom_core/pipeline.py", 1824, "record"),               # _deliver 内 DeliveryLedger().record
-    ("loom_core/pipeline.py", 1922, "pipeline.audit"),
-    ("loom_core/pipeline.py", 2089, ".done"),
+    ("loom_core/pipeline.py", 450, "def _record_plan_terminal_state"),
+    # 注：legacy `run()` 已改走同一条发布点，`pipeline.started` 只剩 run_plan() 里这一处
+    ("loom_core/pipeline.py", 1459, "pipeline.started"),
+    ("loom_core/pipeline.py", 1047, "pipeline.finished"),    # _finalize_plan_task 内
+    ("loom_core/pipeline.py", 1501, "pipeline.finished"),    # _finalize_plan_task_async 内
+    ("loom_core/pipeline.py", 1770, "record"),               # _deliver 内 DeliveryLedger().record
+    ("loom_core/pipeline.py", 1868, "pipeline.audit"),
+    ("loom_core/pipeline.py", 2035, ".done"),
     ("loom_core/admin_api.py", 671, "get_task"),
     ("loom_core/admin_api.py", 1072, "list_tasks"),
     # Stage 2：/tasks、dashboard、cost 三处读口从 `list_tasks`（内存）换成
@@ -77,15 +78,15 @@ ANCHORS = [
     ("loom_core/admin_api.py", 1090, "list_runs"),
     ("loom_core/admin_api.py", 1389, "def _task_checkpoint_view"),
     ("loom_core/admin_api.py", 1785, "list_runs"),
-    ("loom_core/admin_api.py", 2272, "list_runs"),
-    ("loom_core/admin_api.py", 2636, "task = _aio.run(orch.run_plan_async("),
-    ("loom_core/admin_api.py", 2705, "existing_callback = get_callback(task_id)"),
+    ("loom_core/admin_api.py", 2278, "list_runs"),
+    ("loom_core/admin_api.py", 2642, "task = _aio.run(orch.run_plan_async("),
+    ("loom_core/admin_api.py", 2711, "existing_callback = get_callback(task_id)"),
     # #8：账本与锁的只读 HTTP 面。三条 handler 进表，"文档教了这三个口"才在代码里
     # 有对应物（`test_doc_consistency` 只把文档对到 openapi 规范，规范和 handler
     # 之间没人守——这条就是补那段距离的）。
-    ("loom_core/admin_api.py", 1891, "def _handle_deliveries"),
-    ("loom_core/admin_api.py", 1909, "def _handle_delivery_detail"),
-    ("loom_core/admin_api.py", 1966, "def _handle_locks"),
+    ("loom_core/admin_api.py", 1894, "def _handle_deliveries"),
+    ("loom_core/admin_api.py", 1912, "def _handle_delivery_detail"),
+    ("loom_core/admin_api.py", 1972, "def _handle_locks"),
     # 锁路径解析只留一处：巡检口（`lock_drift`）与执行口（`_verify_lock_after_parse`）
     # 各自解析一次就会报出执行时根本不会发生的漂移。
     ("loom_core/scheduler.py", 338, "def resolve_lock_path"),
