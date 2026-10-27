@@ -6,7 +6,7 @@ run.py - Agent 工作流引擎入口 v3.1
   loom run [input]     执行流水线（缺省动词：`loom input.md` 即 run）
   loom plan [name]     只预览执行计划，不执行
   loom lock [name]     生成/刷新流水线锁文件后退出
-  loom pack list|check pack 清册 / 启动自检
+  loom pack list|check|new pack 清册 / 启动自检 / 生成新 pack 骨架
   loom plugin list     列出全部 Agent / 插件（含来源）
 其余服务/运维开关（--check/--worker/--mcp/--admin/--triggers/--recover）保持为 flag。
 
@@ -625,7 +625,7 @@ def _run_daemon(orch: PipelineOrchestrator) -> None:
 #: 六个动词：run / plan / lock / pack / plugin / demo（demo = A4 离线体验）
 VERBS = ("run", "plan", "lock", "pack", "plugin", "demo")
 
-_PACK_ACTIONS = {"list": "pack_list", "check": "pack_check"}
+_PACK_ACTIONS = {"list": "pack_list", "check": "pack_check", "new": "pack_new"}
 
 
 def _split_verb(argv: list[str]) -> tuple[str | None, str | None, list[str]]:
@@ -645,7 +645,7 @@ def _split_verb(argv: list[str]) -> tuple[str | None, str | None, list[str]]:
         sub = rest[0] if rest and not rest[0].startswith("-") else ""
         action = _PACK_ACTIONS.get(sub)
         if action is None:
-            print("用法: loom pack list|check", file=sys.stderr)
+            print("用法: loom pack list|check|new <name>", file=sys.stderr)
             raise SystemExit(2)
         return verb, action, rest[1:]
     if verb == "plugin":
@@ -679,6 +679,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
   loom lock [name]      生成/刷新流水线锁文件后退出（维护动作，不执行）
   loom pack list        列出 pack 清册（物理 pack + 散装流水线）
   loom pack check       运行启动自检（等价 --check）
+  loom pack new <name>  生成新 pack 骨架（目录 + 模板文件，不注册不校验）
   loom plugin list      列出全部 Agent / 插件（含来源标记）
   loom demo             离线体验：沙盒里跑一次完整交付（无网络无 Key）
 
@@ -830,7 +831,8 @@ def main():
             and not args.replay_run and not args.replay_incomplete \
             and not args.triggers and not args.triggers_dry_run \
             and not args.admin and not args.dashboard and not args.daemon \
-            and verb_action not in ("plan", "lock", "pack_list", "plugin_list",
+            and verb_action not in ("plan", "lock", "pack_list", "pack_new",
+                                    "plugin_list",
                                     "demo"):
         parser.error('input required (or use verbs loom plan/lock/pack/plugin/demo, or flags like --check)')
 
@@ -866,6 +868,29 @@ def main():
                 print(f"  {info.name:14s} [{info.source}]  agents={len(info.agent_names)}  pipelines: {pipes}")
             else:
                 print(f"  {info.name:14s} [{info.source}]  agents={len(info.agent_names)}")
+        return
+
+    # ─── pack new（loom pack new <name>）────────────
+    if verb_action == "pack_new":
+        from loom_core.pack_scaffold import scaffold_pack, validate_pack_name
+        pack_name = args.input  # 位置参数 input 被用作 pack 名
+        err = validate_pack_name(pack_name or "")
+        if err:
+            print(f"[pack new] ✗ {err}", file=sys.stderr)
+            sys.exit(2)
+        project_root = Path(__file__).parent
+        try:
+            created = scaffold_pack(pack_name, project_root)
+        except FileExistsError as e:
+            print(f"[pack new] ✗ {e}", file=sys.stderr)
+            sys.exit(2)
+        print(f"[pack new] pack {pack_name!r} 已生成（{len(created)} 个文件）:")
+        for path in created:
+            print(f"  {path.relative_to(project_root)}")
+        from loom_core.pack_scaffold import _slug
+        slug = _slug(pack_name)
+        print(f"\n下一步: 编辑 agents/{slug}_agent.py 实现业务逻辑，"
+              f"然后 loom pack check 验证")
         return
 
     # ─── MCP server 模式 ──────────────────────
