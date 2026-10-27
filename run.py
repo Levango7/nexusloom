@@ -249,11 +249,14 @@ def _resolve_pipeline_plan(args_args: argparse.Namespace, orch: PipelineOrchestr
               file=sys.stderr)
         sys.exit(2)
 
+    # --diff 要绕过锁校验（parse_file 不抛 LockfileMismatchError），
+    # 但不能写锁文件——本 flag 的目的是报告漂移，不是生成锁。
     write_lock = bool(getattr(args_args, "write_lock", False))
+    skip_lock_verify = write_lock or bool(getattr(args_args, "diff", False))
     for pf in pipeline_files:
         if pf.exists():
             try:
-                plan = sched.parse_file(str(pf), verify_lock=not write_lock)
+                plan = sched.parse_file(str(pf), verify_lock=not skip_lock_verify)
             except LockfileMismatchError as e:
                 print(f"[run] ERROR: {pf.name} 与版本锁定不一致，已阻止执行:\n{e}", file=sys.stderr)
                 print("[run] 提示: 若配置变更是有意的，使用 --write-lock 重新生成 lockfile 后再运行",
@@ -518,6 +521,33 @@ def _run_single_task(args_args: argparse.Namespace, orch: PipelineOrchestrator,
 
     # 预览模式
     if args_args.plan:
+        if args_args.diff:
+            # 锁指纹差异（A5）：比对当前流水线与 .lock 文件，输出人话差异项
+            if plan:
+                from pathlib import Path
+
+                from loom_core.scheduler import Scheduler
+                sched = Scheduler()
+                # --pipeline-file 时，锁文件在同目录；按名解析时锁在 pipelines/
+                source_dir = None
+                if getattr(args_args, "pipeline_file", None):
+                    source_dir = Path(args_args.pipeline_file).parent
+                drift = sched.lock_drift(plan, source_dir)
+                if not drift["lock_present"]:
+                    print(f"[plan --diff] 无锁文件: {drift['lock_file']}")
+                    print("  用 `loom lock <name>` 生成锁文件后再比对。")
+                elif not drift["issues"]:
+                    print(f"[plan --diff] 锁一致，无漂移（{drift['lock_file']}）")
+                else:
+                    print(f"[plan --diff] 检测到 {len(drift['issues'])} 项漂移：")
+                    for issue in drift["issues"]:
+                        print(f"  - {issue}")
+                    print(f"  锁文件: {drift['lock_file']}")
+            else:
+                print("[plan --diff] ✗ 需要声明式流水线才能比对锁指纹："
+                      "请检查 --pipeline / pipelines/ 配置")
+                sys.exit(2)
+            return
         if plan:
             from loom_core.scheduler import Scheduler
             sched = Scheduler()
@@ -672,7 +702,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     # 动词层在解析后注入这三个内部开关（无对应 flag：旧 --plan/--dry-run/
     # --write-lock/--list-agents 已在动词收敛批次摘除）
-    parser.set_defaults(plan=False, write_lock=False, list_agents=False)
+    parser.set_defaults(plan=False, write_lock=False, list_agents=False, diff=False)
 
     parser.add_argument("input", nargs="?", default=None, help="输入文件")
     parser.add_argument("--task-id", "-t", default=None, help="任务ID（默认自动生成）")
@@ -698,6 +728,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--legacy", action="store_true",
                         help="（已冻结，仅兜底）旧模式：直接按 Agent 注册元数据执行，"
                              "不经过 Scheduler/YAML。生产请使用默认 DAG 模式")
+    parser.add_argument("--diff", action="store_true",
+                        help="配合 loom plan：比对当前流水线与锁文件的指纹差异，"
+                             "输出人话差异项后退出（不执行）")
     parser.add_argument("--admin", action="store_true", help="启动管理 API 服务")
     parser.add_argument("--dashboard", action="store_true", help="启动管理 API + 仪表盘（隐含 --admin）")
     parser.add_argument("--daemon", action="store_true", help="守护进程模式：流水线执行完后保持 Admin API 常驻")

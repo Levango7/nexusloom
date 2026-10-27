@@ -1673,10 +1673,22 @@ class PipelineOrchestrator:
 
     def _build_delivery_record(self, task: PipelineTask,
                                plan: ExecutionPlan) -> dict[str, Any]:
-        """一轮运行的结构化记录：节点级状态/耗时 + 产物路径。
+        """一轮运行的结构化记录：节点级状态/耗时 + 产物路径 + 指纹。
 
         这是交付账本（deliveries.db）与 deliver.json 文件共用的唯一形状。
         """
+        # 指纹（A5）：topology_hash + 逐 agent config_hash
+        # 复用 Scheduler 的静态方法，保证与 lockfile 生成/校验同一实现——
+        # 两处各算一遍必然漂，锁就失去了意义。
+        from .scheduler import Scheduler
+        topology_hash = Scheduler._topology_hash(plan)
+        config_hashes: dict[str, str] = {}
+        for level in getattr(plan, "levels", []) or []:
+            for node in level:
+                ac = getattr(node, "agent_config", None)
+                if ac is not None:
+                    config_hashes[node.agent_name] = Scheduler._node_config_hash(ac)
+
         nodes: list[dict[str, Any]] = []
         for level in getattr(plan, "levels", []) or []:
             for node in level:
@@ -1700,6 +1712,20 @@ class PipelineOrchestrator:
                 })
         finished = float(task.finished_at or 0.0)
         started = float(task.started_at or 0.0)
+
+        # 产物 sha256（A2）：输出文件的内容哈希。文件不存在时给空串——
+        # "没产出"与"产出了但文件丢了"要可区分。
+        output_sha256 = ""
+        if task.output_path:
+            try:
+                from pathlib import Path
+                p = Path(task.output_path)
+                if p.is_file():
+                    import hashlib
+                    output_sha256 = hashlib.sha256(p.read_bytes()).hexdigest()
+            except OSError:
+                pass
+
         return {
             "run_id": task.id,
             "pipeline": plan.pipeline_name,
@@ -1710,7 +1736,10 @@ class PipelineOrchestrator:
             "finished_at": finished,
             "duration_sec": round(finished - started, 3) if finished else None,
             "output_path": task.output_path,
+            "output_sha256": output_sha256,
             "error": task.error or "",
+            "topology_hash": topology_hash,
+            "config_hashes": config_hashes,
             "nodes": nodes,
         }
 

@@ -222,11 +222,47 @@ class TestDeliverEndToEnd:
         assert node_map["renderer"]["status"] == "success"
         assert node_map["transform"]["agent"] == "transform"
 
+        # 2b) A5: 指纹字段——topology_hash 与 config_hashes
+        #     复用 Scheduler 静态方法，保证与 lockfile 生成/校验同一实现。
+        #     两处各算一遍必然漂，锁就失去了意义。
+        assert "topology_hash" in record, "交付记录缺 topology_hash"
+        assert isinstance(record["topology_hash"], str)
+        assert len(record["topology_hash"]) == 12, "topology_hash 应为 12 位 hex"
+        int(record["topology_hash"], 16)  # 必须可解析为 hex
+
+        assert "config_hashes" in record, "交付记录缺 config_hashes"
+        assert isinstance(record["config_hashes"], dict)
+        # 每个 agent 都该有指纹（transform/safe_writer/renderer 三个节点）
+        assert len(record["config_hashes"]) >= 3, \
+            f"config_hashes 应覆盖所有节点，实际 {list(record['config_hashes'])}"
+        for name, h in record["config_hashes"].items():
+            assert isinstance(h, str) and len(h) == 12, \
+                f"{name} 的 config_hash 应为 12 位 hex，实际 {h!r}"
+            int(h, 16)
+
+        # 2c) A2: output_sha256——产物文件的内容哈希。
+        #     复用与锁指纹相同的实现路径（同一方法内计算），保证一致性。
+        assert "output_sha256" in record, "交付记录缺 output_sha256"
+        assert isinstance(record["output_sha256"], str)
+        # result.md 已产出（pipeline.output 指向它），哈希应为 64 位 hex
+        assert len(record["output_sha256"]) == 64, "output_sha256 应为 64 位 hex"
+        int(record["output_sha256"], 16)
+        # 哈希应与实际文件内容一致
+        import hashlib
+        expected = hashlib.sha256(
+            (out / "result.md").read_bytes()).hexdigest()
+        assert record["output_sha256"] == expected, \
+            "output_sha256 应等于实际产物文件内容的 sha256"
+
         # 3) 账本与 JSON 同形状（同一记录的两个出口）
         from loom_core.deliveries import DeliveryLedger
         row = DeliveryLedger().get(task_id)
         assert row is not None, "账本没有这轮运行的记录"
         assert row["nodes"] == record["nodes"]
+        # 指纹字段也要一致（同一记录的两个出口，字段一个不能少）
+        assert row["topology_hash"] == record["topology_hash"]
+        assert row["config_hashes"] == record["config_hashes"]
+        assert row["output_sha256"] == record["output_sha256"]
 
         # 4) 站点：index 导航 + 产物页 + 返回链接
         index = (out / "site" / "index.html").read_text(encoding="utf-8")
@@ -255,3 +291,81 @@ class TestDeliverEndToEnd:
         assert row["status"] == "failed"
         assert not (out / "result.json").exists(), "失败运行不该写交付 JSON"
         assert not (out / "site").exists(), "失败运行不该建站点"
+        # 失败运行也带指纹（topology_hash 照样算——拓扑是声明层的，与成败无关）
+        assert len(row["topology_hash"]) == 12
+        assert len(row["config_hashes"]) >= 3
+        # 没有产物文件 → output_sha256 为空串（与"产出了但丢了"可区分）
+        assert row["output_sha256"] == ""
+
+    def test_fingerprint_matches_scheduler_static_methods(self, orch, tmp_path):
+        """指纹字段必须与 Scheduler 静态方法直接计算的结果一致。
+
+        交付记录里的 topology_hash / config_hashes 是通过
+        Scheduler._topology_hash(plan) / Scheduler._node_config_hash(ac)
+        计算的——测试直接调用同一方法，确保两处实现不漂。
+        """
+        plan, out = _plan(DEMO_YAML.format(out=str(tmp_path / "fp-demo")),
+                          tmp_path, "fp-demo")
+        (tmp_path / "in.md").write_text("# 输入\n指纹一致性判据。", encoding="utf-8")
+        task_id = "fp-e2e-1"
+        task = orch.run_plan(plan, input_file=str(tmp_path / "in.md"),
+                             task_id=task_id, wait=True)
+        assert task.status.value == "done", task.error
+
+        from loom_core.deliveries import DeliveryLedger
+        from loom_core.scheduler import Scheduler
+
+        row = DeliveryLedger().get(task_id)
+        assert row is not None
+
+        # topology_hash 与 Scheduler._topology_hash 直接一致
+        expected_topo = Scheduler._topology_hash(plan)
+        assert row["topology_hash"] == expected_topo, \
+            "交付记录的 topology_hash 与 Scheduler._topology_hash 不一致"
+
+        # config_hashes 与 Scheduler._node_config_hash 逐节点一致
+        for level in plan.levels:
+            for node in level:
+                ac = getattr(node, "agent_config", None)
+                if ac is not None:
+                    expected = Scheduler._node_config_hash(ac)
+                    actual = row["config_hashes"].get(node.agent_name)
+                    assert actual == expected, \
+                        f"{node.agent_name} 的 config_hash 不一致: " \
+                        f"交付={actual} 直接计算={expected}"
+
+    def test_fingerprint_stable_across_runs(self, orch, tmp_path):
+        """同一条流水线跑两次，指纹必须一致（声明层不变 → 指纹不变）。
+
+        这是锁机制的前提：如果同一条流水线两次运行的指纹不同，
+        锁文件就没有意义了（每次跑都会报漂移）。
+
+        注意：用同一个 out 路径——renderer 的 output_dir 是 agent config 的
+        一部分，路径不同则 config_hash 不同（这是正确的：输出路径确实改了
+        配置，锁应当察觉）。
+        """
+        out = tmp_path / "stab-out"
+        yaml1 = DEMO_YAML.format(out=str(out))
+        plan1, _ = _plan(yaml1, tmp_path, "stab-a")
+        (tmp_path / "in.md").write_text("# 输入\n稳定性判据。", encoding="utf-8")
+        task1 = orch.run_plan(plan1, input_file=str(tmp_path / "in.md"),
+                              task_id="stab-run-1", wait=True)
+        assert task1.status.value == "done", task1.error
+
+        # 重新解析同一份 YAML（plan 对象是一次性的，重新 parse）
+        plan2, _ = _plan(yaml1, tmp_path, "stab-b")
+        task2 = orch.run_plan(plan2, input_file=str(tmp_path / "in.md"),
+                              task_id="stab-run-2", wait=True)
+        assert task2.status.value == "done", task2.error
+
+        from loom_core.deliveries import DeliveryLedger
+        led = DeliveryLedger()
+        r1 = led.get("stab-run-1")
+        r2 = led.get("stab-run-2")
+        assert r1 is not None and r2 is not None
+        # 拓扑指纹一致（同一份 YAML → 同一条 DAG）
+        assert r1["topology_hash"] == r2["topology_hash"], \
+            "同一条流水线两次运行的 topology_hash 必须一致"
+        # 逐 agent 配置指纹一致
+        assert r1["config_hashes"] == r2["config_hashes"], \
+            "同一条流水线两次运行的 config_hashes 必须一致"

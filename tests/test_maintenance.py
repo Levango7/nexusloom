@@ -308,3 +308,93 @@ class TestGcCli:
             capture_output=True, text=True, timeout=120, cwd=str(tmp_path))
         assert r.returncode == 0, r.stderr[-800:]
         assert "retention 未启用" in r.stdout
+
+
+# ── F. DeliveryLedger.cleanup（A2：交付账本清理）─────────────
+
+class TestDeliveryLedgerCleanup:
+    """A2: DeliveryLedger.cleanup() 的双判据清理。
+
+    与 RunStore.cleanup 同一口径：
+      - retention_days > 0：删除 finished_at 早于 now - days*86400 的记录
+      - max_runs > 0：只保留 finished_at 最新的 N 条
+      - 两个判据可同时生效
+      - 0/0 = 不清理（返回 0）
+    """
+
+    def _led(self, state):
+        from loom_core.deliveries import DeliveryLedger
+        return DeliveryLedger()
+
+    def _seed(self, led, run_id, *, finished_at, status="done"):
+        led.record({"run_id": run_id, "pipeline": "p", "status": status,
+                    "finished_at": float(finished_at),
+                    "duration_sec": 1.0,
+                    "output_path": f"{run_id}.md",
+                    "nodes": []})
+
+    def test_age_deletes_old(self, state):
+        led = self._led(state)
+        now = 10_000_000.0
+        self._seed(led, "old", finished_at=now - 100 * 86400)
+        self._seed(led, "fresh", finished_at=now - 10)
+        deleted = led.cleanup(retention_days=30, now=now)
+        assert deleted == 1
+        assert led.get("old") is None
+        assert led.get("fresh") is not None
+
+    def test_max_runs_keeps_newest(self, state):
+        led = self._led(state)
+        now = 10_000_000.0
+        for i, rid in enumerate(["r1", "r2", "r3", "r4"]):
+            self._seed(led, rid, finished_at=now - (4 - i) * 86400)
+        deleted = led.cleanup(max_runs=2, now=now)
+        assert deleted == 2
+        remaining = {r["run_id"] for r in led.list(limit=100)}
+        assert "r3" in remaining and "r4" in remaining
+        assert "r1" not in remaining and "r2" not in remaining
+
+    def test_age_applies_to_kept_set_too(self, state):
+        """保留集内也过旧的行：年龄判据对保留集内同样生效。"""
+        led = self._led(state)
+        now = 10_000_000.0
+        self._seed(led, "old", finished_at=now - 100 * 86400)
+        self._seed(led, "mid", finished_at=now - 10)
+        self._seed(led, "new", finished_at=now - 1)
+        led.cleanup(retention_days=30, max_runs=2, now=now)
+        assert led.get("old") is None
+        assert led.get("mid") is not None
+        assert led.get("new") is not None
+
+    def test_disabled_returns_zero(self, state):
+        """0/0 = 不清理（与 RunStore.cleanup 口径一致）。"""
+        led = self._led(state)
+        self._seed(led, "x", finished_at=1.0)
+        assert led.cleanup(now=10_000_000.0) == 0
+        assert led.get("x") is not None
+
+    def test_gc_runs_includes_deliveries(self):
+        """gc_runs 汇总里应含 deliveries 键（A2 接线判据）。"""
+        from loom_core.maintenance import Retention, gc_runs
+        led = SimpleNamespace(cleanup=lambda days, rows: 3)
+        result = gc_runs(
+            deliveries=led,
+            retention=Retention(days=30, max_runs=10),
+            log=lambda m: None,
+        )
+        assert result["deliveries"] == 3
+
+    def test_gc_runs_deliveries_failure_isolated(self):
+        """deliveries cleanup 失败不该拖垮其他 store。"""
+        from loom_core.maintenance import Retention, gc_runs
+
+        def boom(days, rows):
+            raise RuntimeError("ledger down")
+
+        result = gc_runs(
+            deliveries=SimpleNamespace(cleanup=boom),
+            retention=Retention(days=30),
+            log=lambda m: None,
+        )
+        assert result["deliveries"]["failed"] is True
+        assert "ledger down" in result["deliveries"]["message"]

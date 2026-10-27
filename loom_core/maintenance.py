@@ -68,13 +68,14 @@ def retention_from_config(config: Any) -> Retention:
 
 def gc_runs(*, queue: Any = None, cost: Any = None, feedback: Any = None,
             run_store: Any = None, checkpoint_mgr: Any = None,
+            deliveries: Any = None,
             retention: Retention | None = None,
             now: float | None = None,
             log: Callable[[str], None] | None = None) -> dict[str, Any]:
     """按保留期判据清理所有 store。返回 {store_name: 删除行数 / 失败说明}。
 
-    `now` 只传给 RunStore.cleanup（它有假时钟参数）——其余 store 的清理
-    语义是"以现在为界"，注入时钟没有意义。
+    `now` 只传给 RunStore.cleanup 与 DeliveryLedger.cleanup（它们有假时钟参数）
+    ——其余 store 的清理语义是"以现在为界"，注入时钟没有意义。
 
     任一 store 的清理失败只记 `failed` 计数与告警，不影响其余 store——
     删掉一半永远比不删更糟吗？不，但**删失败报出来**必须成立：静默的
@@ -97,6 +98,8 @@ def gc_runs(*, queue: Any = None, cost: Any = None, feedback: Any = None,
                                        "quality_feedback")
     summary["run_store"] = _run_cleanup(run_store, "cleanup", rs_args,
                                         "run_store")
+    summary["deliveries"] = _run_cleanup(deliveries, "cleanup", rs_args,
+                                         "delivery_ledger")
     if retention.days > 0:
         summary["checkpoints"] = _run_cleanup(
             checkpoint_mgr, "cleanup_old", (age,), "checkpoint_manager")
@@ -133,9 +136,10 @@ def gc_from_orchestrator(orch: Any, now: float | None = None,
     orchestrator 只暴露 `task_queue` / `_checkpoint`（ApprovalStore 只包
     RunStore 的读面）；cost / feedback 走模块级 getter；RunStore 经
     `_runstore()` 惰性拿——拿不到就跳过并告警（不因为一个观测面缺了就
-    整个 GC 失败）。
+    整个 GC 失败）。DeliveryLedger 是独立 SQLite 账本，直接构造即可。
     """
     from .cost_tracker import get_cost_tracker
+    from .deliveries import DeliveryLedger
     from .quality_feedback import get_quality_feedback
 
     retention = retention_from_config(getattr(orch, "config", None))
@@ -153,6 +157,7 @@ def gc_from_orchestrator(orch: Any, now: float | None = None,
         feedback=get_quality_feedback(),
         run_store=run_store,
         checkpoint_mgr=getattr(orch, "_checkpoint", None),
+        deliveries=DeliveryLedger(),
         retention=retention,
         now=now,
         log=log,
