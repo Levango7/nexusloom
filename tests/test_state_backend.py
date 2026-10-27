@@ -741,6 +741,20 @@ class TestPostgresDeliveryCostQuality:
       - 裸连接（无锁）在 PG MVCC 下并发安全
     """
 
+    @pytest.fixture(autouse=True)
+    def _clean_tables(self):
+        """PG 表跨运行持久：开跑前清三张表，避免历史残留污染判据。"""
+        import psycopg
+        conn = psycopg.connect(PG_URL)
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute("DELETE FROM deliveries")
+        cur.execute("DELETE FROM cost_log")
+        cur.execute("DELETE FROM quality_history")
+        cur.close()
+        conn.close()
+        yield
+
     def test_delivery_ledger_pg(self):
         """DeliveryLedger: record/get/list/cleanup 在 PG 上成立。"""
         from loom_core.deliveries import DeliveryLedger
@@ -769,7 +783,7 @@ class TestPostgresDeliveryCostQuality:
         items = ledger.list(limit=100)
         assert any(i["run_id"] == rid for i in items), "list 应包含新记录"
 
-        dropped = ledger.cleanup(max_rows=1000, now=1e18)
+        dropped = ledger.cleanup(retention_days=1, now=1e18)
         assert dropped >= 1, "cleanup 应至少删 1 条"
 
     def test_cost_tracker_pg(self):

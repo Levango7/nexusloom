@@ -242,9 +242,11 @@ class CostTracker:
             data["task_count"] = len(task_ids)
         return data
 
-    def cleanup(self, max_age_days: int = 90, max_rows: int = 0) -> int:
+    def cleanup(self, max_age_days: int = 90, max_rows: int = 0,
+                now: float | None = None) -> int:
         """清理过期记录（双判据并集；0 的语义与 TaskQueue 同口径）。"""
-        cutoff = time.time() - max_age_days * 86400
+        now_ts = now if now is not None else time.time()
+        cutoff = now_ts - max_age_days * 86400
         with self._conn() as conn:
             cur = conn.execute("DELETE FROM cost_log WHERE timestamp < ?",
                                (cutoff,))

@@ -132,7 +132,8 @@ class QualityFeedback:
                 "recommendations": self.get_recommendations(),
             }
 
-    def cleanup(self, max_age_days: int = 0, max_rows: int = 0) -> int:
+    def cleanup(self, max_age_days: int = 0, max_rows: int = 0,
+                now: float | None = None) -> int:
         """清理过期记录（双判据并集）。
 
         与 RunStore 同口径：**0 = 不启用**（本 store 此前没有清理面，默认
@@ -142,11 +143,12 @@ class QualityFeedback:
         if max_age_days <= 0 and max_rows <= 0:
             return 0
         dropped = 0
+        now_ts = now if now is not None else time.time()
         with self._conn() as conn:
             if max_age_days > 0:
                 cur = conn.execute(
                     "DELETE FROM quality_history WHERE timestamp < ?",
-                    (time.time() - max_age_days * 86400,))
+                    (now_ts - max_age_days * 86400,))
                 dropped = cur.rowcount
             if max_rows > 0:
                 cur = conn.execute(
