@@ -748,8 +748,8 @@ class TestPostgresDeliveryCostQuality:
         先建实例触发 schema DDL（CI 上 PG 数据库是新鲜的，表尚未存在），
         再用各自 pool 连接清表。
         """
-        from loom_core.deliveries import DeliveryLedger as _DL
         from loom_core.cost_tracker import CostTracker as _CT
+        from loom_core.deliveries import DeliveryLedger as _DL
         from loom_core.quality_feedback import QualityFeedback as _QF
         dl = _DL(PG_URL)
         with dl._pool.conn() as conn:
