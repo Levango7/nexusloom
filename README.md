@@ -1076,9 +1076,9 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3118 个测试本机全绿**（`3118 passed, 2 skipped, 6 deselected`，2026-10-27 本机全量实测；
-实际收集 **3120** 条，护栏按 `collected − declared ≤ 10` 判；
-**本批 +12 条**（2026-10-27 A5/A2 交付指纹与清理）：
+**3163 个测试本机全绿**（`3163 passed, 21 skipped, 6 deselected`，2026-10-27 Linux CI 全量实测；
+实际收集 **3163** 条（Linux CI）/ **3164** 条（Windows 本机），平台差 1 条为 skipif 语义差异，护栏按 `collected − declared ≤ 10` 判；
+**本批 +46 条**（2026-10-27 `tests/test_pack_scaffold.py` P2 #11 pack new 骨架）：`loom pack new <name>` 命令行脚手架——包名校验（正则 + 保留字）、目录/文件/AGENT_NAME 的连字符 slug 化（`my-pack` → `my_pack`）、PascalCase 类名、六模板文件生成（pack.yaml / agents / pipelines / prompts / quality）、discoverable 端到端验证（pack_manifest 发现 + agent_inventory + pipeline_dirs + agent_sources + pack_check 判据）；
 - A5 指纹：`topology_hash` + 逐 agent `config_hashes` 进交付记录（复用 Scheduler 静态方法，两处各算一遍必然漂）
 - A2 `output_sha256`：交付产物内容哈希（64 位 hex，无产物时空串）
 - A5 `loom plan --diff`：CLI flag，比对当前流水线与锁文件，报告漂移项
