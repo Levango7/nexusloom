@@ -843,6 +843,12 @@ body {
 .insp-art-type { color: var(--status-info); font-size: 0.66rem; }
 .insp-art-val { color: var(--text-muted); word-break: break-all; }
 
+/* ---- 交付账本（内容摘要 / 逐节点产物 / 逐运行锁指纹） ---- */
+.deliv-sha { color: var(--status-info); font-family: var(--font-mono); }
+.deliv-detail { display: flex; flex-direction: column; gap: 2px; }
+.deliv-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.deliv-bar .insp-muted { font-family: var(--font-mono); }
+
 /* 节点可点 + 重试旗 + 断点角标 */
 .dag-node-clickable { cursor: pointer; }
 .dag-node-clickable:hover { border-color: var(--highlight); }

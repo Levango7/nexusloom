@@ -1885,6 +1885,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             "node_count": len(nodes),
             "artifact_count": sum(len(n.get("artifact_keys") or []) for n in nodes),
             "error": str(rec.get("error") or ""),
+            # 交付物内容摘要（A2）：空串 = 没有落盘产物，或那一跑写在
+            # output_sha256 落地之前——两种都在读侧显示为"未记录"，不冒充已核对。
+            "output_sha256": str(rec.get("output_sha256") or ""),
             "projection": self.orch.run_handle(run_id).projection(),
         }
 
@@ -1929,6 +1932,9 @@ class AdminHandler(BaseHTTPRequestHandler):
         item["input_file"] = str(rec.get("input_file") or "")
         item["started_at"] = rec.get("started_at") or 0
         item["nodes"] = [n for n in (rec.get("nodes") or []) if isinstance(n, dict)]
+        # 锁指纹（A5）随明细一起回：列表不需要，但"这一跑用的是哪把锁"必须可查。
+        item["topology_hash"] = str(rec.get("topology_hash") or "")
+        item["config_hashes"] = dict(rec.get("config_hashes") or {})
         self._json({"delivery": item})
 
     #: 全量锁巡检要解析每一条流水线：本机实测（Python 3.14.3、单进程、无并发负载）

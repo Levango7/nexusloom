@@ -1680,6 +1680,7 @@ class PipelineOrchestrator:
         # 指纹（A5）：topology_hash + 逐 agent config_hash
         # 复用 Scheduler 的静态方法，保证与 lockfile 生成/校验同一实现——
         # 两处各算一遍必然漂，锁就失去了意义。
+        from .content_digest import artifact_digests
         from .scheduler import Scheduler
         topology_hash = Scheduler._topology_hash(plan)
         config_hashes: dict[str, str] = {}
@@ -1709,6 +1710,10 @@ class PipelineOrchestrator:
                     # （只留最近 100 个），届时 RunHandle.artifacts() 只能从账本重建。
                     # 没产出的节点给空表——"这一节点跑过但没交付东西"与"不知道"要可区分。
                     "artifact_keys": sorted(str(k) for k in (dag_node.result or {})),
+                    # 内容级摘要（A2 追溯面的补充）：只存键名的话，"当时交付的
+                    # 到底是哪一份内容"事后无法核对——产物值活到进程结束，
+                    # 这一份 sha256 是唯一的证据。
+                    "artifacts": artifact_digests(dag_node.result),
                 })
         finished = float(task.finished_at or 0.0)
         started = float(task.started_at or 0.0)

@@ -13,6 +13,9 @@
     : 'http://127.0.0.1:8910';
   const REFRESH_MS = 5000;
 
+  /* 交付账本一次拉几条：面板要能一眼看完，明细是点开才取的。 */
+  const DELIVERIES_LIMIT = 8;
+
   // ----------------------------------------------------------
   // State
   // ----------------------------------------------------------
@@ -20,6 +23,7 @@
     health: null,
     tasks: null,
     agents: null,
+    deliveries: null,
     error: null,
     lastUpdated: null,
     loaded: false,
@@ -68,6 +72,8 @@
     els.badgeMetrics   = $('#badge-metrics');
     els.approvalsPanel = $('#panel-approvals .card-body');
     els.badgeApprovals = $('#badge-approvals');
+    els.deliveriesPanel = $('#panel-deliveries .card-body');
+    els.badgeDeliveries = $('#badge-deliveries');
     els.badgeQuality   = $('#badge-quality');
     els.badgeCost      = $('#badge-cost');
     els.badgeLogs      = $('#badge-logs');
@@ -188,6 +194,7 @@
       fetchJson(API_BASE + '/api/quality/feedback'),
       fetchJson(API_BASE + '/api/logs?limit=30&since=86400'),
       fetchJson(API_BASE + '/api/approvals'),
+      fetchJson(API_BASE + '/api/deliveries?limit=' + DELIVERIES_LIMIT),
     ]);
     const settle = (r) => {
       if (r.status === 'fulfilled') return r.value;
@@ -204,6 +211,7 @@
       quality: settle(results[3]),
       logs: settle(results[4]),
       approvals: settle(results[5]),
+      deliveries: settle(results[6]),
       failedCount: results.filter(r => r.status === 'rejected'
         && (!r.reason || r.reason.status !== 403)).length,
     };
@@ -1185,6 +1193,7 @@
       state.quality = data.quality;
       state.logs = data.logs;
       state.approvals = data.approvals;
+      state.deliveries = data.deliveries;
       state.partialFail = data.failedCount > 0;
 
       // If all endpoints failed, treat it as offline
@@ -1217,6 +1226,7 @@
     renderQuality(state.quality);
     renderCost(state.cost);
     renderLogs(state.logs);
+    renderDeliveries(state.deliveries);
   }
 
   /* ---- Approvals（跨运行待批收件箱） ---- */
@@ -1277,6 +1287,156 @@
     } catch (err) {
       alert('审批操作失败：' + (err.message || err));
     }
+  }
+
+  /* ---- Deliveries（交付账本：内容摘要 / 逐节点产物 / 逐运行锁指纹） ---- */
+
+  function fmtBytes (n) {
+    // null = 没记录；-1 = 去查过、文件读不到；0 = 空文件。三种真相各自有文案，
+    // 合并成"未知"就是把账本的诚实性抹平。
+    if (n == null) return '未记录';
+    if (n < 0) return '读不到文件';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  function fmtShortSha (sha) {
+    if (!sha) return null;
+    return sha.slice(0, 12) + '…';
+  }
+
+  function renderDeliveries (data) {
+    if (renderPanelError(data, els.deliveriesPanel, els.badgeDeliveries, 'i-download')) return;
+    const items = (data && Array.isArray(data.deliveries)) ? data.deliveries : [];
+    if (els.badgeDeliveries) els.badgeDeliveries.textContent = String(items.length);
+    if (!items.length) {
+      els.deliveriesPanel.replaceChildren(emptyState('i-download', '还没有交付记录'));
+      return;
+    }
+    const table = elt('table', 'tasks-table');
+    const thead = elt('thead');
+    const hr = elt('tr');
+    for (const h of ['运行', '流水线', '状态', '完成', '交付物摘要', '节点 / 产物']) {
+      hr.appendChild(elt('th', null, h));
+    }
+    thead.appendChild(hr);
+    const tbody = elt('tbody');
+    for (const item of items) {
+      const tr = elt('tr', 'row-clickable');
+      tr.onclick = () => openDelivery(String(item.run_id || ''));
+      tr.appendChild(elt('td', 'mono task-id-link', item.run_id || ''));
+      tr.appendChild(elt('td', 'task-pipeline', item.pipeline || ''));
+      tr.appendChild(elt('td', 'badge-status badge-' + (item.status || 'unknown'), item.status || ''));
+      tr.appendChild(elt('td', null, item.finished_at
+        ? new Date(item.finished_at * 1000).toLocaleTimeString() : '--'));
+      const short = fmtShortSha(item.output_sha256);
+      const shaTd = elt('td', 'mono deliv-sha', short || '未记录');
+      if (!short) shaTd.title = '这一跑没有落盘产物，或写在摘要面之前';
+      tr.appendChild(shaTd);
+      tr.appendChild(elt('td', null, (item.node_count || 0) + ' / ' + (item.artifact_count || 0)));
+      tbody.appendChild(tr);
+    }
+    table.appendChild(thead);
+    table.appendChild(tbody);
+    els.deliveriesPanel.replaceChildren(table);
+  }
+
+  async function openDelivery (runId) {
+    try {
+      const data = await fetchJson(API_BASE + '/api/deliveries/' + encodeURIComponent(runId));
+      renderDeliveryDetail((data && data.delivery) || {});
+    } catch (err) {
+      els.deliveriesPanel.replaceChildren(emptyState('i-download',
+        '明细读取失败：' + (err.message || err)));
+    }
+  }
+
+  function inspBlock (title, rows, note) {
+    const block = elt('div', 'insp-block');
+    block.appendChild(elt('h4', null, title));
+    for (const [label, value, cls] of rows) {
+      const row = elt('div', 'insp-row');
+      row.appendChild(elt('span', 'insp-label', label));
+      row.appendChild(elt('span', 'insp-value ' + (cls || ''), value));
+      block.appendChild(row);
+    }
+    if (note) block.appendChild(elt('div', 'insp-note', note));
+    return block;
+  }
+
+  function artifactDigestBlock (n) {
+    /* 逐节点产物摘要：沿用运行详情检查器的三列行（键 / 量 / 摘要），
+       同一个"产物"在两处必须长得一样。 */
+    const arts = n.artifacts || {};
+    const keys = Object.keys(arts).sort();
+    const block = elt('div', 'insp-block');
+    block.appendChild(elt('h4', null, '节点 ' + n.node + ' 的产物'));
+    if (!keys.length) {
+      const hadKeys = (n.artifact_keys || []).length > 0;
+      block.appendChild(elt('div', 'insp-empty', hadKeys
+        ? '这一跑写在摘要面之前：产物键有，摘要没记'
+        : '这个节点没有产出物'));
+      return block;
+    }
+    const list = elt('div', 'insp-artifact');
+    for (const k of keys) {
+      const row = elt('div', 'insp-art-row');
+      row.appendChild(elt('span', 'insp-art-key', k));
+      row.appendChild(elt('span', 'insp-art-type', fmtBytes(arts[k].bytes)));
+      const val = elt('span', 'insp-art-val mono', fmtShortSha(arts[k].sha256) || '未记录');
+      val.title = arts[k].sha256 || '';
+      row.appendChild(val);
+      list.appendChild(row);
+    }
+    block.appendChild(list);
+    block.appendChild(elt('div', 'insp-note',
+      '来源节点：' + n.node + '（' + (n.status || '') + '）'));
+    return block;
+  }
+
+  function renderDeliveryDetail (delivery) {
+    const wrap = elt('div', 'deliv-detail');
+    const bar = elt('div', 'deliv-bar');
+    const back = elt('button', 'run-back', '返回账本列表');
+    back.type = 'button';
+    back.onclick = () => renderDeliveries(state.deliveries);
+    bar.appendChild(back);
+    bar.appendChild(elt('span', 'insp-muted', String(delivery.run_id || '')));
+    wrap.appendChild(bar);
+
+    const short = fmtShortSha(delivery.output_sha256);
+    wrap.appendChild(inspBlock('交付物', [
+      ['路径', delivery.output_path || '未落盘'],
+      ['sha256', short || '未记录（没有落盘产物，或写在摘要面之前）', short ? 'mono' : 'insp-muted'],
+      ['节点 / 产物', (delivery.node_count || 0) + ' / ' + (delivery.artifact_count || 0)],
+      ['耗时', delivery.duration_sec == null ? '--' : (delivery.duration_sec + 's')],
+    ], '摘要是这一跑收尾时算的：账本行按保留期回收后，磁盘上的交付物文件不受影响。'));
+    if (short) {
+      // 短摘要供肉眼比，整串留在这里供复制粘贴核对
+      wrap.appendChild(elt('div', 'insp-note mono', delivery.output_sha256));
+    }
+
+    const topo = delivery.topology_hash || '';
+    const confHashes = delivery.config_hashes || {};
+    const names = Object.keys(confHashes).sort();
+    if (!topo && !names.length) {
+      wrap.appendChild(inspBlock('锁指纹', [['核对', '未记录', 'insp-muted']],
+        '这条记录没有指纹：它写在 A5 指纹落地之前，或者那次解析没带锁信息。'));
+    } else {
+      const rows = [['拓扑指纹', topo || '--', 'mono']];
+      for (const name of names) {
+        rows.push([name, confHashes[name] || '--', 'mono']);
+      }
+      wrap.appendChild(inspBlock('锁指纹（当时算的，事后重锁不动它）', rows,
+        '逐节点是 config_hash 前 12 位：拿它和当前锁文件比，就能回答"跑的是不是锁住的那件事"。'));
+    }
+
+    for (const n of (delivery.nodes || [])) {
+      const block = artifactDigestBlock(n);
+      if (block) wrap.appendChild(block);
+    }
+    els.deliveriesPanel.replaceChildren(wrap);
   }
 
   function renderError () {
