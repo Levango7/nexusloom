@@ -30,6 +30,9 @@ from typing import Any
 RETENTION_DAYS_KEY = "retention.runs_days"
 RETENTION_MAX_RUNS_KEY = "retention.max_runs"
 GC_TICKS_KEY = "maintenance.gc_ticks"
+#: 常驻服务（`--daemon`/`--admin`）没有"轮询 tick"可数，只能按秒计；
+#: 默认 600s（10 分钟），0 = 服务模式不跑 GC（显式关掉，而不是"忘了接"）。
+GC_SECONDS_KEY = "maintenance.gc_seconds"
 
 #: "年龄不启用"的传参值：age=0 在既有语义里是"删光"（历史判据钉着），
 #: 所以"不启用"要显式传一个不会删到任何行的天数——10^9 天。
@@ -68,7 +71,7 @@ def retention_from_config(config: Any) -> Retention:
 
 def gc_runs(*, queue: Any = None, cost: Any = None, feedback: Any = None,
             run_store: Any = None, checkpoint_mgr: Any = None,
-            deliveries: Any = None,
+            deliveries: Any = None, dlq: Any = None,
             retention: Retention | None = None,
             now: float | None = None,
             log: Callable[[str], None] | None = None) -> dict[str, Any]:
@@ -100,16 +103,90 @@ def gc_runs(*, queue: Any = None, cost: Any = None, feedback: Any = None,
                                         "run_store")
     summary["deliveries"] = _run_cleanup(deliveries, "cleanup", rs_args,
                                          "delivery_ledger")
+    # 死信表此前只进不出（A6 漏掉的那一张）：判据形状与其他 store 相同。
+    summary["dlq"] = _run_cleanup(dlq, "prune_dlq", (age, retention.max_runs),
+                                  "dlq")
     if retention.days > 0:
         summary["checkpoints"] = _run_cleanup(
             checkpoint_mgr, "cleanup_old", (age,), "checkpoint_manager")
     if log:
         stamp = now if now is not None else time.time()
-        dropped = sum(int(v) for v in summary.values()
-                      if isinstance(v, int))
         log(f"[maintenance] GC 执行（{stamp}，保留 {retention.days} 天 / 最近 "
-            f"{retention.max_runs} 条）：删除 {dropped} 行")
+            f"{retention.max_runs} 条）：删除 {count_dropped(summary)} 行")
     return summary
+
+
+def count_dropped(summary: dict[str, Any]) -> int:
+    """把汇总里的"删除行数"加总——只数真行数。
+
+    这里原先写的是 `sum(int(v) for v in summary.values() if isinstance(v, int))`，
+    两头都错：`enabled: True` 是 int 的子类，被算成"删了 1 行"；而 `run_store`
+    返回的是逐表 dict（真删了几十行），因为不是 int 被整个跳过。本机实测复现过
+    "删 18 行、日志写删除 1 行"——一条会让人以为核对过的假账，比没有日志更糟。
+    """
+    total = 0
+    for name, value in summary.items():
+        if name == "enabled":
+            continue
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            total += value
+        elif isinstance(value, dict):
+            total += sum(v for v in value.values()
+                         if isinstance(v, int) and not isinstance(v, bool))
+    return total
+
+
+def format_summary(summary: dict[str, Any], retention: Retention | None = None
+                   ) -> str:
+    """把 GC 汇总打成人能核对的几行（`loom --gc` 与 daemon 日志用）。
+
+    打原始 dict 的话，读的人得把 `{'run_store': {'runs': 3, ...}}` 心算成
+    "到底删了多少、哪张表删的"——一张要人背锅的维护动作，账要一眼能对上。
+    """
+    if not summary.get("enabled"):
+        return ("[gc] retention 未启用（retention.runs_days / retention.max_runs "
+                "全 0）——未删任何行；worker 循环同样如此")
+    lines: list[str] = []
+    if retention is not None:
+        lines.append(f"[gc] 保留 {retention.days} 天 / 最近 {retention.max_runs} 条")
+    for name, value in summary.items():
+        if name == "enabled" or value is None:
+            continue
+        if isinstance(value, dict) and value.get("failed"):
+            lines.append(f"  {name}: 失败（{value.get('message', '')}）")
+        elif isinstance(value, dict):
+            parts = " ".join(f"{k}={v}" for k, v in sorted(value.items()))
+            lines.append(f"  {name}: {parts}")
+        else:
+            lines.append(f"  {name}: {value} 行")
+    lines.append(f"  合计删除 {count_dropped(summary)} 行")
+    return "\n".join(lines)
+
+
+def _dlq_store(orch: Any) -> Any:
+    """取持久化总线里的死信表（内存总线没有 store，返回 None = 这一面跳过）。
+
+    走 `bus._store` 与 `admin_api._node_idempotency` 同一条访问路径：另开一个
+    `PersistentStore` 会连到另一个连接池，读到的不是同一个库。
+    """
+    store = getattr(getattr(orch, "bus", None), "_store", None)
+    return store if hasattr(store, "prune_dlq") else None
+
+
+def gc_interval_seconds(config: Any) -> int:
+    """常驻服务模式两次 GC 之间的秒数（`maintenance.gc_seconds`，默认 600）。
+
+    0（或读成非正数）= 服务模式不跑 GC——那是一个**显式选择**，不是忘了接。
+    """
+    if config is None:
+        return 600
+    try:
+        value = int(config.get(GC_SECONDS_KEY, 600) or 0)
+    except (TypeError, ValueError):
+        return 600
+    return max(value, 0)
 
 
 def _run_cleanup(store: Any, method: str, args: tuple, label: str) -> Any:
@@ -158,6 +235,7 @@ def gc_from_orchestrator(orch: Any, now: float | None = None,
         run_store=run_store,
         checkpoint_mgr=getattr(orch, "_checkpoint", None),
         deliveries=DeliveryLedger(),
+        dlq=_dlq_store(orch),
         retention=retention,
         now=now,
         log=log,
