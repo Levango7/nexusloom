@@ -754,7 +754,7 @@ class TestPostgresDeliveryCostQuality:
         dl = _DL(PG_URL)
         with dl._pool.conn() as conn:
             conn.execute("DELETE FROM deliveries")
-        dl.close()
+        dl._pool.close()
         ct = _CT(PG_URL)
         with ct._conn() as conn:
             conn.execute("DELETE FROM cost_log")
