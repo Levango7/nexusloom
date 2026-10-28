@@ -146,6 +146,26 @@ dag_executor/db_backend/deliveries 五个文件，偏移 6~34 行非常数），
 互相顶罪"是子串型判据的通病。另：控制台判据是**结构与跨端字段契约**级，仓库仍无浏览器级
 证据（设计复核 §4 那条缺口没变）。
 
+**合并 #78 后重跑（2026-10-29，最终头 `61f567a` 的树）**：#78 把 `loom_core/deliveries.py`
+改了 150 行、`pipeline.py` 改了 26 行，摘要与指纹的落点都在那一片，所以合并前的电池结论
+不能直接搬过来用。基线（未注入）`tests/test_delivery_traceability.py` **18 passed / 90.23s**
+（本机同负载态），逐条注入：
+
+| 变异 | 合并后实测 |
+|------|-----------|
+| M6 `"artifacts": artifact_digests(...)` → `{}` | 15 passed / **3 failed** |
+| M7 列表 `output_sha256` 恒空串 | 17 passed / **1 failed** |
+| M8 明细不带 `topology_hash` + `config_hashes` | 17 passed / **1 failed** |
+| M9 前端改读响应里不存在的键名 | 16 passed / **2 failed** |
+| M10a `render()` 里删掉渲染调用 | 17 passed / **1 failed** |
+| M10b `renderDeliveries()` 开头把数据覆写成空态 | 18 passed / **0 failed ← 零射程** |
+
+**第二条招供（新的、还没补）**：M10b 是绿的。也就是说现有判据只证明"`render()` 会调用
+账本渲染函数"与"前端读的键在真响应里存在"，**不证明真数据被画出来**——把传入数据整包换成
+空态，Python 侧的静态/契约判据一条都不会红。要抓到它只有两条路：jsdom 级执行渲染函数、
+或浏览器级点验；本仓两者都没有（本机也没装 playwright 的浏览器内核）。这条缺口按"待补"
+记账，不写成"已覆盖"。
+
 
 ## [3.14.0] - 2026-10-27
 
