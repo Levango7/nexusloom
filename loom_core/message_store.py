@@ -282,6 +282,34 @@ class PersistentStore:
             )
             conn.execute("UPDATE messages SET delivered=1, error=? WHERE msg_id=?", (error, msg.msg_id))
 
+    def prune_dlq(self, max_age_days: int = 0, max_rows: int = 0) -> int:
+        """回收死信表：年龄 + 数量双判据，返回删除条数。
+
+        这张表此前**只进不出**（`move_to_dlq` 插入、`list_dlq` 读，没有任何删除
+        面），长跑进程的死信会无限堆积——A6 把周围几张表都收了，唯独漏了这一张。
+        两个参数都 <= 0 时返回 0：这张表从来没有过清理面，不沿用
+        `task_queue` 那种"age=0 就是删光"的历史语义（0 = 没启用）。
+        """
+        if max_age_days <= 0 and max_rows <= 0:
+            return 0
+        conn = self._get_conn()
+        cutoff = time.time() - max_age_days * 86400.0
+        rows = conn.execute(
+            "SELECT id, failed_at FROM dlq ORDER BY failed_at DESC, id DESC"
+        ).fetchall()
+        targets: list[int] = []
+        if max_rows > 0:
+            targets += [r[0] for r in rows[max_rows:]]
+        if max_age_days > 0:
+            targets += [r[0] for r in rows if float(r[1] or 0.0) < cutoff]
+        targets = sorted(set(targets))
+        if not targets:
+            return 0
+        with conn:
+            conn.executemany("DELETE FROM dlq WHERE id = ?",
+                             [(i,) for i in targets])
+        return len(targets)
+
     def replay_dlq(self, dlq_id: int) -> dict | None:
         """取一条死信数据并更新重放计数（真实重投由调用方完成）"""
         conn = self._get_conn()

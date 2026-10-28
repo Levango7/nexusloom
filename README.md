@@ -579,6 +579,41 @@ python run.py input.md -c config.production.json -o output/doc.md
 
 ---
 
+### 保留期与回收（`retention.*` / `loom --gc`）
+
+长跑的 worker 会攒下所有观测面：运行投影、事件、审批、队列、成本、质量反馈、
+checkpoint、交付账本、死信。默认**一个都不删**——保守默认比"替你清掉数据"更容易恢复。
+
+| 配置键 | 默认 | 语义 |
+|--------|------|------|
+| `retention.runs_days` | `0`（不启用） | 年龄判据：终态运行超过 N 天就回收 |
+| `retention.max_runs` | `0`（不启用） | 数量判据：只保留最近 N 条终态运行 |
+| `maintenance.gc_ticks` | `60` | worker 每 N 个轮询跑一次 GC（**有活没活都算**） |
+| `maintenance.gc_seconds` | `600` | 常驻服务（`--admin`/`--dashboard`/`--daemon`）两次回收之间的秒数；`0` = 服务模式不跑 |
+
+两条保留期判据任一 > 0 即启用；配成负数或读不懂的值一律按 `0` 处理——配置写错
+不该悄悄变成"删光一切"。覆盖面：`runs`/`run_nodes`/`events`/`approvals`、任务队列、
+成本、质量反馈、checkpoint（仅在 `runs_days > 0` 时）、交付账本、以及消息总线的死信表。
+
+手动跑一次并看清每张表删了多少：
+
+```bash
+python run.py --gc
+# [gc] 保留 30 天 / 最近 500 条
+#   run_store: approvals=1 events=9 run_nodes=5 runs=3
+#   deliveries: 2 行
+#   dlq: 0 行
+#   合计删除 20 行
+```
+
+三条边界要说在前面：
+
+- **进行中的运行一行不碰**——把活运行从观测面抹掉比不删更糟，它还在写投影。
+- **只删库里的行，不删磁盘产物**：`output_path` 指向你自己声明的输出目录，删它
+  等于删你的文件。账本行走了文件还在，核对靠 `output_sha256` 与逐节点摘要。
+- **历史行不 backfill**：A6 之前写入的账本行没有逐节点摘要，读侧如实显示"未记录"，
+  不会补算一个当时并不存在的值。
+
 ## 管理 API
 
 启动：`python run.py <input> --admin` （默认 `http://127.0.0.1:8910`）
@@ -785,7 +820,7 @@ python run.py --replay-run <run_id>                  # 按 id 补一条
 
 | 口 | 给什么 |
 |----|--------|
-| `GET /api/deliveries` | 最近交付（`?limit=`，默认 50、夹到 200），逐行带 `projection` 健康位 |
+| `GET /api/deliveries` | 最近交付（`?limit=`，默认 50、夹到 200），逐行带 `projection` 健康位与交付物 `output_sha256` |
 | `GET /api/deliveries/<run_id>` | 整条结构化载荷：逐节点状态/耗时/`artifact_keys` |
 | `GET /api/locks` | 逐流水线锁巡检（`?pipeline=<name>` 只看一条） |
 
@@ -1076,8 +1111,20 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3163 个测试本机全绿**（`3163 passed, 21 skipped, 6 deselected`，2026-10-27 Linux CI 全量实测；
-实际收集 **3163** 条（Linux CI）/ **3164** 条（Windows 本机），平台差 1 条为 skipif 语义差异，护栏按 `collected − declared ≤ 10` 判；
+**3185 个测试本机全绿**（`3185 passed, 24 skipped, 6 deselected`，2026-10-29 Windows 本机全量实测，
+耗时 73 分 08 秒 / 4388.42s——同机还有别的会话在跑测试，这个耗时是**负载态**，别拿去当基准；
+更早一轮轻负载下同一套判据是 19 分 37 秒 / 1177.27s）；这一轮里唯一一条红就是这条计数护栏自身
+（它读到的还是旧的 `3179 passed`，按新口径应为 3185，别的判据一条没变）；
+实际收集 **3209** 条（Windows 本机）/ **3217** 条（Linux CI，多 8 条为 POSIX-only 用例），
+差值 **24** = 22 条真 PG 门（`test_state_backend` 21 + `test_schedule_lease` 1，`LOOM_TEST_PG_URL`
+未设时跳过，CI 四条腿都挂真 PG 会执行）+ 1 条仅 POSIX 语义的路径用例 + 1 条可选 JSON 后端缺包；
+护栏的上界 = 本行自报的 `skipped`（Windows 侧精确）+ 在 Linux 上再加实测的 8 条平台差；
+口径：`Python 3.14.3`、串行无 `-n`、本机无并发 pytest、`LOOM_TEST_PG_URL` 未设；
+**本批 +36 条**（2026-10-28，A6 活性 + 交付追溯面 + 控制台账本）：`tests/test_gc_liveness.py` 18 条
+（有活时也回收 / 间隔门反向对照 / 空转超时回归 / 常驻服务三态节拍 / 死信回收四判据 / GC 错账与
+`--gc` 逐表打印的 CLI 端到端）+ `tests/test_delivery_traceability.py` 18 条（摘要函数的规范形态、
+真跑一遍逐节点摘要与内存结果逐字一致、`output_sha256` 对上磁盘、锁指纹形状、两条真 HTTP 往返、
+控制台接线与**跨端字段契约**）；
 **本批 +46 条**（2026-10-27 `tests/test_pack_scaffold.py` P2 #11 pack new 骨架）：`loom pack new <name>` 命令行脚手架——包名校验（正则 + 保留字）、目录/文件/AGENT_NAME 的连字符 slug 化（`my-pack` → `my_pack`）、PascalCase 类名、六模板文件生成（pack.yaml / agents / pipelines / prompts / quality）、discoverable 端到端验证（pack_manifest 发现 + agent_inventory + pipeline_dirs + agent_sources + pack_check 判据）；
 - A5 指纹：`topology_hash` + 逐 agent `config_hashes` 进交付记录（复用 Scheduler 静态方法，两处各算一遍必然漂）
 - A2 `output_sha256`：交付产物内容哈希（64 位 hex，无产物时空串）

@@ -131,8 +131,8 @@ curl -X POST http://127.0.0.1:8910/api/cache/clear \
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/deliveries` | 最近交付，`?limit=`（默认 50，夹到 200）；响应 `deliveries[]` + `count` / `truncated` / `scope` |
-| GET | `/api/deliveries/{run_id}` | 单条交付的完整载荷：`nodes[]`（`node` / `agent` / `status` / `attempts` / `duration_sec` / `error` / `artifact_keys`）+ `plan_id` / `input_file` |
+| GET | `/api/deliveries` | 最近交付，`?limit=`（默认 50，夹到 200）；响应 `deliveries[]` + `count` / `truncated` / `scope`；逐行带 `output_sha256` / `node_count` / `artifact_count` |
+| GET | `/api/deliveries/{run_id}` | 单条交付的完整载荷：`nodes[]`（`node` / `agent` / `status` / `attempts` / `duration_sec` / `error` / `artifact_keys` / `artifacts`）+ `plan_id` / `input_file` / `output_sha256` / `topology_hash` / `config_hashes` |
 | GET | `/api/locks` | 逐流水线锁巡检，`?pipeline=<name>` 只看一条；响应 `pipelines[]` + `drifted[]` + `scope` |
 
 每行交付都带 `projection`（`complete` / `incomplete` / `legacy` / `unknown`）——它是
@@ -147,6 +147,12 @@ HTTP 侧不复制那条规则（两处判据一定会分叉）。
   无法证据化，这里不拿当前值冒充当时。`matches` 是三值——`true` 比过且一致、`false` 漂移
   （`issues` 逐条给差在哪，含 `lock=` / `当前=` 两个哈希）、`null` 没有锁可比或 YAML 解析失败。
   `lock_present: false` 的行**不进** `drifted`：缺锁不是漂移。
+- **追溯字段三种形状别合并读**：`output_sha256: ""` = 没有落盘产物，或这一跑写在
+  指纹/摘要落地之前（读侧显示"未记录"，不冒充已核对）；`nodes[].artifacts.<键>`
+  是**写入时**算的内容摘要（`sha256` / `bytes` / `kind`，文本按 UTF-8 原文、结构按
+  `sort_keys` 规范 JSON），老记录没有这一项就是没有；`topology_hash` 与
+  `config_hashes` 是 A5 的逐运行锁指纹，**事后重锁不会回头改它**——"某次运行时
+  用的锁对不对"只能靠这一份回答，不能在 `/api/locks` 现场重算。
 - 交付账本表里没有归属列，所以非 admin 的可见性逐行反查投影的 `principal`：CLI 直跑、
   投影里查无此运行的行 `projection` 报 `unknown` 且只有 admin 可见。越权与不存在给**同一个
   404**（存在性本身就是信息）；账本读不动给 **503** `{"error": "deliveries unavailable"}`，

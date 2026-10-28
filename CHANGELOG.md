@@ -59,6 +59,114 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Added（2026-10-28·续69，A6 的活性 + 交付追溯面 + 控制台账本）
+
+删的是"功能写好了但根本不会被跑到 / 跑了也看不见"这一类。三块：
+
+**1. GC 的活性（A6 此前只在一种运行形态下成立）**
+
+- **worker 有活也回收**：`_maybe_gc()` 原先挂在 `if item is None:` 的空转分支里，
+  于是**持续有活的 worker 永远不回收**——而那正是 A6 要治的场景（长跑且饱和的
+  worker 无限膨胀）。现在它在分支外，按 `maintenance.gc_ticks` 计。
+- **常驻服务接回收**：`--admin` / `--dashboard` / `--daemon` 这条路径上根本没有
+  worker 循环，保留期配置此前等于摆设。新增 `maintenance.gc_seconds`（默认 600、
+  `0` = 服务模式显式不跑），`_run_daemon` 按秒计节拍；节拍判据抽成
+  `_daemon_gc_due()` 以便直接驱动（不用靠 sleep 观察）。
+- **死信表进回收**：`PersistentStore.prune_dlq(max_age_days, max_rows)` —— `dlq`
+  此前**只进不出**（`move_to_dlq` 插入、`list_dlq` 读，没有任何删除面），是 A6
+  漏掉的最后一张无界表。两个参数都 <= 0 时返回 0：这张表从来没有过清理面，
+  不沿用 `task_queue` 那种"age=0 就是删光"的历史语义。
+
+**2. 逐节点产物摘要（A2 追溯面的内容级补充）**
+
+- 子集里只有整篇交付物的 `output_sha256`（v3.15.0）与产物**键名**，"各节点分别
+  产出了什么内容、是不是当时那份"仍无从核对。新增 `loom_core/content_digest.py`
+  （`digest_of` / `artifact_digests`）：文本按 UTF-8 原文、结构按 `sort_keys` 规范
+  JSON（不排序则同一 dict 换键序换一个 sha，追溯当场失效）、编不动的对象退 `repr`
+  且**绝不外抛**。摘要只在写入时算一次——产物值活到进程结束，事后没有第二处能算出
+  同一个值。账本记录里落成 `nodes[].artifacts.<键> = {sha256, bytes, kind}`。
+
+**3. 读面与控制台**
+
+- `GET /api/deliveries` 逐行带 `output_sha256`；`GET /api/deliveries/<run_id>` 追加
+  `topology_hash` / `config_hashes` / 逐节点 `artifacts`。
+- 控制台新增「交付账本」卡（`#panel-deliveries`）：列表给运行/流水线/状态/完成/
+  摘要短形/节点·产物数；点行进明细——交付物路径 + 完整 sha256 + 锁指纹（逐节点
+  config_hash）+ 逐节点产物摘要行（复用运行详情检查器的三列版式，不另发明一套）。
+- 文档：README 新增「保留期与回收」（四个配置键、`--gc` 输出样例、三条边界），
+  `docs/deployment.md` §6.1 给运维口径，`docs/api.md` 补追溯字段的三种形状。
+  此前 `retention.*` 与 `maintenance.gc_ticks` 在用户文档里**零命中**，功能等于不可发现。
+
+### Fixed（2026-10-28·续69，GC 汇总日志的错账）
+
+`gc_runs` 的删除行数原先是 `sum(int(v) for v in summary.values() if isinstance(v, int))`，
+两头都错：`enabled: True` 是 int 的子类，被算成"删了 1 行"；而 `run_store` 返回的逐表
+dict（真删了几十行）因为不是 int 被整个跳过。本机实测复现：**删 18 行、日志写"删除 1 行"**。
+新增 `count_dropped()`（跳过 `enabled` 与 bool、dict 逐表加总）与 `format_summary()`
+（逐表 + 合计），`loom --gc` 不再甩原始 dict。
+
+### Changed（2026-10-28·续69，计数护栏的容差改为派生）
+
+`test_readme_test_count_matches_collection` 原先写死"`collected − declared ≤ 10`"。
+这个 10 是按当年的环境门 skip 数手调的；`requires_pg` 那批涨到 21 条之后，护栏
+开始把一个**正确**的 README 数字判成过期（本批现场：`3179 passed` 被要求和 3200
+相差 ≤10，实际差 21）。改成 `budget = README 自报的 skipped + 平台差(8)`：两个数
+同源，环境门增减都会被 README 那一行带着走，而"忘了改计数"仍然会红——窄变异（把
+声明数改小 1 → Windows 侧差值 25 > 24）实测转红。这不是为了凑绿放宽门，是把一个写错的
+常量换成可解释的判据。
+
+**rebase 到含 #78 的 main 之后重测（2026-10-29）**：绝对数全部前移——收集 3200 → **3209**、
+skipped 21 → **24**（#78 给 `test_state_backend` 加了 3 条真 PG 门）、passed → **3185**，
+Linux 侧按同差额预期 3217（预算 24 + 8 = 32 恰好等于 3217 − 3185，"恰好"是有意的）。
+同一轮里唯一的红就是这条护栏自身，改完 README 后 `tests/test_doc_consistency.py` 9 passed。
+另：`scripts/check_design_anchors.py` 里 17 处锚点被 #78 的行号推移打偏（pipeline/run_store/
+dag_executor/db_backend/deliveries 五个文件，偏移 6~34 行非常数），按整行文本就近重钉后
+`checked=52 mismatched=0` 复验——这条脚本不进 CI，偏了不会有人红，只能靠每次并 main 手跑。
+
+### 判据与变异（36 条新判据：`tests/test_gc_liveness.py` 18 + `tests/test_delivery_traceability.py` 18）
+
+窄变异电池（每条打在判定维度上，逐条落盘日志、还原走字节级写回并核 `restored=True`）：
+
+| 变异 | 红在哪 |
+|------|--------|
+| M1 GC 退回空转分支 | 1 failed（有活时不回收） |
+| M2 `count_dropped` 的 dict 分支不计行 | 2 failed |
+| M3 GC 不扫死信表 | 1 failed |
+| M4 死信清理不删任何行 | 1 failed |
+| M5 常驻服务忽略节拍 | 1 failed |
+| M6 逐节点产物摘要不写 | 1 failed |
+| M7 列表不暴露 `output_sha256` | 1 failed |
+| M8 明细不带锁指纹 | 1 failed |
+| M9 控制台读响应里不存在的字段 | 1 failed（跨端契约） |
+| M10 `render()` 里不再渲染账本面板 | 1 failed |
+
+**招供**：M10 第一次跑是**绿的**——原判据是子串匹配 `"renderDeliveries(state.deliveries)"`，
+而明细页返回按钮那行 `back.onclick = () => renderDeliveries(...)` 也含这段子串，把"渲染
+被注释掉"骗成了通过。改成逐行比对 `render()` 函数体之后才红；这类"同一符号的两处调用
+互相顶罪"是子串型判据的通病。另：控制台判据是**结构与跨端字段契约**级，仓库仍无浏览器级
+证据（设计复核 §4 那条缺口没变）。
+
+**合并 #78 后重跑（2026-10-29，最终头 `61f567a` 的树）**：#78 把 `loom_core/deliveries.py`
+改了 150 行、`pipeline.py` 改了 26 行，摘要与指纹的落点都在那一片，所以合并前的电池结论
+不能直接搬过来用。基线（未注入）`tests/test_delivery_traceability.py` **18 passed / 90.23s**
+（本机同负载态），逐条注入：
+
+| 变异 | 合并后实测 |
+|------|-----------|
+| M6 `"artifacts": artifact_digests(...)` → `{}` | 15 passed / **3 failed** |
+| M7 列表 `output_sha256` 恒空串 | 17 passed / **1 failed** |
+| M8 明细不带 `topology_hash` + `config_hashes` | 17 passed / **1 failed** |
+| M9 前端改读响应里不存在的键名 | 16 passed / **2 failed** |
+| M10a `render()` 里删掉渲染调用 | 17 passed / **1 failed** |
+| M10b `renderDeliveries()` 开头把数据覆写成空态 | 18 passed / **0 failed ← 零射程** |
+
+**第二条招供（新的、还没补）**：M10b 是绿的。也就是说现有判据只证明"`render()` 会调用
+账本渲染函数"与"前端读的键在真响应里存在"，**不证明真数据被画出来**——把传入数据整包换成
+空态，Python 侧的静态/契约判据一条都不会红。要抓到它只有两条路：jsdom 级执行渲染函数、
+或浏览器级点验；本仓两者都没有（本机也没装 playwright 的浏览器内核）。这条缺口按"待补"
+记账，不写成"已覆盖"。
+
+
 ## [3.14.0] - 2026-10-27
 
 ### Added（2026-10-27，A7：LoomClient Python SDK）

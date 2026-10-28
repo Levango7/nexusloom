@@ -612,13 +612,42 @@ def _run_single_task(args_args: argparse.Namespace, orch: PipelineOrchestrator,
     return task
 
 
+def _daemon_gc_due(orch: PipelineOrchestrator, last_gc: float,
+                   now: float | None = None) -> float:
+    """服务模式的一次回收检查：到点就跑一次 GC，返回新的"上次回收"时刻。
+
+    抽成函数是为了能判据它，而不是只能靠 `sleep` 观察：两个分支（到点/没到点）
+    与"显式关掉"（`maintenance.gc_seconds = 0`）都要能被单测直接驱动。
+    """
+    import time as _time
+
+    from loom_core.maintenance import gc_from_orchestrator, gc_interval_seconds
+
+    stamp = _time.time() if now is None else now
+    interval = gc_interval_seconds(getattr(orch, "config", None))
+    if not interval or stamp - last_gc < interval:
+        return last_gc
+    try:
+        gc_from_orchestrator(orch, log=print)
+    except Exception as e:                   # noqa: BLE001 —— 回收失败不该杀掉常驻服务
+        print(f"[gc] 失败（常驻服务继续）：{e}")
+    return stamp
+
+
 def _run_daemon(orch: PipelineOrchestrator) -> None:
-    """守护进程模式：保持 Admin API 常驻直到收到 KeyboardInterrupt"""
+    """守护进程模式：保持 Admin API 常驻直到收到 KeyboardInterrupt。
+
+    服务模式没有 worker 的轮询 tick，回收只能按时间计（`maintenance.gc_seconds`，
+    默认 600 秒、0 = 不跑）。不接这一口的话，"只跑 `--admin` / `--dashboard` /
+    `--daemon` 的部署"里保留期配置等于摆设——worker 循环根本不在这条路径上。
+    """
     print("\n[run] 守护进程模式 — 按 Ctrl+C 退出")
     with contextlib.suppress(KeyboardInterrupt):
         import time
+        last_gc = time.time()
         while True:
             time.sleep(10)
+            last_gc = _daemon_gc_due(orch, last_gc)
 
 
 # ─── CLI 动词收敛（spec §7.3 第 7 步 / §5.3 CLI 行）─────────────
@@ -807,19 +836,17 @@ def main():
 
     # ─── 保留期 GC（A6）：一次性维护动作 ────────────
     if args.gc:
-        from loom_core.maintenance import gc_from_orchestrator
+        from loom_core import maintenance
         project_root = Path(__file__).parent
         orch = _get_orchestrator(project_root)
         orch.register_agents()
         try:
-            summary = gc_from_orchestrator(orch, log=print)
+            summary = maintenance.gc_from_orchestrator(orch, log=print)
         finally:
             orch.shutdown()
-        if not summary.get("enabled"):
-            print("[gc] retention 未启用（retention.runs_days / retention.max_runs 全 0）"
-                  "——未删任何行；worker 循环同样如此")
-        else:
-            print(f"[gc] {summary}")
+        # 逐表打印而不是甩一个 dict：这是要人据此承担"删对了没有"的维护动作
+        print(maintenance.format_summary(
+            summary, maintenance.retention_from_config(orch.config)))
         sys.exit(0)
 
     # 无输入文件时：仅 --check/--mcp/--recover/--replay-*/--triggers*、服务模式与

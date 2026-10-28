@@ -91,15 +91,17 @@ class TaskWorker:
             ticks += 1
             self.refresh_config()
             item = self.run_once()
+            # A6：GC 与"这一轮有没有活儿"无关——原先它挂在下面的空转分支里，
+            # 于是**持续有活的 worker 永远不回收**，而那正是 A6 要治的场景
+            # （长跑且饱和的 worker 无限膨胀）。放在分支外，两者都按 tick 跑。
+            if self._gc_interval_ticks() and ticks % self._gc_interval_ticks() == 0:
+                self._maybe_gc()
             if item is None:
                 if idle_timeout is not None:
                     idle_started = idle_started or time.time()
                     if time.time() - idle_started >= idle_timeout:
                         self.log.info("worker 空转到超时，退出")
                         break
-                # A6：按配置周期跑保留期 GC（重启后继续——它不依赖内存态）
-                if self._gc_interval_ticks() and ticks % self._gc_interval_ticks() == 0:
-                    self._maybe_gc()
                 time.sleep(poll_interval)
             else:
                 idle_started = None
