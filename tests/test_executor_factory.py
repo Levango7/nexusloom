@@ -76,6 +76,76 @@ class TestExecutorFactory:
         executor.shutdown()
 
 
+class TestProcessPoolStartsClean:
+    """进程池必须用 spawn 上下文起子进程。
+
+    Linux 上 ProcessPoolExecutor 默认 fork。父进程运行到这一步时已有多条活线程
+    （Registry 健康检查、总线持久化、成本/质量账本），fork 出来的子进程会继承
+    "可能在 fork 瞬间正被别的线程持有"的锁，第一次碰锁就永久阻塞：节点不返回、
+    层循环无限等待、进程池 shutdown(wait=True) 跟着挂住。CI 上实测过——pytest
+    打印完汇总后进程还空转 47 分钟，直到整条 job 被 60 分钟上限杀掉。
+
+    判据就是启动方式本身：四平台（Linux/macOS/Windows）一律 spawn。
+    """
+
+    def test_create_process_executor_uses_spawn(self):
+        executor = create_executor(max_workers=1, executor_type="process")
+        try:
+            assert isinstance(executor, ProcessPoolExecutor)
+            assert executor._mp_context.get_start_method() == "spawn"
+        finally:
+            executor.shutdown()
+
+    def test_smart_executor_pool_also_uses_spawn(self, monkeypatch):
+        """SmartExecutor 复用的全局进程池与工厂同源，不能还留着 fork。"""
+        monkeypatch.setattr(ef, "_process_pool_singleton", None)
+        pool = ef._get_or_create_process_pool(max_workers=1)
+        try:
+            assert pool._mp_context.get_start_method() == "spawn"
+        finally:
+            ef._discard_broken_pool(pool)
+
+
+class TestShutdownExecutor:
+    """shutdown_executor：正常路径等结果，卡死路径不能等"""
+
+    def test_thread_executor_shuts_down_normally(self):
+        executor = create_executor(max_workers=1, executor_type="thread")
+        future = executor.submit(_square, 3)
+        ef.shutdown_executor(executor)
+        assert future.result() == 9
+
+    def test_force_kills_wedged_workers(self):
+        """子进程永不返回时，force=True 必须把它结束掉而不是等下去。
+
+        这是 CI 上那次 47 分钟空转的兜底：等一个卡死的 worker 等价于挂死宿主。
+        """
+        executor = create_executor(max_workers=1, executor_type="process")
+        executor.submit(time.sleep, 600)
+        # 等子进程真的起来并进入 sleep，再强制回收
+        deadline = time.time() + 30
+        while time.time() < deadline and not executor._processes:
+            time.sleep(0.05)
+        procs = list((executor._processes or {}).values())
+        assert procs, "子进程未启动，用例前提不成立"
+
+        started = time.time()
+        ef.shutdown_executor(executor, force=True)
+        elapsed = time.time() - started
+
+        assert elapsed < 10, f"force 回收耗时 {elapsed:.1f}s，说明还在等卡死的子进程"
+        for proc in procs:
+            proc.join(5)
+            assert not proc.is_alive(), "worker 进程未被终止"
+
+    def test_force_on_thread_executor_still_waits(self):
+        """force 只对进程池有意义；线程池照旧正常关闭（不误杀）。"""
+        executor = create_executor(max_workers=1, executor_type="thread")
+        future = executor.submit(_square, 5)
+        ef.shutdown_executor(executor, force=True)
+        assert future.result() == 25
+
+
 class TestProcessPoolExecution:
     """ProcessPoolExecutor 实际执行验证"""
 

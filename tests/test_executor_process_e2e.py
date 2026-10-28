@@ -18,6 +18,7 @@ executor_factory 层有单测（test_executor_factory.py），DAGExecutor 有 pi
 from __future__ import annotations
 
 import time
+import uuid
 from pathlib import Path
 
 from loom_core.pipeline import PipelineOrchestrator
@@ -38,7 +39,7 @@ topology:
   edges: []
 pipeline:
   executor_type: process
-  timeout: 30
+  timeout: 120
   fail_fast: false
 """
 
@@ -59,7 +60,7 @@ topology:
   edges: [["tldr", "writer"]]
 pipeline:
   executor_type: process
-  timeout: 30
+  timeout: 120
   fail_fast: false
 """
 
@@ -75,18 +76,18 @@ topology:
   levels: [["tldr"]]
   edges: []
 pipeline:
-  timeout: 30
+  timeout: 120
   fail_fast: false
 """
 
 
-def _plan(tmp_path: Path, yaml_text: str, name: str):
+def _plan(tmp_path: Path, yaml_text: str, name: str, agents_dir: Path | None = None):
     d = tmp_path / name
     d.mkdir(parents=True, exist_ok=True)
     f = d / f"{name}.yaml"
     f.write_text(yaml_text, encoding="utf-8")
     return Scheduler(
-        agents_dir=str(PROJECT / "agents"),
+        agents_dir=str(agents_dir or (PROJECT / "agents")),
         pipeline_dir=str(d),
     ).parse_file(str(f), verify_lock=False)
 
@@ -100,7 +101,11 @@ def _orch(tmp_path: Path) -> PipelineOrchestrator:
     return orch
 
 
-def _wait_done(orch, task_id: str, timeout: float = 30.0) -> dict | None:
+def _wait_done(orch, task_id: str, timeout: float = 180.0) -> dict | None:
+    """轮询等待任务完成。process 模式每层都要 spawn 一个新解释器（重新
+    import 整条依赖链），CI runner 拥堵时冷启动本身就要几十秒。等待上限
+    180s 与 YAML 里声明的 timeout: 120 配套：引擎在 240s 上限处才判卡死，
+    所以正常情况下先看到的是真实终态，而不是这里的空结果。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         row = orch.task_queue.get(task_id)
@@ -219,3 +224,94 @@ class TestProcessExecutorWithoutChildContext:
                 kw in error_text.lower()
                 for kw in ("process", "子进程", "child_context", "context", "registry")
             ), f"错误信息未指向 process 模式限制: {error_text}"
+
+
+# 永不返回的 Agent：让子进程卡在 bus 请求里，父进程必须自己判超时
+HANG_AGENT_SOURCE = '''
+"""测试用：handle 永不返回。"""
+import time
+
+from loom_core.base_agent import AgentStatus, BaseAgent, Message
+
+SANDBOX_TRUSTED = True
+AGENT_NAME = "hang"
+AGENT_VERSION = "0.1"
+AGENT_DESC = "测试用：永不返回"
+AGENT_AUTHOR = "test"
+AGENT_PRIORITY = 50
+INPUT_TOPICS = ["hang.input"]
+OUTPUT_TOPICS = []
+
+
+class HangAgent(BaseAgent):
+    def handle(self, msg: Message) -> dict | None:
+        time.sleep(600)
+        return {"status": "ok"}
+'''
+
+# 节点 timeout 600s：子进程会一直等在 bus 请求上，父进程的层上限先到
+WEDGED_YAML = """
+name: proc_wedged
+agents:
+  - name: hang
+    version: "0.1"
+    timeout: 600
+    dependencies: []
+    config: {}
+topology:
+  levels: [["hang"]]
+  edges: []
+pipeline:
+  executor_type: process
+  timeout: 2
+  fail_fast: false
+"""
+
+
+class TestWedgedChildIsBounded:
+    """子进程卡死不能把宿主进程一起拖住。
+
+    等待上限 = max(声明 timeout × 2, _PROCESS_LEVEL_CEILING_MIN)。用例把保底
+    值压到 5s，用 timeout: 2 触发 5s 上限，验证引擎在有限时间内把节点判失败
+    并强制回收进程池——而不是无限等一个永不返回的 future。CI 上真实发生过
+    这个 bug：pytest 打印完汇总后进程空转 47 分钟，直到 job 被 60 分钟上限杀掉。
+    """
+
+    def test_wedged_child_fails_with_timeout(self, tmp_path, monkeypatch):
+        from loom_core import dag_executor as de
+
+        monkeypatch.setattr(de, "_PROCESS_LEVEL_CEILING_MIN", 5.0)
+
+        agents_dir = tmp_path / "hang_agents"
+        agents_dir.mkdir()
+        (agents_dir / "__init__.py").write_text("", encoding="utf-8")
+        (agents_dir / "hang.py").write_text(HANG_AGENT_SOURCE, encoding="utf-8")
+
+        plan = _plan(tmp_path, WEDGED_YAML, "proc_wedged", agents_dir=agents_dir)
+        orch = PipelineOrchestrator(
+            agents_dir=str(agents_dir),
+            checkpoint_dir=str(tmp_path / "ckpt"),
+        )
+        orch.register_agents()
+
+        input_file = tmp_path / "input.md"
+        # 内容要够长：太短会在父进程的检索词提取阶段就被判失败，节点根本进不了子进程
+        input_file.write_text(
+            "# 标题\n\n这是一段足够长的内容用于测试。" * 5, encoding="utf-8"
+        )
+
+        # 任务队列是持久化的（LOOM_STATE_DIR 默认锚在检出目录）：固定 task_id
+        # 在本机重跑时会读到上一轮的终态行，用例就变成"测了旧结果"
+        task_id = f"proc_wedged_{uuid.uuid4().hex[:8]}"
+        started = time.time()
+        orch.run_plan(plan, input_file=str(input_file), task_id=task_id, wait=False)
+        row = _wait_done(orch, task_id, timeout=120)
+        elapsed = time.time() - started
+
+        assert row is not None, "卡死节点没有被判超时——宿主会被永久挂住"
+        assert row["status"] == "failed", f"卡死节点应判失败，实际: {row}"
+        error = row.get("error", "")
+        assert "process 模式子进程" in error, (
+            f"失败原因不是'子进程未返回'（说明卡死兜底没走到）: {error}"
+        )
+        assert elapsed < 90, f"判定耗时 {elapsed:.1f}s，超时上限没起作用"

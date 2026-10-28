@@ -1,0 +1,16 @@
+# greeting pack（loom pack new 生成）
+#
+# 引擎不 import 本包；本包经 loom_core.pack_manifest 被发现与装配：
+#   - agents/     由 AgentLoader 多目录发现
+#   - pipelines/  由 installed_pipelines / 流水线解析 union 进候选
+#   - quality/    由 quality_gate.load_profile 按名解析
+#   - prompts/    由 writer 按 profile 名解析
+name: greeting
+version: "0.1.0"
+description: greeting pack —— 最小可运行示例包，演示 pack 机制
+agents:
+  - greeting_agent
+pipelines:
+  - greeting
+quality_profiles:
+  - default

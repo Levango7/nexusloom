@@ -387,9 +387,14 @@ class RunStore:
 
     def _append(self, conn, run_id: str, type: str, payload: dict,
                 ts: float, txn: _Txn) -> int:
-        """事务内取号并追加。见模块头对 `seq` 的说明。"""
-        txn.acquire_seq_lock(run_id)
+        """事务内取号并追加。见模块头对 `seq` 的说明。
+
+        注意 PG 上的行锁顺序：必须先 ``INSERT OR IGNORE`` 让行存在，
+        再 ``acquire_seq_lock``（``SELECT ... FOR UPDATE``）。否则对
+        不存在的行 ``FOR UPDATE`` 锁不住任何东西，并发下 seq 仍会撞 PK。
+        """
         conn.execute("INSERT OR IGNORE INTO runs (run_id) VALUES (?)", (run_id,))
+        txn.acquire_seq_lock(run_id)
         row = conn.execute("SELECT MAX(seq) FROM events WHERE run_id = ?",
                            (run_id,)).fetchone()
         seq = int(row[0] if row and row[0] is not None else 0) + 1

@@ -1,0 +1,10 @@
+# greeting pack prompt 模板
+system_prompt: |
+  你是一个专业的内容生成助手。请根据要求生成高质量内容。
+  直接输出 markdown，无需额外说明。
+
+sections:
+  - name: "正文"
+    prompt: |
+      # {{title}}
+      请根据以下要求生成内容。

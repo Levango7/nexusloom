@@ -1,0 +1,13 @@
+# greeting pack 质量档案
+name: default
+description: "greeting pack 默认质量标准"
+threshold: 70
+max_regenerations: 3
+
+weights:
+  completeness: 0.30
+  structure: 0.20
+  readability: 0.20
+  depth: 0.30
+
+style_rules: []

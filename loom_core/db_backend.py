@@ -1,12 +1,16 @@
 """状态后端工厂：SQLite / Postgres 双方言，队列可换（spec §5.4 P1-B）。
 
-设计：方言差异收敛在本模块的**两处翻译**，业务模块（TaskQueue 等）继续用
+设计：方言差异收敛在本模块的**四处翻译**，业务模块（TaskQueue 等）继续用
 `?` 占位符与常量 DDL，不写分支：
 
   1. **占位符**：SQLite 用 `?`，psycopg 用 `%s`——`translate()` 统一转；
   2. **UPSERT**：SQLite 的 `INSERT OR IGNORE` 在 PG 是
      `INSERT ... ON CONFLICT DO NOTHING`——同一句 SQL 两个方言；
-     判断"是否真插入"仍看 `cursor.rowcount`（两边都是受影响行数）。
+     判断"是否真插入"仍看 `cursor.rowcount`（两边都是受影响行数）；
+  3. **浮点类型**：SQLite `REAL` = 8 字节 double，PG `REAL` = 4 字节 →
+     PG 侧统一用 `DOUBLE PRECISION`；
+  4. **自增主键**：SQLite `INTEGER PRIMARY KEY AUTOINCREMENT` →
+     PG `SERIAL PRIMARY KEY`。
 
 其余对齐（2026-10-12 实测）：
   - `CREATE TABLE IF NOT EXISTS` / 列名检查 / 事务块语义两边一致；
@@ -49,7 +53,7 @@ def is_postgres_dsn(dsn: str) -> bool:
 
 
 def _translate(sql: str) -> str:
-    """SQLite 方言 SQL → PG 方言（只做已穷举的两处替换）。"""
+    """SQLite 方言 SQL → PG 方言（已穷举的四处替换）。"""
     # 占位符：库内所有 SQL 都只把 `?` 当参数位，不存在字面量 `?`
     sql = sql.replace("?", "%s")
     # 幂等 UPSERT：INSERT OR IGNORE INTO t (...) → INSERT INTO t (...) ON CONFLICT DO NOTHING
@@ -59,17 +63,22 @@ def _translate(sql: str) -> str:
         sql = sql.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
     # DDL 浮点类型：SQLite REAL = 8 字节（IEEE754 double），PG REAL = 4 字节
     sql = re.sub(r"\bREAL\b", "DOUBLE PRECISION", sql, flags=re.IGNORECASE)
+    # 自增主键：SQLite 的 INTEGER PRIMARY KEY AUTOINCREMENT → PG 的 SERIAL PRIMARY KEY
+    sql = re.sub(r"(?i)\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b",
+                 "SERIAL PRIMARY KEY", sql)
     return sql
 
 
 class _ConnPool:
     """thread-local 连接池（SQLite/PG 共用骨架，connect 由子类实现）。"""
 
-    def __init__(self, dialect: str):
+    def __init__(self, dialect: str, schema_init=None):
         self.dialect = dialect
         self._local = threading.local()
         self._conn_refs: set = set()
         self._lock = threading.Lock()
+        # 新建连接后回调（自愈：文件被删重建连接时重跑建表）
+        self._schema_init = schema_init
 
     # ── 子类实现 ──
     def _new_conn(self) -> Any:  # pragma: no cover - 抽象
@@ -95,6 +104,11 @@ class _ConnPool:
                 pass  # 连接已断（服务器重启/网络抖动）→ 下面重建
             conn = None
         conn = _wrap(self, self._new_conn())
+        if self._schema_init is not None:
+            try:
+                self._schema_init(conn)
+            except Exception:
+                logger.warning("schema_init 回调失败", exc_info=True)
         self._local.conn = conn
         with self._lock:
             self._conn_refs.add(weakref.ref(conn))
@@ -128,8 +142,8 @@ class _ConnPool:
 class SqlitePool(_ConnPool):
     """SQLite 连接池：WAL + busy_timeout，既有行为原样保留。"""
 
-    def __init__(self, db_path: str):
-        super().__init__("sqlite")
+    def __init__(self, db_path: str, schema_init=None):
+        super().__init__("sqlite", schema_init=schema_init)
         self._db_path = db_path
         # 父目录不存在时 sqlite 直接 "unable to open database file"——
         # LOOM_STATE_DIR 指向未创建目录是常见启动形态，工厂负责兜底
@@ -146,6 +160,10 @@ class SqlitePool(_ConnPool):
         return conn
 
     def _probe(self, conn) -> bool:
+        # 文件被删后连接仍可用（Linux 下 unlink 不影响已打开的 fd），
+        # 但数据已丢失——探测磁盘文件存在性，触发重建 + schema_init 自愈。
+        if not Path(self._db_path).exists():
+            return False
         conn.execute("SELECT 1")
         return True
 
@@ -160,8 +178,8 @@ class SqlitePool(_ConnPool):
 class PostgresPool(_ConnPool):
     """Postgres 连接池（psycopg3）。事务由 `with conn:` 块管理，与 SQLite 同义。"""
 
-    def __init__(self, dsn: str):
-        super().__init__("postgres")
+    def __init__(self, dsn: str, schema_init=None):
+        super().__init__("postgres", schema_init=schema_init)
         self._dsn = dsn
 
     def _new_conn(self):
@@ -196,21 +214,24 @@ class PostgresPool(_ConnPool):
         return True
 
 
-def resolve_backend(db_path: str = "", default_name: str = "") -> _ConnPool:
+def resolve_backend(db_path: str = "", default_name: str = "",
+                    schema_init=None) -> _ConnPool:
     """按 DSN/路径选后端（业务侧拿到的 pool 用 `pool.conn()` 取连接）。
 
     优先级：显式 db_path > 环境变量 `LOOM_DATABASE_URL`（旧名回退）>
     `default_name` 的 SQLite 默认路径（既有行为，零变化）。
+
+    `schema_init`：新建连接后的回调（幂等建表），用于文件被删后的自愈。
     """
     dsn = (db_path or "").strip()
     if not dsn:
         dsn = (_env_read("DATABASE_URL") or "").strip()
     if is_postgres_dsn(dsn):
-        return PostgresPool(dsn)
+        return PostgresPool(dsn, schema_init=schema_init)
     from . import state_paths
 
     path = dsn or state_paths.store_path(default_name)
-    return SqlitePool(path)
+    return SqlitePool(path, schema_init=schema_init)
 
 
 class _Conn:

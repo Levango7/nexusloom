@@ -41,6 +41,7 @@ ocr = [                         # loom_doc/ingest.py：扫描件/图片 PP-Struc
     "paddlex[ocr]>=3.0",        # 实测本机只装 paddleocr 时 PPStructureV3 实例化即抛错
 ]
 embed = ["sentence-transformers>=2.2.0"]   # artesian.embeddings 的 local 语义后端（实现已迁出本仓）
+browser = ["playwright>=1.40.0"]           # dashboard 浏览器冒烟（tests/check_dashboard_browser.py）
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
