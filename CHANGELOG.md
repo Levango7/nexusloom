@@ -110,10 +110,18 @@ dict（真删了几十行）因为不是 int 被整个跳过。本机实测复�
 `test_readme_test_count_matches_collection` 原先写死"`collected − declared ≤ 10`"。
 这个 10 是按当年的环境门 skip 数手调的；`requires_pg` 那批涨到 21 条之后，护栏
 开始把一个**正确**的 README 数字判成过期（本批现场：`3179 passed` 被要求和 3200
-相差 ≤10，实际差 21）。改成 `budget = README 自报的 skipped + 平台差(5)`：两个数
+相差 ≤10，实际差 21）。改成 `budget = README 自报的 skipped + 平台差(8)`：两个数
 同源，环境门增减都会被 README 那一行带着走，而"忘了改计数"仍然会红——窄变异（把
-声明数改小 12 → 差值 33 > 26）实测转红。这不是为了凑绿放宽门，是把一个写错的
+声明数改小 1 → Windows 侧差值 25 > 24）实测转红。这不是为了凑绿放宽门，是把一个写错的
 常量换成可解释的判据。
+
+**rebase 到含 #78 的 main 之后重测（2026-10-29）**：绝对数全部前移——收集 3200 → **3209**、
+skipped 21 → **24**（#78 给 `test_state_backend` 加了 3 条真 PG 门）、passed → **3185**，
+Linux 侧按同差额预期 3217（预算 24 + 8 = 32 恰好等于 3217 − 3185，"恰好"是有意的）。
+同一轮里唯一的红就是这条护栏自身，改完 README 后 `tests/test_doc_consistency.py` 9 passed。
+另：`scripts/check_design_anchors.py` 里 17 处锚点被 #78 的行号推移打偏（pipeline/run_store/
+dag_executor/db_backend/deliveries 五个文件，偏移 6~34 行非常数），按整行文本就近重钉后
+`checked=52 mismatched=0` 复验——这条脚本不进 CI，偏了不会有人红，只能靠每次并 main 手跑。
 
 ### 判据与变异（36 条新判据：`tests/test_gc_liveness.py` 18 + `tests/test_delivery_traceability.py` 18）
 
