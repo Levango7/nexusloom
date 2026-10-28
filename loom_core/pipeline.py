@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .event_hook import emit_event
-from .executor_factory import create_executor
+from .executor_factory import create_executor, shutdown_executor
 from .naming import agent_of, family_of
 from .observability import get_logger, get_metrics
 
@@ -244,8 +244,14 @@ class PipelineOrchestrator:
 
         self.bus = MessageBus()
         self.registry = Registry()
-        self.agents_dir = Path(self.config.get("agents.dir", agents_dir))
-        self.checkpoint_dir = Path(self.config.get("checkpoint.dir", checkpoint_dir))
+        # 显式参数优先于 config 默认值。ConfigCenter 内置了 agents.dir='agents' /
+        # checkpoint.dir='checkpoints'，用 get(key, 参数) 取等于永远取到默认值，
+        # 于是 self.agents_dir 与真正喂给 AgentLoader 的目录可以不是同一个：
+        # 父进程按参数注册、子进程 child_context 按 'agents' 重建，process 模式
+        # 直接报"子进程上下文重建失败：agents 下未加载到任何 Agent"。
+        # admin_api 还会把这个属性当诊断信息返回，两套值会让排查完全走偏。
+        self.agents_dir = Path(agents_dir)
+        self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
         self._running_tasks: dict[str, PipelineTask] = {}
@@ -1323,7 +1329,11 @@ class PipelineOrchestrator:
                 default=1,
             )
             executor_type = plan.raw.get("pipeline", {}).get("executor_type", "thread")
-            with create_executor(max_workers=max_workers, executor_type=executor_type) as executor:
+            # 不用 with：进程池的 __exit__ 是 shutdown(wait=True)，子进程卡死时
+            # 它会一直等下去，把宿主进程（CLI/daemon/pytest）一起拖住。
+            self._executor.stuck_detected = False
+            executor = create_executor(max_workers=max_workers, executor_type=executor_type)
+            try:
                 for node in level:
                     dag_node = TaskNode(
                         name=node.agent_name,
@@ -1335,8 +1345,12 @@ class PipelineOrchestrator:
                     dag_node.attempts = 0
                     task.dag_nodes[node.agent_name] = dag_node
 
-                if not self._execute_level(task, level, input_file, plan, executor):
-                    return
+                level_ok = self._execute_level(task, level, input_file, plan, executor)
+            finally:
+                shutdown_executor(executor, force=self._executor.stuck_detected)
+
+            if not level_ok:
+                return
 
             completed += level_total
             task.current_step = completed

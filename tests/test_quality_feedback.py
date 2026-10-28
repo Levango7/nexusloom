@@ -63,7 +63,7 @@ class TestConnectionLifecycle:
     def test_all_connections_closed_after_ops(self, tmp_path, monkeypatch):
         import sqlite3
 
-        import loom_core.quality_feedback as qf_mod
+        import loom_core.db_backend as db_mod
 
         created = []
         real_connect = sqlite3.connect
@@ -73,12 +73,13 @@ class TestConnectionLifecycle:
             created.append(conn)
             return conn
 
-        monkeypatch.setattr(qf_mod.sqlite3, "connect", _spy)
+        monkeypatch.setattr(db_mod.sqlite3, "connect", _spy)
         fb = QualityFeedback(db_path=str(tmp_path / "lifecycle.db"))
         fb.record("t1", {"completeness": 80, "structure": 60})
         fb.get_weak_patterns()
         fb.get_recommendations()
         fb.stats()
+        fb.close()  # pool 缓存连接需显式关闭
 
         assert created, "应创建过 SQLite 连接"
         for conn in created:

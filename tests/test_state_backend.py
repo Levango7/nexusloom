@@ -7,8 +7,8 @@
   C. 真 Postgres（`LOOM_TEST_PG_URL` 未设则 skip）：schema 幂等、
      CRUD + principal、两线程/两进程 acquire 互斥、两实例共享一库真跑。
 
-诚实边界：本批只把**队列**（TaskQueue）接到后端工厂；消息总线持久层、
-cost/quality feedback 仍是 SQLite——下一批。后端选择经
+诚实边界：队列（TaskQueue）、RunStore、DeliveryLedger、CostTracker、QualityFeedback
+已全部接到后端工厂；消息总线持久层仍是 SQLite——下一批。后端选择经
 `LOOM_DATABASE_URL`（旧名 `DOC_PIPELINE_DATABASE_URL` 回退可读）与显式 DSN。
 """
 import os
@@ -727,3 +727,134 @@ class TestPostgresRunStoreSql:
         assert rid_b not in alice_ids, "alice 不应看到 bob 的运行"
         assert rid_b in bob_ids, "bob 应看到自己的运行"
         assert rid_a not in bob_ids, "bob 不应看到 alice 的运行"
+
+
+@requires_pg
+class TestPostgresDeliveryCostQuality:
+    """P2 #12：deliveries / cost_tracker / quality_feedback 三个模块的 PG 判据。
+
+    这三个模块此前是裸 sqlite3（各自管连接 + WAL + busy_timeout），
+    迁移到 db_backend.resolve_backend 后必须在 PG 上真跑通：
+      - DDL 的 `INTEGER PRIMARY KEY AUTOINCREMENT` → `SERIAL PRIMARY KEY`
+      - `INSERT OR IGNORE` → `ON CONFLICT DO NOTHING`
+      - `REAL` → `DOUBLE PRECISION`
+      - 裸连接（无锁）在 PG MVCC 下并发安全
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clean_tables(self):
+        """PG 表跨运行持久：开跑前清三张表，避免历史残留污染判据。
+
+        先建实例触发 schema DDL（CI 上 PG 数据库是新鲜的，表尚未存在），
+        再用各自 pool 连接清表。
+        """
+        from loom_core.cost_tracker import CostTracker as _CT
+        from loom_core.deliveries import DeliveryLedger as _DL
+        from loom_core.quality_feedback import QualityFeedback as _QF
+        dl = _DL(PG_URL)
+        with dl._pool.conn() as conn:
+            conn.execute("DELETE FROM deliveries")
+        dl._pool.close()
+        ct = _CT(PG_URL)
+        with ct._conn() as conn:
+            conn.execute("DELETE FROM cost_log")
+        ct.close()
+        qf = _QF(PG_URL)
+        with qf._conn() as conn:
+            conn.execute("DELETE FROM quality_history")
+        qf.close()
+        yield
+
+    def test_delivery_ledger_pg(self):
+        """DeliveryLedger: record/get/list/cleanup 在 PG 上成立。"""
+        from loom_core.deliveries import DeliveryLedger
+        ledger = DeliveryLedger(PG_URL)
+        rid = f"pg{uuid.uuid4().hex[:10]}"
+        rec = {
+            "run_id": rid, "pipeline": "test-pipe",
+            "status": "completed", "finished_at": 1000.0,
+            "duration_sec": 42.5, "output_path": "/tmp/out.pdf",
+            "payload": {"note": "hello"},
+        }
+        ledger.record(rec)
+        got = ledger.get(rid)
+        assert got is not None, "PG 上应能读回交付记录"
+        assert got["pipeline"] == "test-pipe"
+        assert got["status"] == "completed"
+        assert got["payload"] == {"note": "hello"}
+
+        # 幂等覆盖
+        rec2 = dict(rec, status="re-ran", finished_at=2000.0)
+        ledger.record(rec2)
+        got2 = ledger.get(rid)
+        assert got2["status"] == "re-ran", "INSERT OR IGNORE + UPDATE 应覆盖"
+        assert got2["finished_at"] == 2000.0
+
+        items = ledger.list(limit=100)
+        assert any(i["run_id"] == rid for i in items), "list 应包含新记录"
+
+        dropped = ledger.cleanup(retention_days=1, now=1e18)
+        assert dropped >= 1, "cleanup 应至少删 1 条"
+
+    def test_cost_tracker_pg(self):
+        """CostTracker: budget / record / stats / summary / cleanup 在 PG 上成立。"""
+        from loom_core.cost_tracker import CostTracker
+        tracker = CostTracker(PG_URL)
+        rid = f"pg{uuid.uuid4().hex[:10]}"
+        tracker.set_budget(1.0)
+        tracker.record("cloudflare", 1000, 500, cost=0.001, task_id=rid, model="kimi")
+        tracker.record("cloudflare", 2000, 800, cost=0.002, task_id=rid)
+
+        total = tracker.total_cost()
+        assert total == 0.003, f"PG 上 total_cost 应为 0.003，实得 {total}"
+
+        assert tracker.check_budget(), "0.003 < 1.0 应通过预算检查"
+        tracker.ensure_budget()  # 不抛异常
+
+        stats = tracker.stats()
+        assert "cloudflare" in stats
+        assert stats["cloudflare"]["calls"] == 2
+        assert stats["cloudflare"]["cost"] == 0.003
+
+        summary = tracker.summary()
+        assert summary["total_cost"] == 0.003
+        assert summary["budget"] == 1.0
+        assert summary["budget_remaining"] == 0.997
+
+        # 预算熔断
+        tracker.set_budget(0.002)
+        try:
+            tracker.ensure_budget()
+            raise AssertionError("超预算应抛 BudgetExceededError")
+        except Exception as e:
+            assert "预算已耗尽" in str(e)
+
+        dropped = tracker.cleanup(max_age_days=1, now=1e18)
+        assert dropped >= 2, "cleanup 应删所有过期记录"
+
+    def test_quality_feedback_pg(self):
+        """QualityFeedback: record / get_weak_patterns / stats / cleanup 在 PG 上成立。"""
+        from loom_core.quality_feedback import QualityFeedback
+        qf = QualityFeedback(PG_URL)
+        rid = f"pg{uuid.uuid4().hex[:10]}"
+        # 写 4 条，其中 3 条低于 WEAK_THRESHOLD(70)
+        for _i, score in enumerate([60, 55, 80, 65]):
+            qf.record(rid, {"completeness": score}, section_types=["概述"])
+
+        weak = qf.get_weak_patterns(min_samples=3)
+        assert "completeness" in weak
+        info = weak["completeness"]
+        assert info["sample_count"] == 4
+        assert info["weak_count"] == 3  # 60, 55, 65 < 70
+        assert info["is_problematic"] is True
+
+        stats = qf.stats()
+        assert stats["total_records"] == 4
+        assert stats["total_tasks"] == 1
+        assert stats["total_weak"] == 3
+
+        recs = qf.get_recommendations()
+        assert len(recs) >= 1, "低分率 > 40% 应生成建议"
+
+        dropped = qf.cleanup(max_age_days=1, now=1e18)
+        assert dropped >= 4, "cleanup 应删所有过期记录"

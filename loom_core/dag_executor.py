@@ -17,6 +17,7 @@ from .circuit_breaker import backoff_with_jitter
 from .conditions import UNRESOLVED
 from .conditions import evaluate as _evaluate_condition
 from .conditions import resolve as _resolve_path
+from .executor_factory import is_process_executor
 from .naming import agent_of, family_of
 
 # ─── 模块级函数：支持 ProcessPoolExecutor pickle ──────────────────
@@ -35,6 +36,36 @@ _BUSINESS_FAILURE_STATUSES = ("error", "blocked", "fail")
 _CHILD_CONTEXT_LOCK = threading.Lock()
 _CHILD_CONTEXT = None
 _CHILD_CONTEXT_KEY = None
+
+# 进程模式单层等待的保底上限（秒），见 _process_level_ceiling
+_PROCESS_LEVEL_CEILING_MIN = 60.0
+
+
+def _process_level_ceiling(plan, level: list) -> float:
+    """process 模式下单层 futures 的等待上限（秒）。
+
+    线程模式的节点在 bus 请求超时里自行收尾，父进程总能拿到返回；子进程不
+    一样——一旦卡死（fork 继承到被别的线程持有的锁、子进程被信号打断等），
+    父进程手里没有任何信号可等，`as_completed` 会无限阻塞，紧接着进程池
+    `shutdown(wait=True)` 也一起挂住。CI 上实测过这一串：pytest 已经打印
+    汇总，进程仍空转 47 分钟，直到整条 job 被 60 分钟上限杀掉。
+
+    上限取流水线声明 timeout 的两倍（留出子进程冷启动与装载开销）；没声明
+    就按本层节点 timeout 合计的两倍。保底 60 秒，避免极小的声明值把正常的
+    冷启动误判成卡死。
+    """
+    raw = getattr(plan, "raw", None) or {}
+    declared = (raw.get("pipeline") or {}).get("timeout")
+    try:
+        declared_f = float(declared or 0)
+    except (TypeError, ValueError):
+        declared_f = 0.0
+    if declared_f <= 0:
+        try:
+            declared_f = sum(float(getattr(n, "timeout", 0) or 0) for n in level)
+        except (TypeError, ValueError):
+            declared_f = 0.0
+    return max(declared_f * 2, _PROCESS_LEVEL_CEILING_MIN)
 
 
 def _build_child_context(ctx_cfg: dict):
@@ -121,6 +152,9 @@ class DAGExecutor:
         self.child_context = child_context
         self._execution_stats: list[dict] = []
         self._query_cache = CacheManager(name="dag_queries", max_size=100, ttl=3600)
+        # 本轮是否出现过"子进程超极限未返回"——run_plan 据此决定进程池是
+        # 正常 shutdown(wait=True) 还是强制回收（等它只会把宿主进程一起挂住）
+        self.stuck_detected = False
 
     # ─── pickle 支持（ProcessPoolExecutor 兼容） ─────────────
 
@@ -1045,10 +1079,19 @@ class DAGExecutor:
         return futures
 
     def _retry_node_sync(self, task, node, dag_node, step_result,
-                         input_file: str, plan) -> tuple[object, str]:
+                         input_file: str, plan, executor=None) -> tuple[object, str]:
         """失败节点重试循环（线程版：stop_event.wait 可中断退避）。
-        返回 (重试成功的结果或 None, 最后错误)。"""
+        返回 (重试成功的结果或 None, 最后错误)。
+
+        process 模式下重试必须**留在子进程里**：早先这里无条件调
+        `execute_node_from_scheduler`，等于第一次失败就把节点拉回父进程重跑，
+        进程隔离在重试这一步悄悄失效——父进程被节点里的长阻塞卡住时，
+        层循环的等待上限管不到它（实测：子进程空闲、父线程卡在 Agent.handle，
+        整条流水线既不完成也不失败）。重试同样受层上限约束。
+        """
         last_error = dag_node.error or ""
+        retry_in_process = is_process_executor(executor)
+        ceiling = _process_level_ceiling(plan, [node]) if retry_in_process else None
         while dag_node.attempts < node.max_retries:
             delay = backoff_with_jitter(
                 base_delay=getattr(node, "initial_delay", 1.0),
@@ -1071,9 +1114,29 @@ class DAGExecutor:
             dag_node.attempts += 1
             dag_node.status = "pending"
             try:
-                retry_result = self.execute_node_from_scheduler(
-                    task, node, input_file, plan
-                )
+                if retry_in_process:
+                    # 与首次执行同一条入口（模块级函数，可 pickle），不回落父进程
+                    retry_future = executor.submit(
+                        _execute_node_worker, self, task, node, input_file, plan,
+                    )
+                    try:
+                        retry_result = retry_future.result(timeout=ceiling)
+                    except TimeoutError:
+                        retry_future.cancel()
+                        err = (
+                            f"节点执行超时：process 模式子进程重试 {ceiling or 0:.0f}s 未返回"
+                            "（子进程可能已卡死，进程池将被强制回收）"
+                        )
+                        self.stuck_detected = True
+                        dag_node.error = err
+                        step_result.error = err
+                        task.error = err
+                        task.stop_event.set()
+                        return None, err
+                else:
+                    retry_result = self.execute_node_from_scheduler(
+                        task, node, input_file, plan
+                    )
                 retry_ok, retry_err = self._evaluate_retry_result(retry_result)
 
                 if retry_ok:
@@ -1177,7 +1240,20 @@ class DAGExecutor:
         futures = self._submit_level_futures(task, level, input_file, plan, executor)
         processed: set = set()
 
-        for future in as_completed(futures):
+        # process 模式给整层等待设上限（成因见 _process_level_ceiling）：
+        # 子进程卡死时 as_completed 没有信号可等，只能由父进程判超时收尾。
+        # 用显式迭代而不是 for，超时既能在原地判掉，又不必给整个循环体加深缩进。
+        ceiling = _process_level_ceiling(plan, level) if is_process_executor(executor) else None
+        completion = as_completed(futures, timeout=ceiling)
+        while True:
+            try:
+                future = next(completion)
+            except StopIteration:
+                break
+            except TimeoutError:
+                self._fail_stuck_nodes(task, plan, futures, ceiling or 0.0)
+                return False
+
             node, dag_node, step_result = futures[future]
             processed.add(future)
             try:
@@ -1196,7 +1272,7 @@ class DAGExecutor:
 
                 # while 循环重试直到达到 max_retries（取消/全局停止时提前中断）
                 _, last_error = self._retry_node_sync(task, node, dag_node, step_result,
-                                                      input_file, plan)
+                                                      input_file, plan, executor)
 
                 # 重试循环结束，检查是否最终失败
                 if dag_node.status != "success":
@@ -1220,7 +1296,11 @@ class DAGExecutor:
                         break
 
                     fail_fast = getattr(plan, "fail_fast", True)
-                    if fail_fast or (last_error or "").startswith(_HARD_FLOOR_PREFIX):
+                    # 子进程被判定卡死并强制回收时，无论 fail_fast 是什么都必须
+                    # 让整条流水线如实失败：worker 是被我们杀掉的，这一轮的结果
+                    # 不可信，留下 done 就是把"没跑完"报成"跑完了"。
+                    if fail_fast or self.stuck_detected \
+                            or (last_error or "").startswith(_HARD_FLOOR_PREFIX):
                         if task.status is not TaskStatus.CANCELLED:
                             task.status = TaskStatus.FAILED
                         # 修复 P0：同上，设置 stop_event 软中断已运行节点。
@@ -1232,6 +1312,38 @@ class DAGExecutor:
                 self._record_step_result(task, plan, node, step_result)
 
         return task.status != TaskStatus.FAILED  # type: ignore[no-any-return]
+
+    def _fail_stuck_nodes(self, task, plan, futures: dict, ceiling: float) -> None:
+        """超过等待上限仍未返回的节点判为失败（process 模式卡死兜底）。
+
+        "没返回"必须当失败报出来，不能留一个 running 的节点让整条流水线
+        永远停在中间：调用方（run_plan 的收尾、RunStore 的节点投影、交付账本）
+        都靠终态判断该不该继续，一个永不终结的节点会让它们全部挂住。
+        """
+        from .pipeline import TaskStatus
+
+        stuck = [f for f in futures if not f.done()]
+        if not stuck:
+            return
+        self.stuck_detected = True
+        err = (
+            f"节点执行超时：process 模式子进程 {ceiling:.0f}s 未返回"
+            "（子进程可能已卡死，进程池将被强制回收）"
+        )
+        for future in stuck:
+            node, dag_node, step_result = futures[future]
+            dag_node.status = "failed"
+            dag_node.error = err
+            dag_node.finished_at = time.time()
+            step_result.status = "failed"
+            step_result.error = err
+            task.error = err
+            future.cancel()
+            self._record_step_result(task, plan, node, step_result)
+        self._log("error", err, task_id=task.id, nodes=[futures[f][0].agent_name for f in stuck])
+        task.stop_event.set()
+        if task.status is not TaskStatus.CANCELLED:
+            task.status = TaskStatus.FAILED
 
     async def execute_level_async(self, task, level: list, input_file: str,
                                   plan) -> bool:

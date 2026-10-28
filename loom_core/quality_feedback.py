@@ -13,75 +13,63 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
-import sqlite3
 import threading
 import time
 from collections.abc import Iterator
-from pathlib import Path
+from typing import Any
 
 from . import state_paths
-from .sqlite_util import enable_wal
+from .db_backend import resolve_backend
 
 logger = logging.getLogger(__name__)
-_DEFAULT_DB = os.path.join(Path(__file__).parent.parent.absolute(), "bus_data", "quality.db")
 
 WEAK_THRESHOLD = 70  # 低于此分视为弱项
 
 
 class QualityFeedback:
-    """质量评分历史（SQLite 持久化）"""
+    """质量评分历史（双方言持久化，pool 管理并发）"""
 
     def __init__(self, db_path: str = ""):
-        db_path = db_path or state_paths.store_path("quality.db")
-        self._db_path = db_path
+        self._db_path = db_path or state_paths.store_path("quality.db")
+        self._pool = resolve_backend(self._db_path, "quality.db",
+                                    schema_init=self._ensure_schema)
         self._lock = threading.Lock()
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     @contextlib.contextmanager
-    def _conn(self) -> Iterator[sqlite3.Connection]:
-        """每操作独立连接：with 块内提交事务，退出时保证关闭。
+    def _conn(self) -> Iterator[Any]:
+        """当前线程连接（pool 管理生命周期与并发）。
 
-        注意 sqlite3 的 ``with conn`` 只提交事务、不关闭连接，此处用
-        contextmanager 包一层确保用完即关，避免连接泄漏
-        （ResourceWarning: unclosed database）。
+        pool 的 thread-local 连接自带 WAL + busy_timeout（SQLite 侧），
+        PG 侧由 MVCC 提供并发控制。事务由 ``with conn:`` 块管理。
         """
-        conn = sqlite3.connect(self._db_path, timeout=5, check_same_thread=False)
-        try:
-            # 并发首建同一库时 SQLite 切 WAL 不走 busy handler，
-            # 直接抛 "database is locked"，必须自带重试（见 sqlite_util 模块头）。
-            enable_wal(conn)
-            # busy_timeout 防止并发写入时立即抛 SQLITE_BUSY，与 cost_tracker 保持一致
-            conn.execute("PRAGMA busy_timeout=3000")
-            with conn:
-                yield conn
-        finally:
-            conn.close()
+        with self._pool.conn() as conn:
+            yield conn
+
+    @staticmethod
+    def _ensure_schema(conn: Any) -> None:
+        """建表 + 索引（幂等；DDL 不可参数化，表名/列名全为常量）"""
+        conn.execute(  # nosec B608
+            "CREATE TABLE IF NOT EXISTS quality_history "
+            "(id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "timestamp REAL NOT NULL, task_id TEXT NOT NULL, "
+            "dimension TEXT NOT NULL, score REAL NOT NULL, "
+            "is_weak INTEGER NOT NULL, section_types TEXT DEFAULT '', "
+            "pipeline TEXT DEFAULT '')"
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_qh_dim ON quality_history(dimension)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_qh_weak ON quality_history(is_weak)")
 
     def _init_db(self):
-        with self._conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS quality_history (
-                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp    REAL NOT NULL,
-                    task_id      TEXT NOT NULL,
-                    dimension    TEXT NOT NULL,
-                    score        REAL NOT NULL,
-                    is_weak      INTEGER NOT NULL,
-                    section_types TEXT DEFAULT '',
-                    pipeline     TEXT DEFAULT ''
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_qh_dim ON quality_history(dimension)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_qh_weak ON quality_history(is_weak)")
+        with self._pool.conn() as conn:
+            self._ensure_schema(conn)
 
     def record(self, task_id: str, scores: dict[str, float],
                section_types: list[str] = None, pipeline: str = ""):
         """记录一次质量评分"""
         sections_str = ",".join(section_types or [])
         now = time.time()
-        with self._lock, self._conn() as conn:
+        with self._conn() as conn:
             for dim, score in scores.items():
                 conn.execute(
                     "INSERT INTO quality_history "
@@ -144,7 +132,8 @@ class QualityFeedback:
                 "recommendations": self.get_recommendations(),
             }
 
-    def cleanup(self, max_age_days: int = 0, max_rows: int = 0) -> int:
+    def cleanup(self, max_age_days: int = 0, max_rows: int = 0,
+                now: float | None = None) -> int:
         """清理过期记录（双判据并集）。
 
         与 RunStore 同口径：**0 = 不启用**（本 store 此前没有清理面，默认
@@ -154,11 +143,12 @@ class QualityFeedback:
         if max_age_days <= 0 and max_rows <= 0:
             return 0
         dropped = 0
-        with self._lock, self._conn() as conn:
+        now_ts = now if now is not None else time.time()
+        with self._conn() as conn:
             if max_age_days > 0:
                 cur = conn.execute(
                     "DELETE FROM quality_history WHERE timestamp < ?",
-                    (time.time() - max_age_days * 86400,))
+                    (now_ts - max_age_days * 86400,))
                 dropped = cur.rowcount
             if max_rows > 0:
                 cur = conn.execute(
@@ -167,6 +157,10 @@ class QualityFeedback:
                     (max_rows,))
                 dropped += cur.rowcount
         return dropped
+
+    def close(self) -> None:
+        """关闭当前线程的连接（测试清理用）。"""
+        self._pool.close()
 
 
 _instance: QualityFeedback | None = None

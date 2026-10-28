@@ -1435,6 +1435,10 @@ nexusloom/
 | [架构说明](docs/architecture.md) | 分层结构、线程模型、数据流 |
 | [Agent 开发指南](docs/agents.md) | 自定义 Agent 契约、沙箱规则、最小示例 |
 
+英文版：`docs/en/` 下有同样四篇的英译（[架构](docs/en/architecture.md) /
+[API](docs/en/api.md) / [Agent](docs/en/agents.md) / [部署](docs/en/deployment.md)）。
+两份内容以中文版为准；改了中文版请同步英译，别让它们各说各话。
+
 ---
 
 ## License

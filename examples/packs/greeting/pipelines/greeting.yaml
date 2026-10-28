@@ -1,0 +1,27 @@
+# greeting pack 流水线（loom pack new 生成）
+_name: greeting
+_version: "0.1"
+description: greeting pack 示例流水线
+
+defaults:
+  parallelism:
+    mode: single
+    max_workers: 1
+
+agents:
+  - name: greeting_agent
+    version: "0.1.0"
+    timeout: 60
+    dependencies: []
+    pool_size: 1
+    config: {}
+
+topology:
+  type: dag
+  levels:
+    - [greeting_agent]
+  edges: []
+
+pipeline:
+  timeout: 120
+  fail_fast: false
