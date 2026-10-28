@@ -100,7 +100,9 @@ def _orch(tmp_path: Path) -> PipelineOrchestrator:
     return orch
 
 
-def _wait_done(orch, task_id: str, timeout: float = 30.0) -> dict | None:
+def _wait_done(orch, task_id: str, timeout: float = 90.0) -> dict | None:
+    """轮询等待任务完成。process 模式会 spawn 子进程，CI runner 拥堵时
+    子进程启动+执行可能超过 30s——超时判据放宽到 90s 避免假阳性。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         row = orch.task_queue.get(task_id)
