@@ -15,7 +15,7 @@ ANCHORS = [
     ("loom_core/message_bus_v3.py", 128, "save_message"),
     ("loom_core/message_store.py", 171, "sqlite3.connect"),
     ("loom_core/audit.py", 31, "def write_audit"),
-    ("loom_core/deliveries.py", 61, "def record"),
+    ("loom_core/deliveries.py", 49, "def record"),
     # Stage 3a：审批的三个写点从 approvals.py 搬进了 RunStore（投影 + 同事务事件）。
     # §1 那一行"审批本身就是一个写面"的结论必须指向新位置，而不是退役成无处可指。
     # Stage 3c 补账把这三口整体下推 12 行（`close_run` 长成条件裁决版）。
@@ -29,8 +29,8 @@ ANCHORS = [
     # 注册（register）与取租约（acquire）是两个方法，**只钉一个会让另一半结论无处可指**
     # （合并 #65 收口时 main 上就只剩了 register 这条，acquire 被合并掉了）。
     # 实测行号 570/587（早先写的 573/590 偏 3 行；本脚本不进 CI，所以偏了没人红）。
-    ("loom_core/run_store.py", 573, "def register_schedule"),
-    ("loom_core/run_store.py", 590, "def acquire_schedule_lease"),
+    ("loom_core/run_store.py", 578, "def register_schedule"),
+    ("loom_core/run_store.py", 595, "def acquire_schedule_lease"),
     ("loom_core/backfill.py", 35, "class RunBackfill"),
     ("loom_core/backfill.py", 59, "def replay"),
     # Stage 3b：`complete()` 摘掉 result 参数，整体下移到 203。
@@ -47,9 +47,9 @@ ANCHORS = [
     ("loom_core/run_handle.py", 203, "def artifacts"),
     ("loom_core/run_handle.py", 261, "def _ledger_record"),
     ("loom_core/run_handle.py", 306, "def to_dict"),
-    ("loom_core/db_backend.py", 81, "add_column_if_missing"),
-    ("loom_core/dag_executor.py", 821, "def _merge_resumed_nodes"),
-    ("loom_core/dag_executor.py", 952, "def _reuse_completed_node"),
+    ("loom_core/db_backend.py", 90, "add_column_if_missing"),
+    ("loom_core/dag_executor.py", 855, "def _merge_resumed_nodes"),
+    ("loom_core/dag_executor.py", 986, "def _reuse_completed_node"),
     ("loom_core/streaming.py", 154, "_history"),
     # pipeline.py 这一批随 Stage 0（异步并轨）+ Stage 1（双写口）整体下移：Stage 0 插了
     # 4 行字段 + 61 行 helper，Stage 1 又插 7 行 init + 108 行写口。**偏移不是常数**
@@ -57,19 +57,22 @@ ANCHORS = [
     # Stage 3b 再钉一次：`_record_plan_terminal_state` 里的"先悲观后升格"与
     # `_runstore_close` 让下面的调用点又各自下移（同样不是常数偏移）。
     # Stage 3c 再钉一次：cancel() 结清待批 + 补账两个入口把 pipeline.py 又推了 18~43 行。
-    ("loom_core/pipeline.py", 315, "_max_task_history"),
-    ("loom_core/pipeline.py", 747, "def cancel"),
-    ("loom_core/pipeline.py", 785, "def resume"),
+    # 2026-10-29 再钉一次：main 上 #78（进程执行器 + db_backend 迁移）把 loom_core 推了
+    # 6~34 行（pipeline/run_store/dag_executor/db_backend/deliveries 五处、共 17 条），
+    # 按整行文本就近重钉后 checked=52 mismatched=0 复验。
+    ("loom_core/pipeline.py", 321, "_max_task_history"),
+    ("loom_core/pipeline.py", 753, "def cancel"),
+    ("loom_core/pipeline.py", 791, "def resume"),
     # 原 1290「不更新 task_queue」那句 docstring 已被 Stage 0 改掉——退役它，改钉新增的
     # 共用写口：§2 那条裂缝的"已并轨"结论必须指向一个真实存在的函数。
-    ("loom_core/pipeline.py", 450, "def _record_plan_terminal_state"),
+    ("loom_core/pipeline.py", 456, "def _record_plan_terminal_state"),
     # 注：legacy `run()` 已改走同一条发布点，`pipeline.started` 只剩 run_plan() 里这一处
-    ("loom_core/pipeline.py", 1459, "pipeline.started"),
-    ("loom_core/pipeline.py", 1047, "pipeline.finished"),    # _finalize_plan_task 内
-    ("loom_core/pipeline.py", 1501, "pipeline.finished"),    # _finalize_plan_task_async 内
-    ("loom_core/pipeline.py", 1770, "record"),               # _deliver 内 DeliveryLedger().record
-    ("loom_core/pipeline.py", 1868, "pipeline.audit"),
-    ("loom_core/pipeline.py", 2035, ".done"),
+    ("loom_core/pipeline.py", 1473, "pipeline.started"),
+    ("loom_core/pipeline.py", 1053, "pipeline.finished"),    # _finalize_plan_task 内
+    ("loom_core/pipeline.py", 1515, "pipeline.finished"),    # _finalize_plan_task_async 内
+    ("loom_core/pipeline.py", 1776, "record"),               # _deliver 内 DeliveryLedger().record
+    ("loom_core/pipeline.py", 1882, "pipeline.audit"),
+    ("loom_core/pipeline.py", 2049, ".done"),
     ("loom_core/admin_api.py", 671, "get_task"),
     ("loom_core/admin_api.py", 1072, "list_tasks"),
     # Stage 2：/tasks、dashboard、cost 三处读口从 `list_tasks`（内存）换成
@@ -92,7 +95,7 @@ ANCHORS = [
     ("loom_core/scheduler.py", 338, "def resolve_lock_path"),
     ("loom_core/scheduler.py", 357, "def lock_drift"),
     # 账本的读口：`list` 在本批之前**没有任何生产调用者**（只有测试读它）。
-    ("loom_core/deliveries.py", 99, "def list(self, limit"),
+    ("loom_core/deliveries.py", 89, "def list(self, limit"),
 ]
 
 root = pathlib.Path(__file__).resolve().parent.parent
