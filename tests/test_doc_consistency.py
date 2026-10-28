@@ -40,8 +40,10 @@ def _readme_counts() -> tuple[int, int] | None:
     return passed, int(m2.group(1))
 
 
-#: 同一份 README 在两个平台上的收集数会有 1~4 条差（skipif 语义差异）
-PLATFORM_SLACK = 5
+#: Linux CI 比 Windows 本机**多收集**的用例数（2026-10-29 实测：3208 vs 3200 = 8，
+#: 多为 POSIX-only 的路径/权限类用例）。README 那个 passed 数是 Windows 实测值，
+#: 所以在 Linux 上允许它和 collected 差出这 8 条；Windows 上不放宽（精确到 skipped）。
+LINUX_COLLECT_DELTA = 8
 
 
 @pytest.mark.slow
@@ -70,9 +72,13 @@ def test_readme_test_count_matches_collection():
         collected = int(m2.group(1))
 
     # skipif 的用例被收集但不执行，所以 declared 允许比 collected 小的部分只能
-    # 是这些 skip——上界取 README 自报的 skipped 数（+ 平台差），不写死常量：
-    # 环境门涨了却没人改 README，这里会红；改了 README 的 skipped 数，上界跟着动。
-    budget = declared_skipped + PLATFORM_SLACK
+    # 是这些 skip；上界 = README 自报的 skipped 数（Windows 侧精确），Linux 上再
+    # 加上实测的"多收集 8 条"。不写死一个"宽到不会红"的常量：环境门或平台差变了，
+    # 这里就该有人来解释一句，而不是悄悄放进一个更大的数里。
+    import sys as _sys
+
+    platform_delta = 0 if _sys.platform.startswith("win") else LINUX_COLLECT_DELTA
+    budget = declared_skipped + platform_delta
     assert 0 <= collected - declared <= budget, (
         f"README 写 {declared} passed / {declared_skipped} skipped，而实际收集 "
         f"{collected} 条；差值 {collected - declared} 超出「仅环境门 skip」的上界 "

@@ -1115,9 +1115,10 @@ python -m pytest tests/ -v
 耗时 19 分 37 秒 / 1177.27s；同一头上前一轮读到的数是 `3178 passed, 1 failed`（那一轮 38:51，
 负载条件相同）——那唯一一条红就是这条计数护栏自身：它原先写死"差 ≤ 10"，而环境门 skip 已涨到
 21 条，于是把一个**正确**的数字判成了过期；改成"容差 = README 自报的 `skipped` + 平台差"之后
-才转绿，两轮的其他判据一条没变）；实际收集 **3200** 条，差值 **21** =
-21 条 `requires_pg` 与 `test_e2e_real` 的环境门（`LOOM_TEST_PG_URL` 未设时跳过，CI 四条腿都挂
-真 PG 会执行）；口径：`Python 3.14.3`、串行无 `-n`、本机无并发 pytest；
+才转绿，两轮的其他判据一条没变）；实际收集 **3200** 条（Windows 本机）/ **3208** 条（Linux CI，多 8 条为 POSIX-only 用例），
+差值 **21** = 21 条 `requires_pg` 与 `test_e2e_real` 的环境门（`LOOM_TEST_PG_URL` 未设时跳过，
+CI 四条腿都挂真 PG 会执行）；护栏的上界 = 本行自报的 `skipped`（Windows 侧精确）+ 在 Linux 上
+再加实测的 8 条平台差；口径：`Python 3.14.3`、串行无 `-n`、本机无并发 pytest；
 **本批 +36 条**（2026-10-28，A6 活性 + 交付追溯面 + 控制台账本）：`tests/test_gc_liveness.py` 18 条
 （有活时也回收 / 间隔门反向对照 / 空转超时回归 / 常驻服务三态节拍 / 死信回收四判据 / GC 错账与
 `--gc` 逐表打印的 CLI 端到端）+ `tests/test_delivery_traceability.py` 18 条（摘要函数的规范形态、
