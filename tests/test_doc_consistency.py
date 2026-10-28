@@ -40,9 +40,12 @@ def _readme_counts() -> tuple[int, int] | None:
     return passed, int(m2.group(1))
 
 
-#: Linux CI 比 Windows 本机**多收集**的用例数（2026-10-29 实测：3208 vs 3200 = 8，
+#: Linux CI 比 Windows 本机**多收集**的用例数（2026-10-28 在 CI 上实测：3208 vs 3200 = 8，
 #: 多为 POSIX-only 的路径/权限类用例）。README 那个 passed 数是 Windows 实测值，
 #: 所以在 Linux 上允许它和 collected 差出这 8 条；Windows 上不放宽（精确到 skipped）。
+#: 2026-10-29 头（含 #78）上绝对数变了、这个差额没变：Windows 收集 3209 / skipped 24 /
+#: passed 3185 ⇒ Linux 预期组合 3217，预算 24 + 8 = 32 恰好等于 3217 − 3185。这个"恰好"
+#: 是有意的：Linux 侧能容忍的只有环境门 skip 与平台差，再多一条就该有人来解释。
 LINUX_COLLECT_DELTA = 8
 
 
