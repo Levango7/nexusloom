@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import multiprocessing
 import threading
 from collections.abc import Callable
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
@@ -28,6 +29,22 @@ logger = logging.getLogger(__name__)
 
 # 进程模式告警只发一次（run_plan 每层都会调用 create_executor）
 _process_mode_warned = False
+
+
+def _process_context() -> multiprocessing.context.BaseContext:
+    """进程池统一使用 spawn 上下文。
+
+    Linux 上 ProcessPoolExecutor 默认 fork。父进程此时已有多条活线程
+    （Registry 健康检查、总线持久化、成本/质量账本），fork 出来的子进程
+    会继承"可能在 fork 瞬间正被别的线程持有"的锁——子进程第一次碰那把锁
+    就永久阻塞。表现为节点不返回、层循环 `as_completed` 无限等待、进程池
+    shutdown(wait=True) 卡死（CI 上实测：pytest 已打印汇总，任务仍挂 47 分钟）。
+
+    spawn 起的是干净解释器，不存在继承锁的问题；Windows 本来就只有 spawn，
+    因此这也是唯一能让三平台行为一致的选择（Python 3.14 把 Linux 默认值
+    改成 forkserver 也是同一原因）。
+    """
+    return multiprocessing.get_context("spawn")
 
 
 def create_executor(max_workers: int = 4, executor_type: str = "thread") -> ThreadPoolExecutor | ProcessPoolExecutor:
@@ -49,7 +66,7 @@ def create_executor(max_workers: int = 4, executor_type: str = "thread") -> Thre
                 "按进程隔离、每个 worker 首次执行有冷启动开销。I/O 密集场景建议 thread（默认）。"
             )
             _process_mode_warned = True
-        return ProcessPoolExecutor(max_workers=max_workers)
+        return ProcessPoolExecutor(max_workers=max_workers, mp_context=_process_context())
     if executor_type == "auto":
         return SmartExecutor(max_workers=max_workers)  # type: ignore[return-value]
     return ThreadPoolExecutor(max_workers=max_workers)
@@ -58,6 +75,40 @@ def create_executor(max_workers: int = 4, executor_type: str = "thread") -> Thre
 def is_process_executor(executor) -> bool:
     """判断是否为 ProcessPoolExecutor"""
     return isinstance(executor, ProcessPoolExecutor)
+
+
+def shutdown_executor(executor: Executor | None, force: bool = False) -> None:
+    """关闭执行器。
+
+    force=True 是"卡死兜底"：进程池里已经有子进程不再响应时，
+    `shutdown(wait=True)` 会一直等它返回（实测能把 pytest 进程挂 47 分钟），
+    而解释器退出时 concurrent.futures 的 atexit 钩子还会再 join 一次。
+    这种情况下只能直接把 worker 进程结束掉——它们已经不可能再产出结果，
+    留着只会拖死整个宿主进程。
+    """
+    if executor is None:
+        return
+    if not is_process_executor(executor) or not force:
+        with contextlib.suppress(Exception):
+            executor.shutdown(wait=True)
+        return
+
+    # 顺序有讲究：shutdown 会让执行器管理线程在子进程退出后把 _processes 置
+    # None，先 shutdown 再取就什么都杀不到了。所以先抓进程句柄，再取消未启动
+    # 的 future，然后逐个 kill（跨版本：3.11/3.12 没有 terminate_workers）。
+    procs = list((getattr(executor, "_processes", None) or {}).values())
+    with contextlib.suppress(Exception):
+        executor.shutdown(wait=False, cancel_futures=True)
+    for proc in procs:
+        with contextlib.suppress(Exception):
+            proc.kill()
+    # 子进程已死，这次 wait 不会阻塞；等它收敛，解释器退出时才不会再 join 到卡死的进程
+    with contextlib.suppress(Exception):
+        executor.shutdown(wait=True)
+    logger.warning(
+        "process 池有 %d 个子进程未响应，已强制终止（节点结果按超时失败处理）",
+        len(procs),
+    )
 
 
 # ── SmartExecutor ──────────────────────────────────────────────
@@ -77,7 +128,9 @@ def _get_or_create_process_pool(max_workers: int = 4) -> ProcessPoolExecutor:
     global _process_pool_singleton
     with _pool_lock:
         if _process_pool_singleton is None:
-            _process_pool_singleton = ProcessPoolExecutor(max_workers=max_workers)
+            _process_pool_singleton = ProcessPoolExecutor(
+                max_workers=max_workers, mp_context=_process_context()
+            )
         return _process_pool_singleton
 
 

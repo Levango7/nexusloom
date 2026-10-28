@@ -1,3 +1,17 @@
+# 示例目录
+
+两个参照实现，各自对应一类扩展：
+
+- `plugin-hello/` —— **第三方插件**：最小的独立 pip 包，通过 `loom.agents`
+  entry_points 提供 Agent，装好即被发现 / 注册 / 执行。
+- `packs/greeting/` —— **领域件包（pack）**：`loom pack new greeting` 生成的
+  同一形状（pack.yaml + agents/ + pipelines/ + prompts/ + quality/），展示
+  五件套如何拼成一条可跑流水线。它**不是**产品流水线：放在 `examples/` 下，
+  而 `pack_manifest` 只扫 `packs/`，所以 `--check` 与已安装流水线清单都不受
+  它影响。真要加入产品，把它挪进 `packs/`。
+
+---
+
 # 外部插件作者模板（examples/plugin-hello）
 
 这里是**第三方插件机制的参照实现**：一个最小的独立 pip 包，通过
