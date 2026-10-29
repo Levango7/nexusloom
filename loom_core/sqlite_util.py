@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
 
@@ -23,6 +24,21 @@ import time
 WAL_RETRY_ATTEMPTS = 8
 WAL_RETRY_BASE_DELAY = 0.05
 WAL_RETRY_MAX_DELAY = 1.0
+
+#: 标识符白名单：PRAGMA/ALTER 的插值点无法参数化（SQL 标识符不支持占位符），
+#: 这里把"调用方只传字面常量"从约定升级为强制——动态拼出的表名/列名在这里
+#: 直接抛 ValueError，而不是等 SQLite 原样执行。
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+#: DDL 类型片段白名单：字母/数字/下划线/空格/单引号/逗号/括号——够表达
+#: "INTEGER DEFAULT 0"、"TEXT DEFAULT ''" 这类字面量，拒掉 ; -- /* 等结构字符。
+_DDL_TYPE_RE = re.compile(r"^[A-Za-z0-9_ '(),]+$")
+
+
+def _checked(kind: str, value: str, pattern: re.Pattern[str]) -> str:
+    if not pattern.match(value):
+        raise ValueError(
+            f"sqlite_util: {kind} 必须是字面常量，不接受动态拼出的值: {value!r}")
+    return value
 
 
 def enable_wal(conn: sqlite3.Connection, attempts: int = WAL_RETRY_ATTEMPTS) -> None:
@@ -48,6 +64,7 @@ def enable_wal(conn: sqlite3.Connection, attempts: int = WAL_RETRY_ATTEMPTS) -> 
 
 def column_names(conn: sqlite3.Connection, table: str) -> set:
     """表的现有列名集合。"""
+    _checked("表名", table, _IDENTIFIER_RE)
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
@@ -56,8 +73,11 @@ def add_column_if_missing(conn: sqlite3.Connection, table: str, column: str,
     """幂等加列。返回是否真的执行了 ALTER。
 
     并发下 check-then-act 会撞 "duplicate column name"，此时目标状态已达成，
-    视为成功（返回 False）；其他 OperationalError 照抛。
+        视为成功（返回 False）；其他 OperationalError 照抛。
     """
+    _checked("表名", table, _IDENTIFIER_RE)
+    _checked("列名", column, _IDENTIFIER_RE)
+    _checked("DDL 类型", ddl_type, _DDL_TYPE_RE)
     if column in column_names(conn, table):
         return False
     try:
