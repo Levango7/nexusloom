@@ -400,8 +400,8 @@ class TestDeliveryLedgerCleanup:
 
     def test_terminal_statuses_agree_with_run_store(self, state):
         """两处"终态"必须是同一套三值：判据漂移会让一张表删了、另一张没删。"""
-        from loom_core import run_store
         from loom_core import deliveries as deliveries_mod
+        from loom_core import run_store
 
         assert tuple(deliveries_mod.TERMINAL_STATUSES) == tuple(
             run_store.TERMINAL_STATUSES)
