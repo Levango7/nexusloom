@@ -131,8 +131,8 @@ curl -X POST http://127.0.0.1:8910/api/cache/clear \
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/deliveries` | 最近交付，`?limit=`（默认 50，夹到 200）；响应 `deliveries[]` + `count` / `truncated` / `scope` |
-| GET | `/api/deliveries/{run_id}` | 单条交付的完整载荷：`nodes[]`（`node` / `agent` / `status` / `attempts` / `duration_sec` / `error` / `artifact_keys`）+ `plan_id` / `input_file` |
+| GET | `/api/deliveries` | 最近交付，`?limit=`（默认 50，夹到 200）；响应 `deliveries[]` + `count` / `truncated` / `scope`，逐行带 `sha256` / `bytes` / `retention_until` |
+| GET | `/api/deliveries/{run_id}` | 单条交付的完整载荷：`nodes[]`（`node` / `agent` / `status` / `attempts` / `duration_sec` / `error` / `artifact_keys` / `artifacts`）+ `plan_id` / `input_file` / `output_digest` / `lock` |
 | GET | `/api/locks` | 逐流水线锁巡检，`?pipeline=<name>` 只看一条；响应 `pipelines[]` + `drifted[]` + `scope` |
 
 每行交付都带 `projection`（`complete` / `incomplete` / `legacy` / `unknown`）——它是
@@ -143,10 +143,21 @@ HTTP 侧不复制那条规则（两处判据一定会分叉）。
 两条口径必须随端点一起写，否则响应会被读成别的含义：
 
 - `GET /api/locks` 的 `scope` 恒为 `"current files"`：比的是**当前 YAML 与当前锁**，
-  不是"某次运行时用的锁"。运行时的 `config_hash` / `topology_hash` 从未落库，那件事今天
-  无法证据化，这里不拿当前值冒充当时。`matches` 是三值——`true` 比过且一致、`false` 漂移
-  （`issues` 逐条给差在哪，含 `lock=` / `当前=` 两个哈希）、`null` 没有锁可比或 YAML 解析失败。
+  不是"某次运行时用的锁"——在这里重算出来的是今天的锁，拿它冒充当时的证据比不给这个口
+  更糟。`matches` 是三值——`true` 比过且一致、`false` 漂移（`issues` 逐条给差在哪，含
+  `lock=` / `当前=` 两个哈希）、`null` 没有锁可比或 YAML 解析失败。
   `lock_present: false` 的行**不进** `drifted`：缺锁不是漂移。
+- **"某次运行时用的锁对不对"问 `/api/deliveries/{run_id}` 的 `lock`**（2026-10-27，#8）：
+  锁校验那一瞬就把 `topology_hash` 与逐节点 `config_hash` 冻进账本，事后重锁不改它。
+  三种形状各自成立：`lock: {}` = 这条 plan 没核对过（`verify_lock=False` 解析的）；
+  `lock_present: false` + `matches: null` = 核对过但当时没有锁；`matches: true` = 跑的
+  就是锁住的那件事。漂移的运行根本到不了交付那一步（`LockfileMismatchError` 先拦），
+  所以账本里不会出现 `matches: false`——别把它读成"漂移也能跑"的证据。
+- 摘要字段有三种形状，别合并读：`sha256: null` = 这一行写在摘要面之前（没算过）；
+  `bytes: -1` = 去查过、那个文件已经不在了；`bytes: 0` = 文件在但是空的。
+  `retention_until: 0` 是"不过期"——保留期没启用，或这一行是该功能之前写入的
+  （历史行不 backfill，见 README 的「保留期与回收」）。逐节点产物摘要在
+  `nodes[].artifacts.<键>`，`GC` 之后账本行会被回收但**磁盘产物不动**。
 - 交付账本表里没有归属列，所以非 admin 的可见性逐行反查投影的 `principal`：CLI 直跑、
   投影里查无此运行的行 `projection` 报 `unknown` 且只有 admin 可见。越权与不存在给**同一个
   404**（存在性本身就是信息）；账本读不动给 **503** `{"error": "deliveries unavailable"}`，

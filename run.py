@@ -773,19 +773,17 @@ def main():
 
     # ─── 保留期 GC（A6）：一次性维护动作 ────────────
     if args.gc:
-        from loom_core.maintenance import gc_from_orchestrator
+        from loom_core import maintenance
         project_root = Path(__file__).parent
         orch = _get_orchestrator(project_root)
         orch.register_agents()
         try:
-            summary = gc_from_orchestrator(orch, log=print)
+            summary = maintenance.gc_from_orchestrator(orch, log=print)
         finally:
             orch.shutdown()
-        if not summary.get("enabled"):
-            print("[gc] retention 未启用（retention.runs_days / retention.max_runs 全 0）"
-                  "——未删任何行；worker 循环同样如此")
-        else:
-            print(f"[gc] {summary}")
+        # 逐表打印而不是甩一个 dict：这是要人据此承担"删对了没有"的维护动作
+        print(maintenance.format_summary(
+            summary, maintenance.retention_from_config(orch.config)))
         sys.exit(0)
 
     # 无输入文件时：仅 --check/--mcp/--recover/--replay-*/--triggers*、服务模式与

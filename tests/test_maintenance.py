@@ -308,3 +308,28 @@ class TestGcCli:
             capture_output=True, text=True, timeout=120, cwd=str(tmp_path))
         assert r.returncode == 0, r.stderr[-800:]
         assert "retention 未启用" in r.stdout
+
+    def test_gc_cli_end_to_end_enabled_prints_per_store(self, tmp_path):
+        """启用态的 CLI 输出要逐表可读，不是甩一个原始 dict。
+
+        走 `DOCPIPE_` 环境覆写（`DOCPIPE_RETENTION__RUNS_DAYS` → `retention.runs_days`），
+        不碰仓库配置；状态目录另指，判据之间互不污染。
+        """
+        import os
+        import subprocess
+        import sys
+        env = dict(os.environ,
+                   DOCPIPE_RETENTION__RUNS_DAYS="7",
+                   DOCPIPE_RETENTION__MAX_RUNS="500",
+                   LOOM_STATE_DIR=str(tmp_path / "state"))
+        r = subprocess.run(
+            [sys.executable, str(PROJECT / "run.py"), "--gc"],
+            capture_output=True, text=True, timeout=180, cwd=str(tmp_path), env=env)
+        assert r.returncode == 0, r.stderr[-800:]
+        out = r.stdout
+        assert "保留 7 天 / 最近 500 条" in out, out[-800:]
+        assert "合计删除" in out, out[-800:]
+        assert "run_store:" in out, out[-800:]
+        tail = out[out.index("保留 7 天"):]
+        assert "{" not in tail and "'enabled'" not in tail, \
+            f"启用态还在打印原始 dict：{tail[-400:]}"

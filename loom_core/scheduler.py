@@ -179,6 +179,12 @@ class ExecutionPlan:
     #: **故意不进锁指纹**（`_node_config_hash`/`_topology_hash` 都不含它）：进锁会让随包
     #: 20 条流水线全部要重锁。代价照实说——改 schema 不会被锁拦下，这是已知边界。
     inputs_schema: dict = field(default_factory=dict)
+    #: 这一次运行自己的锁指纹（#8 遗留：运行时的 config_hash/topology_hash 此前只在
+    #: `verify_lockfile` 那一瞬存在于内存，"某次运行时用的锁对不对"无法回答）。
+    #: 由 `_verify_lock_after_parse` 在核对当下写下，交付账本把它持久化。
+    #: 空 dict = 这条 plan 没有核对过（`verify_lock=False` 解析的），与"核对过但没有锁"
+    #: （`lock_present: false`）是两件事，读的人要能分辨。
+    lock_fingerprint: dict = field(default_factory=dict)
 
     @property
     def max_level(self) -> int:
@@ -367,10 +373,41 @@ class Scheduler:
         return {"lock_file": str(lock_path), "lock_present": True,
                 "issues": self.verify_lockfile(plan, str(lock_path))}
 
+    def fingerprint_of(self, plan: ExecutionPlan, drift: dict) -> dict:
+        """把"这一跑用的是哪些指纹"算成一份可持久化的事实（#8 遗留：逐运行锁指纹）。
+
+        只在核对的当下算：锁文件之后会被 `loom lock` 覆盖，事后拿今天的值去回答
+        "当时对不对"等于造伪证。`matches` 是三值——没有锁可比时给 `None`，
+        不给 `True`（与 `admin_api._lock_entry` 同一个口径）。
+        """
+        nodes: dict[str, dict] = {}
+        for level in plan.levels:
+            for node in level:
+                cfg = node.agent_config
+                nodes[node.agent_name] = {
+                    "version": cfg.version,
+                    "config_hash": self._node_config_hash(cfg),
+                }
+        present = bool(drift.get("lock_present"))
+        issues = list(drift.get("issues") or [])
+        return {
+            "checked": True,
+            "lock_present": present,
+            "lock_file": Path(str(drift.get("lock_file") or "")).name,
+            "topology_hash": self._topology_hash(plan),
+            "node_count": plan.node_count,
+            "nodes": nodes,
+            "matches": (not issues) if present else None,
+            "issues": issues,
+        }
+
     def _verify_lock_after_parse(self, plan: ExecutionPlan, source_dir: Path | None = None):
         import logging
         logger = logging.getLogger(__name__)
         drift = self.lock_drift(plan, source_dir)
+        # 先记指纹再判漂：漂移的 plan 不会跑到交付那一步，但"核对过"这件事本身
+        # 是运行的一部分，不该只在顺利通过时才留痕。
+        plan.lock_fingerprint = self.fingerprint_of(plan, drift)
         if not drift["lock_present"]:
             logger.debug(
                 "[%s] 无 lockfile（%s），跳过版本锁定校验；可用 --write-lock 生成",

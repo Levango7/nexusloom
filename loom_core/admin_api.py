@@ -1875,6 +1875,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         if not p.admin and self._scoped_run(run_id) is None:
             return None
         nodes = [n for n in (rec.get("nodes") or []) if isinstance(n, dict)]
+        digest = rec.get("output_digest") or {}
         return {
             "run_id": run_id,
             "pipeline": str(rec.get("pipeline") or ""),
@@ -1885,6 +1886,11 @@ class AdminHandler(BaseHTTPRequestHandler):
             "node_count": len(nodes),
             "artifact_count": sum(len(n.get("artifact_keys") or []) for n in nodes),
             "error": str(rec.get("error") or ""),
+            # 追溯面（#8）。三种形状要能分辨：null = 这一行是在追溯面之前写的
+            # （没算过）；-1 = 算过去查不到那个文件；0 = 文件是空的。
+            "sha256": str(digest.get("sha256") or "") or None,
+            "bytes": digest.get("bytes"),
+            "retention_until": rec.get("retention_until") or 0,
             "projection": self.orch.run_handle(run_id).projection(),
         }
 
@@ -1929,6 +1935,10 @@ class AdminHandler(BaseHTTPRequestHandler):
         item["input_file"] = str(rec.get("input_file") or "")
         item["started_at"] = rec.get("started_at") or 0
         item["nodes"] = [n for n in (rec.get("nodes") or []) if isinstance(n, dict)]
+        # 逐运行锁指纹与交付物摘要（#8）：账本里存的是什么就回什么，这里不重算——
+        # 事后重算出来的是"今天的锁"，不是"这一跑当时用的锁"。
+        item["output_digest"] = rec.get("output_digest") or {}
+        item["lock"] = rec.get("lock") or {}
         self._json({"delivery": item})
 
     #: 全量锁巡检要解析每一条流水线：本机实测（Python 3.14.3、单进程、无并发负载）
@@ -1967,9 +1977,10 @@ class AdminHandler(BaseHTTPRequestHandler):
         """`GET /api/locks[?pipeline=<name>]`：**当前文件 vs 当前锁**的漂移巡检。
 
         口径要说清，否则这口会变成假证据：报的是"现在这两份文件对不对得上"，
-        **不是**"某次运行时用的锁对不对"——运行时的 `config_hash`/`topology_hash`
-        今天不落库（只在 `verify_lockfile` 那一瞬存在于内存），所以后者无法在这里
-        回答，也不拿今天的值冒充当时。响应里的 `scope` 就是给读的人钉这一点的。
+        **不是**"某次运行时用的锁对不对"——那一份指纹只在校验那一瞬有用，事后在这里
+        重算等于拿今天的值冒充当时。响应里的 `scope` 就是给读的人钉这一点的。
+        后半问现在有别处可答：每次运行把自己的 `config_hash`/`topology_hash` 冻进
+        交付账本（`GET /api/deliveries/<run_id>` 的 `lock` 段），那里给的是当时的值。
         """
         from urllib.parse import parse_qs, urlparse
 

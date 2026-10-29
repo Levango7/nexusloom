@@ -141,6 +141,21 @@ docker run -d --name doc-pipeline \
 
 `config.production.json` 中可调项：`safe_writer.backup_ttl_days`、`safe_writer.max_backups`。
 
+### 6.1 运行态回收（`retention.*`）
+
+观测面（运行投影 / 事件 / 审批 / 队列 / 成本 / 质量反馈 / checkpoint / 交付账本）默认
+**一个都不删**：`retention.runs_days` 与 `retention.max_runs` 都是 `0`。要开回收，配这两个
+键（或环境覆写 `DOCPIPE_RETENTION__RUNS_DAYS`），worker 每 `maintenance.gc_ticks`（默认 60）
+个轮询回收一次，进程重启后照常执行；一次性维护走 `python run.py --gc`，它逐表报删了多少。
+
+备份时请注意这两条边界：**回收只动数据库里的行，不动 `output/` 里的交付物文件**；
+账本行的到期时刻是**写入时冻结**的，事后调短保留期不会回头把老行一次性删光——
+所以"改了配置没见数据少"通常是正常的，那批老行只受 `max_runs` 约束。
+
+**已知缺口（2026-10-27 现测）**：回收目前只挂在 worker 循环上——只跑
+`--admin` / `--dashboard` / `--daemon` 而不跑 worker 的部署，GC 不会执行，
+需要按 cron 自己调 `loom --gc`；消息总线的 `dlq` 表也还没有回收面。
+
 ---
 
 ## 7. 上线前检查清单

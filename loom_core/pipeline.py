@@ -1765,6 +1765,8 @@ class PipelineOrchestrator:
 
         这是交付账本（deliveries.db）与 deliver.json 文件共用的唯一形状。
         """
+        from .deliveries import artifact_digests, digest_file
+
         nodes: list[dict[str, Any]] = []
         for level in getattr(plan, "levels", []) or []:
             for node in level:
@@ -1785,9 +1787,13 @@ class PipelineOrchestrator:
                     # （只留最近 100 个），届时 RunHandle.artifacts() 只能从账本重建。
                     # 没产出的节点给空表——"这一节点跑过但没交付东西"与"不知道"要可区分。
                     "artifact_keys": sorted(str(k) for k in (dag_node.result or {})),
+                    # 摘要是**写入时**算的：产物值只活到进程结束，事后想核
+                    # "当时交付的是什么"就只剩这一份 sha256（#8 追溯面）。
+                    "artifacts": artifact_digests(dag_node.result),
                 })
         finished = float(task.finished_at or 0.0)
         started = float(task.started_at or 0.0)
+        out_path = str(task.output_path or "")
         return {
             "run_id": task.id,
             "pipeline": plan.pipeline_name,
@@ -1797,10 +1803,38 @@ class PipelineOrchestrator:
             "started_at": started,
             "finished_at": finished,
             "duration_sec": round(finished - started, 3) if finished else None,
-            "output_path": task.output_path,
+            "output_path": out_path,
+            # 交付物文件的摘要：落盘了就记，读不到也记一条 bytes=-1（"去查过，
+            # 查不到"），而不是把这一项省掉。
+            "output_digest": digest_file(out_path) if out_path else {},
+            # 逐运行锁指纹：核对发生在解析时，落库发生在交付时——中间没有任何
+            # 一次重算，所以这一份就是"这一跑当时用的锁"。
+            "lock": dict(getattr(plan, "lock_fingerprint", None) or {}),
+            "retention_until": self._retention_until(finished),
             "error": task.error or "",
             "nodes": nodes,
         }
+
+    def _retention_until(self, finished_at: float) -> float:
+        """这一行的到期时刻（`retention.runs_days` 未启用或没跑完 → 0 = 不过期）。
+
+        写入时冻结而不是回收时现算：调短保留期不该回头把老行一次性删光，
+        那是让一次配置改动背成片删除的责任。
+        """
+        from .maintenance import RETENTION_DAYS_KEY
+
+        if finished_at <= 0:
+            return 0.0
+        try:
+            days = int(self.config.get(RETENTION_DAYS_KEY, 0) or 0)
+        except Exception:                    # noqa: BLE001
+            # 保留期只是这一行的注脚。这里抛出去，外层 `_deliver` 会把整条
+            # 交付记录一起丢掉（构建记录失败只 warning）——为读不到配置而
+            # 少一行账本，代价不对称。
+            return 0.0
+        if days <= 0:
+            return 0.0
+        return finished_at + days * 86400.0
 
     def _deliver(self, task: PipelineTask, plan: ExecutionPlan) -> None:
         """交付收尾（绝不外抛：交付失败记 warning，不把运行判红）。

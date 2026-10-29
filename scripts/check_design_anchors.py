@@ -15,7 +15,7 @@ ANCHORS = [
     ("loom_core/message_bus_v3.py", 128, "save_message"),
     ("loom_core/message_store.py", 171, "sqlite3.connect"),
     ("loom_core/audit.py", 31, "def write_audit"),
-    ("loom_core/deliveries.py", 61, "def record"),
+    ("loom_core/deliveries.py", 142, "def record"),
     # Stage 3a：审批的三个写点从 approvals.py 搬进了 RunStore（投影 + 同事务事件）。
     # §1 那一行"审批本身就是一个写面"的结论必须指向新位置，而不是退役成无处可指。
     # Stage 3c 补账把这三口整体下推 12 行（`close_run` 长成条件裁决版）。
@@ -66,9 +66,9 @@ ANCHORS = [
     ("loom_core/pipeline.py", 770, "pipeline.started"),      # legacy run() 内
     ("loom_core/pipeline.py", 1137, "pipeline.finished"),    # _finalize_plan_task 内
     ("loom_core/pipeline.py", 1590, "pipeline.finished"),    # _finalize_plan_task_async 内
-    ("loom_core/pipeline.py", 1824, "record"),               # _deliver 内 DeliveryLedger().record
-    ("loom_core/pipeline.py", 1922, "pipeline.audit"),
-    ("loom_core/pipeline.py", 2089, ".done"),
+    ("loom_core/pipeline.py", 1858, "record"),               # _deliver 内 DeliveryLedger().record
+    ("loom_core/pipeline.py", 1956, "pipeline.audit"),
+    ("loom_core/pipeline.py", 2123, ".done"),
     ("loom_core/admin_api.py", 671, "get_task"),
     ("loom_core/admin_api.py", 1072, "list_tasks"),
     # Stage 2：/tasks、dashboard、cost 三处读口从 `list_tasks`（内存）换成
@@ -77,21 +77,21 @@ ANCHORS = [
     ("loom_core/admin_api.py", 1090, "list_runs"),
     ("loom_core/admin_api.py", 1389, "def _task_checkpoint_view"),
     ("loom_core/admin_api.py", 1785, "list_runs"),
-    ("loom_core/admin_api.py", 2272, "list_runs"),
-    ("loom_core/admin_api.py", 2636, "task = _aio.run(orch.run_plan_async("),
-    ("loom_core/admin_api.py", 2705, "existing_callback = get_callback(task_id)"),
+    ("loom_core/admin_api.py", 2283, "list_runs"),
+    ("loom_core/admin_api.py", 2647, "task = _aio.run(orch.run_plan_async("),
+    ("loom_core/admin_api.py", 2716, "existing_callback = get_callback(task_id)"),
     # #8：账本与锁的只读 HTTP 面。三条 handler 进表，"文档教了这三个口"才在代码里
     # 有对应物（`test_doc_consistency` 只把文档对到 openapi 规范，规范和 handler
     # 之间没人守——这条就是补那段距离的）。
-    ("loom_core/admin_api.py", 1891, "def _handle_deliveries"),
-    ("loom_core/admin_api.py", 1909, "def _handle_delivery_detail"),
-    ("loom_core/admin_api.py", 1966, "def _handle_locks"),
+    ("loom_core/admin_api.py", 1897, "def _handle_deliveries"),
+    ("loom_core/admin_api.py", 1915, "def _handle_delivery_detail"),
+    ("loom_core/admin_api.py", 1976, "def _handle_locks"),
     # 锁路径解析只留一处：巡检口（`lock_drift`）与执行口（`_verify_lock_after_parse`）
     # 各自解析一次就会报出执行时根本不会发生的漂移。
-    ("loom_core/scheduler.py", 338, "def resolve_lock_path"),
-    ("loom_core/scheduler.py", 357, "def lock_drift"),
+    ("loom_core/scheduler.py", 344, "def resolve_lock_path"),
+    ("loom_core/scheduler.py", 363, "def lock_drift"),
     # 账本的读口：`list` 在本批之前**没有任何生产调用者**（只有测试读它）。
-    ("loom_core/deliveries.py", 99, "def list(self, limit"),
+    ("loom_core/deliveries.py", 188, "def list(self, limit"),
 ]
 
 root = pathlib.Path(__file__).resolve().parent.parent

@@ -578,6 +578,42 @@ citation:
 python run.py input.md -c config.production.json -o output/doc.md
 ```
 
+### 保留期与回收（`retention.*` / `loom --gc`）
+
+长跑的 worker 会攒下所有观测面：运行投影、事件、审批、队列、成本、质量反馈、
+checkpoint、交付账本。默认**一个都不删**——保守默认比"替你清掉数据"更容易恢复。
+
+| 配置键 | 默认 | 语义 |
+|--------|------|------|
+| `retention.runs_days` | `0`（不启用） | 年龄判据：终态运行超过 N 天就回收 |
+| `retention.max_runs` | `0`（不启用） | 数量判据：只保留最近 N 条终态运行 |
+| `maintenance.gc_ticks` | `60` | worker 每 N 个轮询跑一次 GC（进程重启后继续） |
+
+两条判据任一 > 0 即启用；配成负数或读不懂的值一律按 `0` 处理——配置写错不该
+悄悄变成"删光一切"。回收覆盖：`runs`/`run_nodes`/`events`/`approvals`、任务队列、
+成本、质量反馈、checkpoint（仅在 `runs_days > 0` 时）、以及**交付账本
+`deliveries.db`**。
+
+手动跑一次并看清每张表删了多少：
+
+```bash
+python run.py --gc
+# [gc] 保留 30 天 / 最近 500 条
+#   run_store: approvals=1 events=9 run_nodes=5 runs=3
+#   deliveries: 2 行
+#   合计删除 20 行
+```
+
+三条边界要说在前面：
+
+- **进行中的运行一行不碰**——把活运行从观测面抹掉比不删更糟，它还在写投影。
+- **账本的到期时刻是写入时冻结的**：`retention_until` 在这一行落库时按当时的
+  `runs_days` 算好，事后把保留期调短**不会**回头把老行一次性删光。这一功能之前
+  写入的老行没有到期时刻（`0`），只受 `max_runs` 约束——历史运行不 backfill 是
+  既定边界。
+- **GC 只删账本行，不删磁盘产物**：`output_path` 指向你自己声明的输出目录，
+  删它等于删你的文件。要清理产物请自己按目录策略来。
+
 ---
 
 ## 管理 API
@@ -782,19 +818,23 @@ python run.py --replay-run <run_id>                  # 按 id 补一条
 
 | 口 | 给什么 |
 |----|--------|
-| `GET /api/deliveries` | 最近交付（`?limit=`，默认 50、夹到 200），逐行带 `projection` 健康位 |
-| `GET /api/deliveries/<run_id>` | 整条结构化载荷：逐节点状态/耗时/`artifact_keys` |
+| `GET /api/deliveries` | 最近交付（`?limit=`，默认 50、夹到 200），逐行带 `projection` 健康位、交付物 `sha256`/`bytes` 与 `retention_until` |
+| `GET /api/deliveries/<run_id>` | 整条结构化载荷：逐节点状态/耗时/`artifact_keys` + 逐产物 `sha256`、交付物 `output_digest`、以及那一跑当时的锁指纹 `lock` |
 | `GET /api/locks` | 逐流水线锁巡检（`?pipeline=<name>` 只看一条） |
 
 两条口径要说在前面，别让响应被读成别的含义：
 
 - **`/api/locks` 回答的是"当前 YAML 与当前锁对不对"**，响应里的 `scope: "current files"`
-  就是钉这一点的。它**不回答**"某次运行时用的锁对不对"——运行时的 `config_hash` /
-  `topology_hash` 只在校验那一瞬存在于内存，从未落库，所以那件事今天无法证据化，
-  也不拿今天的值冒充当时。三值 `matches`：`true` 比过且一致、`false` 漂移（`issues`
-  给差在哪）、`null` 没有锁可比或 YAML 解析失败——"没发现问题"与"没法判断"不混。
-  巡检与执行共用同一处锁路径解析（`Scheduler.resolve_lock_path`），否则会报出执行时
-  根本不会发生的漂移。
+  就是钉这一点的。它**不回答**"某次运行时用的锁对不对"——在这里重算出来的是今天的
+  锁，拿它冒充当时的证据比不给这个口更糟。三值 `matches`：`true` 比过且一致、`false`
+  漂移（`issues` 给差在哪）、`null` 没有锁可比或 YAML 解析失败——"没发现问题"与
+  "没法判断"不混。巡检与执行共用同一处锁路径解析（`Scheduler.resolve_lock_path`），
+  否则会报出执行时根本不会发生的漂移。
+- **后半问的落点在交付账本**（2026-10-27，#8）：每次运行在锁校验那一瞬就把
+  `topology_hash` 与逐节点 `config_hash` 冻进账本，`GET /api/deliveries/<run_id>`
+  的 `lock` 段给的就是当时的值，事后重锁不会回头改它。三种形状要分得开：
+  `lock: {}` 是这条 plan 解析时没核对过（`verify_lock=False`），`lock_present: false`
+  是核对过但当时没有锁，`matches: true` 才是"跑的就是锁住的那件事"。
 - **交付账本自己没有归属列**，所以非 admin 的可见性是逐行反查投影的 `principal`：
   CLI 直跑、投影里没有的运行，`projection` 报 `unknown` 且**只有 admin 看得见**。
   越权与不存在给同一个 404（存在性本身就是信息）；账本读不动给 503，**不降级成空列表**。
@@ -1073,11 +1113,20 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3086 个测试本机全绿**（`3086 passed, 10 skipped, 6 deselected`，2026-10-27 本机全量实测；
-现场读到的数是 `3078 passed, 1 failed`——那唯一一条红就是这条计数护栏自身，把本行换成
-本批实测数之后它才转绿，实际收集 **3096** 条，护栏按 `collected − declared ≤ 10` 判（本行
-差值 **10** = 10 条 `requires_pg` 与 `test_e2e_real` 的环境门，`LOOM_TEST_PG_URL` 未设时跳过，
-CI 四条腿都挂真 PG 会执行）；
+**3146 个测试本机全绿**（`3146 passed, 10 skipped, 6 deselected`，2026-10-27 本机全量实测；
+这一轮现场读到的数是 `3143 passed, 3 failed`——三条红里两条是**这批新加的 HTTP 用例污染了
+`AdminHandler` 的类属性**（`AdminAPI.stop()` 不复位，后跑的 `test_identity_tokens` /
+`test_runstore_readside` 的成本作用域读到的还是我这台），复位后单跑与「我的用例先跑」的合跑都绿；
+第三条就是这条计数护栏自身，把本行换成实测数之后它才转绿。实际收集 **3156** 条，护栏按
+`collected − declared ≤ 10` 判（本行差值 **10** = 10 条 `requires_pg` 与 `test_e2e_real` 的环境门，
+`LOOM_TEST_PG_URL` 未设时跳过，CI 四条腿都挂真 PG 会执行）；口径：`Python 3.14.3`、串行无 `-n`、
+本机无并发 pytest；
+**本批 +60 条**（2026-10-27，#8 遗留三件）：`tests/test_delivery_tracing.py` 44 条（摘要函数的
+规范形态与三种"取不到"、账本三列与老库升级、真跑一遍摘要与磁盘字节一致、锁指纹是当时算的且
+事后改锁不动它、回收的冻结到期与不 backfill、GC 接线与错账、跨语言字段契约、四条真 HTTP 往返）+
+`tests/test_delivery_console.py` 15 条（卡片在 DOM 里、两个端点真被调、每轮刷新都渲染、点行开明细
+并能返回、三态文案不合并、产物行沿用检查器版式）+ `tests/test_maintenance.py` 1 条（`loom --gc`
+启用态的逐表输出）；
 **本批 +7 条**（2026-10-27 `tests/test_client_sdk.py`）：LoomClient Python SDK（产品评审 A7）
 的真 HTTP 集成测试——submit-cancel-wait 链 / approve-reject 收件箱链 / 生命周期 404 作用域 /
 OpenAPI 路由同源门禁 / submit 参数校验 / run_workflow 400 / paused 任务 wait 超时；AdminAPI

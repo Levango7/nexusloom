@@ -10,8 +10,9 @@ handler 写对了但路由没接、路由接了但读的是内存 task、行取�
 
 `scope` 字段是本文件里最容易被人"顺手删掉"的一句断言，它是口径本身：
 `/api/locks` 回答的是"现在这两份文件对不对得上"，**不回答**"某次运行时用的锁
-对不对"（运行时的指纹没有落库，见 `_handle_locks` 的注释）。拿当前的值冒充当时的
-证据，比不给这个口更糟。
+对不对"（见 `_handle_locks` 的注释）。拿当前的值冒充当时的证据，比不给这个口更糟；
+后半问的落点是交付账本——`GET /api/deliveries/<run_id>` 的 `lock` 段存的是那一跑
+当时算好的指纹（判据在 `tests/test_delivery_tracing.py`）。
 """
 from __future__ import annotations
 

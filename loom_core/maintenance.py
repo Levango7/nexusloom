@@ -1,9 +1,10 @@
 """运行维护：保留期与 GC（设计复核 2026-10-20 §3.1 A6）。
 
-治的是什么：队列 / cost / quality feedback / checkpoint / RunStore 此前全部
-无界——`task_queue.cleanup` 与 `cost_tracker.cleanup` 是**死代码**（实现过、
+治的是什么：队列 / cost / quality feedback / checkpoint / RunStore / 交付账本
+此前全部无界——`task_queue.cleanup` 与 `cost_tracker.cleanup` 是**死代码**（实现过、
 有判据、从未被调度），quality_feedback 与 RunStore 连清理面都没有。一个长跑
-的 worker 会无限膨胀。
+的 worker 会无限膨胀。交付账本（`deliveries.db`）是最后一张没被覆盖的表，
+2026-10-27 补上（#8 遗留的"保留期"那一半）。
 
 本模块把"删除过期运行"做成一条统一口径：
 
@@ -68,13 +69,15 @@ def retention_from_config(config: Any) -> Retention:
 
 def gc_runs(*, queue: Any = None, cost: Any = None, feedback: Any = None,
             run_store: Any = None, checkpoint_mgr: Any = None,
+            deliveries: Any = None,
             retention: Retention | None = None,
             now: float | None = None,
             log: Callable[[str], None] | None = None) -> dict[str, Any]:
     """按保留期判据清理所有 store。返回 {store_name: 删除行数 / 失败说明}。
 
-    `now` 只传给 RunStore.cleanup（它有假时钟参数）——其余 store 的清理
-    语义是"以现在为界"，注入时钟没有意义。
+    `now` 传给有假时钟参数的两处（`RunStore.cleanup` 与
+    `DeliveryLedger.cleanup`）——其余 store 的清理语义是"以现在为界"，
+    注入时钟没有意义。
 
     任一 store 的清理失败只记 `failed` 计数与告警，不影响其余 store——
     删掉一半永远比不删更糟吗？不，但**删失败报出来**必须成立：静默的
@@ -97,16 +100,41 @@ def gc_runs(*, queue: Any = None, cost: Any = None, feedback: Any = None,
                                        "quality_feedback")
     summary["run_store"] = _run_cleanup(run_store, "cleanup", rs_args,
                                         "run_store")
+    # 交付账本曾是唯一没被 GC 覆盖的存储：运行从 RunStore 删了，账本行还在长，
+    # 于是"保留期"这件事在最长的那张表上根本不成立。判据形状与 RunStore 同形。
+    summary["deliveries"] = _run_cleanup(deliveries, "cleanup", rs_args,
+                                         "deliveries")
     if retention.days > 0:
         summary["checkpoints"] = _run_cleanup(
             checkpoint_mgr, "cleanup_old", (age,), "checkpoint_manager")
     if log:
         stamp = now if now is not None else time.time()
-        dropped = sum(int(v) for v in summary.values()
-                      if isinstance(v, int))
         log(f"[maintenance] GC 执行（{stamp}，保留 {retention.days} 天 / 最近 "
-            f"{retention.max_runs} 条）：删除 {dropped} 行")
+            f"{retention.max_runs} 条）：删除 {count_dropped(summary)} 行")
     return summary
+
+
+def count_dropped(summary: dict[str, Any]) -> int:
+    """把汇总里的"删除行数"加总——只数真行数。
+
+    这处原来写的是 `sum(v for v in summary.values() if isinstance(v, int))`，
+    两头都是错的：`enabled: True` 是 int 的子类，被当成"删了 1 行"；而
+    `run_store` 返回的是逐表 dict（真删了几十行），因为不是 int 被整个跳过。
+    一条报"删除 1 行"而实际删了 18 行的日志，比没有日志更糟——它让读的人
+    以为核对过了。
+    """
+    total = 0
+    for name, value in summary.items():
+        if name == "enabled":
+            continue
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            total += value
+        elif isinstance(value, dict):
+            total += sum(v for v in value.values()
+                         if isinstance(v, int) and not isinstance(v, bool))
+    return total
 
 
 def _run_cleanup(store: Any, method: str, args: tuple, label: str) -> Any:
@@ -134,7 +162,14 @@ def gc_from_orchestrator(orch: Any, now: float | None = None,
     RunStore 的读面）；cost / feedback 走模块级 getter；RunStore 经
     `_runstore()` 惰性拿——拿不到就跳过并告警（不因为一个观测面缺了就
     整个 GC 失败）。
+
+    交付账本只在库文件已经存在时才建连接：`DeliveryLedger()` 构造会 mkdir +
+    建表，一次"没跑过任何东西的 GC"不该在磁盘上造出一个空库来（与
+    `RunHandle._ledger_record` 同一纪律）。
     """
+    from pathlib import Path
+
+    from . import state_paths
     from .cost_tracker import get_cost_tracker
     from .quality_feedback import get_quality_feedback
 
@@ -147,13 +182,46 @@ def gc_from_orchestrator(orch: Any, now: float | None = None,
         except Exception as e:               # noqa: BLE001
             if log:
                 log(f"[maintenance] RunStore 取用失败，RunStore 面跳过: {e}")
+    ledger = None
+    db = state_paths.store_path("deliveries.db")
+    if Path(db).exists():
+        from .deliveries import DeliveryLedger
+        ledger = DeliveryLedger(db_path=str(db))
     return gc_runs(
         queue=getattr(orch, "task_queue", None),
         cost=get_cost_tracker(),
         feedback=get_quality_feedback(),
         run_store=run_store,
         checkpoint_mgr=getattr(orch, "_checkpoint", None),
+        deliveries=ledger,
         retention=retention,
         now=now,
         log=log,
     )
+
+
+def format_summary(summary: dict[str, Any], retention: Retention | None = None
+                   ) -> str:
+    """把 GC 汇总打成人能核对的几行（`loom --gc` 用）。
+
+    打原始 dict 的话，读的人得自己把 `{'run_store': {'runs': 3, ...}}` 心算成
+    "到底删了多少、哪张表删的"——一张要人背锅的维护动作，账要一眼能对上。
+    """
+    if not summary.get("enabled"):
+        return ("[gc] retention 未启用（retention.runs_days / retention.max_runs "
+                "全 0）——未删任何行；worker 循环同样如此")
+    lines: list[str] = []
+    if retention is not None:
+        lines.append(f"[gc] 保留 {retention.days} 天 / 最近 {retention.max_runs} 条")
+    for name, value in summary.items():
+        if name == "enabled" or value is None:
+            continue
+        if isinstance(value, dict) and value.get("failed"):
+            lines.append(f"  {name}: 失败（{value.get('message', '')}）")
+        elif isinstance(value, dict):
+            parts = " ".join(f"{k}={v}" for k, v in sorted(value.items()))
+            lines.append(f"  {name}: {parts}")
+        else:
+            lines.append(f"  {name}: {value} 行")
+    lines.append(f"  合计删除 {count_dropped(summary)} 行")
+    return "\n".join(lines)

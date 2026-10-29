@@ -251,8 +251,8 @@ class LoomClient:
     def locks(self, pipeline: str | None = None) -> list:
         """锁漂移巡检：当前流水线 YAML vs 当前锁文件对不对得上。
 
-        口径是"现在这两份文件"——不是"某次运行时用的锁对不对"（运行时的
-        config_hash/topology_hash 不落库，后者今天无法回答）。
+        口径是"现在这两份文件"——不是"某次运行时用的锁对不对"；后者问交付账本：
+        `delivery(run_id)["lock"]` 存的是那一跑当时算好的指纹。
         """
         return self._get("/api/locks", {"pipeline": pipeline} if pipeline else None
                          ).get("pipelines") or []

@@ -480,7 +480,8 @@ def _ops_paths() -> dict:
         },
         "/api/deliveries": {
             "get": {
-                "summary": "交付账本最近若干条（带投影健康位；非 admin 只看投影归属自己的行）",
+                "summary": "交付账本最近若干条（带投影健康位与交付物 sha256/保留期；"
+                           "非 admin 只看投影归属自己的行）",
                 "parameters": [{"name": "limit", "in": "query", "required": False,
                                "schema": {"type": "integer"}}],
                 "responses": {"200": {"description": "交付列表"},
@@ -489,7 +490,8 @@ def _ops_paths() -> dict:
         },
         "/api/deliveries/{run_id}": {
             "get": {
-                "summary": "单条交付的完整结构化载荷（逐节点状态/耗时/产物键）",
+                "summary": "单条交付的完整结构化载荷（逐节点状态/耗时/产物键与摘要、"
+                           "交付物 sha256、retention_until、逐运行锁指纹 lock）",
                 "parameters": [{"name": "run_id", "in": "path", "required": True,
                                "schema": {"type": "string"}}],
                 "responses": {"200": {"description": "交付明细"},
@@ -498,8 +500,9 @@ def _ops_paths() -> dict:
         },
         "/api/locks": {
             "get": {
-                "summary": "锁巡检。scope=current files：比的是当前 YAML 与当前锁，"
-                           "不是某次运行时用的锁（运行时的指纹没有落库）",
+                "summary": "锁巡检。scope=current files：比的是当前 YAML 与当前锁；"
+                           "『某次运行时用的锁对不对』改由交付账本回答"
+                           "（GET /api/deliveries/{run_id} 的 lock 段）",
                 "parameters": [{"name": "pipeline", "in": "query", "required": False,
                                "schema": {"type": "string"}}],
                 "responses": {"200": {"description": "逐流水线的漂移问题表"}},

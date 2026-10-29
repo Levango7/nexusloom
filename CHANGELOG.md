@@ -33,6 +33,91 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 - 命名清理第一步：banner/CLI 文案去领域味；发行更名 nexusloom。
 - spec 诚实口径：扩展来源轴回归 2（自家内置件不再充数第三方）。
 
+## [Unreleased]
+
+### Added（2026-10-27·续69，#8 遗留三件：交付追溯面 + 逐运行锁指纹 + 控制台呈现）
+
+清的是 2026-10-20 设计复核 A2/A6 剩下的两半与 #8 的第三件。一句话口径：
+**"当时交付的是哪一份内容、用的是哪一把锁、什么时候会被回收"这三问，从此在
+账本里可查、在台面上可见。**
+
+- **逐运行锁指纹（写侧）**：`ExecutionPlan.lock_fingerprint` 由
+  `Scheduler._verify_lock_after_parse` 在核对的**那一瞬**写下——`topology_hash` +
+  逐节点 `config_hash`/`version` + 锁文件名 + 三值 `matches` + `issues`，交付时
+  冻进账本。此前 `GET /api/locks` 只能回答"现在这两份文件对不对"，因为运行时
+  的指纹只存在于内存那一瞬；现在后半问有落点：
+  `GET /api/deliveries/<run_id>` 的 `lock` 段。三种形状互不冒充：`lock: {}` =
+  这条 plan 没核对过（`verify_lock=False`），`lock_present: false` + `matches: null`
+  = 核对过但当时没锁，`matches: true` = 跑的就是锁住的那件事。
+- **产物摘要（写侧）**：`loom_core/deliveries.py` 新增唯一实现 `digest_of` /
+  `digest_file` / `artifact_digests`。文本按 UTF-8 原文、结构按 `sort_keys` 的
+  规范 JSON（不排序则同一 dict 换键序换 sha，追溯当场失效）；非可序列化对象
+  退到 `repr`，**不在交付收尾处抛**。逐节点产物摘要进 `nodes[].artifacts`，
+  落盘交付物进 `output_digest`，账本表加三列 `sha256` / `bytes` /
+  `retention_until`（老库经 `add_column_if_missing` 升级，老行如实为空）。
+  读不到的文件记 `bytes: -1`（沿用 `RunHandle._size_of` 既有约定），
+  "没算过"记 null——三种形状在读侧不合并。
+- **保留期覆盖最后一张无界表**：`DeliveryLedger.cleanup(retention_days, max_runs,
+  now)` 进 `maintenance.gc_runs`。到期时刻 **写入时冻结**（`retention_until`
+  按当时的 `retention.runs_days` 算好），所以事后调短保留期不会回头把老行
+  一次性删光；`retention_until = 0` 的行（老数据 / 未启用）只受 `max_runs`
+  约束——**历史运行不 backfill** 是既定边界。**GC 只删账本行，不删磁盘产物**：
+  `output_path` 指向用户自己声明的输出目录。
+- **控制台呈现**：`loom_core/dashboard/` 新增「交付账本」卡（`#panel-deliveries`）
+  ——列表给运行/流水线/状态/完成/摘要短形/保留期（到期前三天标"即将回收"），
+  点行进明细：交付物路径 + 完整 sha256 + 字节 + 锁指纹（含逐节点 config_hash）
+  + 逐节点产物摘要行（复用运行详情检查器的三列版式，不另发明一套）。
+- **文档**：README 新增「保留期与回收」一节（三个配置键、`loom --gc` 输出样例、
+  三条边界）——此前 `retention.*` 与 `maintenance.gc_ticks` 在用户文档里
+  **零命中**，功能等于不可发现；README / `docs/api.md` / OpenAPI / SDK 里
+  "运行时的指纹没有落库"那句口径同步改写为"这口仍只答当下，后半问在账本"。
+
+### Fixed（2026-10-27·续69，GC 汇总日志那处错账）
+
+`maintenance.gc_runs` 的删除行数原先是 `sum(v for v in summary.values()
+if isinstance(v, int))`，两头都错：`enabled: True` 是 int 的子类，被算成
+"删了 1 行"；而 `run_store` 返回的逐表 dict（真删了几十行）因为不是 int 被
+整个跳过。现场复现：删 18 行的一轮，日志写的是"删除 1 行"。新增
+`count_dropped()`（跳过 `enabled` 与 bool、把 dict 逐表加总）与
+`format_summary()`，`loom --gc` 从"甩一个原始 dict"改成逐表打印 + 合计。
+
+### 判据与变异（60 条新判据：`tests/test_delivery_tracing.py` 44 +
+`tests/test_delivery_console.py` 15 + `tests/test_maintenance.py` +1；
+另有 5 套既有判据（maintenance / deliveries_api / delivery_forms /
+dashboard_s2 / doc_consistency）107 条同批复跑全绿）
+
+窄变异电池（每条打在判定维度上，逐条落盘，还原走字节级写回并核 `restored=True`）：
+
+| 变异 | 红在哪 |
+|------|--------|
+| M1 账本年龄判据去掉"冻结"守卫 | 2 failed（不 backfill 两条） |
+| M2a `count_dropped` 的 dict 分支不计行 | 2 failed |
+| M2c 去掉 bool 守卫 | 1 failed |
+| M3 GC 不扫账本 | 2 failed |
+| M4 调度侧不写逐运行指纹 | 2 failed |
+| M5 交付记录丢掉 `lock` 段 | 2 failed |
+| M6 逐节点产物摘要不写 | 1 failed |
+| M7 交付物文件摘要不算 | 2 failed |
+| M8 列表不暴露交付物摘要列 | 1 failed |
+| M9 明细不带 `lock` | 1 failed |
+| M10c 回收越界删磁盘交付物 | 1 failed（"GC 不该删磁盘上的交付物"） |
+| M11 控制台把 `retention_until` 读成别的键 | 1 failed |
+| M12 到期时刻不按配置冻结 | 1 failed |
+| M13 `format_summary` 不再报合计（CLI 启用态） | 1 failed（`test_gc_cli_end_to_end_enabled_prints_per_store`） |
+
+**招供①**：另有一笔变异 M2b（只删掉 `if name == "enabled": continue` 这一行）
+**不红**。原因不是判据松，而是那处对同一个危险有两道守卫（`enabled` 跳过 +
+`isinstance(value, bool)` 跳过），今天的载荷形状下只有一道有可观测射程——
+射程由 M2c 提供（`{"queue": True}` 必须计 0）。把双保险拆成两条独立可红的
+判据需要人造第三种形状，这里选择不为凑数加判据。
+**招供②**：`loom --gc` 的启用态一开始也**没有** CLI 级判据（只有 `format_summary`
+的单元判据）——补了 `test_gc_cli_end_to_end_enabled_prints_per_store`（走
+`DOCPIPE_RETENTION__*` 环境覆写，不碰仓库配置）之后才有；变异 M13（去掉"合计删除"
+那一行）确认这条 CLI 判据会红。
+**招供③**：控制台判据是**结构与跨端字段契约**级的，仓库仍无浏览器级证据
+（设计复核 §4 那条缺口没变）；JS 与账本字段的对齐靠正则提取前端读到的键名、
+与一条真跑出来的账本记录求差集，M11 就是这条判据的自证。
+
 ## [3.13.0] - 2026-10-26
 
 本版把 2026-10-20 设计复核列出的 P0/P1 工程欠账一次清完，另含两条独立交付。
