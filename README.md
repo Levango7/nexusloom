@@ -141,6 +141,22 @@ python run.py test_input.md --resume --task-id <id>
 python run.py test_input.md --dashboard
 ```
 
+### Python SDK
+
+`pip install nexusloom` 之后即可 `from loom_core import LoomClient`——**零第三方依赖**（stdlib
+`urllib`），Admin API 的薄封装，方法与 HTTP 端点、OpenAPI spec 三处同源（文档表由测试双向守着）：
+
+```python
+from loom_core import LoomClient, LoomError
+
+client = LoomClient("http://127.0.0.1:8910", token="alice-2026")   # 或 api_key=...
+task = client.wait(client.submit(query="写一篇 Git rebase 指南", pipeline="docgen")["task_id"])
+for art in client.artifacts(task["id"]):
+    print(art.get("kind"), art.get("path") or art.get("keys"))
+```
+
+认证、完整方法表（16 个方法）、错误模型与五条语义边界见 [Python SDK](docs/sdk.md)。
+
 ### CLI 动词与参数
 
 **动词**（spec §5.3；缺省动词 = run，`loom input.md` 等价 `loom run input.md`）：
@@ -1111,10 +1127,11 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3188 个测试本机全绿**（`3188 passed, 24 skipped, 6 deselected`，2026-10-29 Windows 本机全量实测，
+**3190 个测试本机全绿**（`3190 passed, 24 skipped, 6 deselected`，2026-10-29 Windows 本机实测，
 耗时 26 分 23 秒 / 1583.16s——同机还有别的会话在跑测试，这个耗时是**负载态**，别拿去当基准；
-更早一轮轻负载下同一套判据是 19 分 37 秒 / 1177.27s）；
-实际收集 **3212** 条（Windows 本机）/ **3220** 条（Linux CI，多 8 条为 POSIX-only 用例），
+更早一轮轻负载下同一套判据是 19 分 37 秒 / 1177.27s；本行在 SDK 文档批追加 2 条判据后按
+「同 skipped 集 +2」改为 3190 / 收集 3214，SKIPPED 集合未变）；
+实际收集 **3214** 条（Windows 本机）/ **3222** 条（Linux CI，多 8 条为 POSIX-only 用例），
 差值 **24** = 22 条真 PG 门（`test_state_backend` 21 + `test_schedule_lease` 1，`LOOM_TEST_PG_URL`
 未设时跳过，CI 四条腿都挂真 PG 会执行）+ 1 条仅 POSIX 语义的路径用例 + 1 条可选 JSON 后端缺包；
 护栏的上界 = 本行自报的 `skipped`（Windows 侧精确）+ 在 Linux 上再加实测的 8 条平台差；
@@ -1436,12 +1453,14 @@ nexusloom/
 | [产品规格](docs/product-spec.md) | 定位、四轴验收线、pack 机制、分层目标（P0/P1）与未决项台账 |
 | [部署指南](docs/deployment.md) | 生产环境配置、API Key、监控、备份策略 |
 | [API 参考](docs/api.md) | Admin REST API 全端点说明与鉴权 |
+| [Python SDK](docs/sdk.md) | `LoomClient` 客户端：安装、认证与信任模型、16 个方法的完整表、错误模型与语义边界 |
 | [架构说明](docs/architecture.md) | 分层结构、线程模型、数据流 |
 | [Agent 开发指南](docs/agents.md) | 自定义 Agent 契约、沙箱规则、最小示例 |
 
 英文版：`docs/en/` 下有同样四篇的英译（[架构](docs/en/architecture.md) /
 [API](docs/en/api.md) / [Agent](docs/en/agents.md) / [部署](docs/en/deployment.md)）。
-两份内容以中文版为准；改了中文版请同步英译，别让它们各说各话。
+两份内容以中文版为准；改了中文版请同步英译，别让它们各说各话。（[Python SDK](docs/sdk.md)
+暂无英译。）
 
 ---
 

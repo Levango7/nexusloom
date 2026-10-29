@@ -252,3 +252,61 @@ def test_nightly_disabled_state_is_disclosed_in_docs():
         assert "停用" in row[0], \
             f"CONTRIBUTING 仍按「定时照跑」介绍 e2e-nightly：{row[0]}"
 
+
+
+# ─── 6. SDK 文档：方法表与 _ROUTES 双向一致 + 可发现性 ─────────
+
+SDK_DOC = ROOT / "docs" / "sdk.md"
+
+
+def _sdk_doc_routes() -> dict[str, tuple[str, str]]:
+    """`docs/sdk.md` 方法表里的 {方法: (METHOD, path)}。
+
+    只认 `| `name` | GET | `/path` | ...` 这种表格行——表头与分隔行自然不匹配，
+    所以解析器不需要"跳过第几行"这类会随排版漂移的规则。
+    """
+    rows: dict[str, tuple[str, str]] = {}
+    if not SDK_DOC.exists():
+        return rows
+    for line in SDK_DOC.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"\|\s*`(\w+)`\s*\|\s*([A-Z]+)\s*\|\s*`([^`]+)`\s*\|", line)
+        if m:
+            rows[m.group(1)] = (m.group(2), m.group(3))
+    return rows
+
+
+def test_sdk_doc_method_table_matches_client_routes():
+    """文档表 ↔ `LoomClient._ROUTES` 双向相等，且 method+path 逐条一致。
+
+    这是「同源」承诺在本仓的第三处落点（另两处：`_ROUTES` ↔ OpenAPI spec 由
+    `test_client_sdk.py` 守，spec ↔ docs 由本文件 §2 守）。只改一边都会红。
+    """
+    from loom_core.client import routes
+
+    documented = _sdk_doc_routes()
+    actual = routes()
+    # 先挡掉"解析器什么都不认"：16 个方法至少得解析出 10 行
+    assert len(documented) >= 10, f"只从 docs/sdk.md 解析出 {len(documented)} 行，表格格式或文件坏了"
+    assert set(documented) == set(actual), (
+        f"文档多写了 {sorted(set(documented) - set(actual))}，"
+        f"漏写了 {sorted(set(actual) - set(documented))}")
+    wrong = {k: {"doc": documented[k], "code": actual[k]}
+             for k in actual if documented[k] != actual[k]}
+    assert not wrong, f"方法与路由/HTTP 动词对不上：{wrong}"
+
+
+def test_sdk_doc_is_discoverable_from_readme():
+    """SDK 必须在 README 有入口、在 doc 里有真实用法——否则等于"没交付"。
+
+    起因：`LoomClient` 随 v3.16.0 一起发版，但用户文档里零命中，集成方只能读源码。
+    这条只判"有人能找到 + 文档真的在教用法"，不判文案好坏。
+    """
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "docs/sdk.md" in readme, "README 里没有指向 docs/sdk.md 的链接，SDK 又变回不可发现"
+    # 光"出现过"不够：要出现在文档索引表里（导航位置），否则正文提一句也算通过
+    assert re.search(r"\|\s*\[Python SDK\]\(docs/sdk\.md\)\s*\|", readme), \
+        "README 的文档索引表里没有 [Python SDK](docs/sdk.md) 这一行——只在正文提一句不叫入口"
+    text = SDK_DOC.read_text(encoding="utf-8")
+    assert "from loom_core import LoomClient" in text, \
+        "docs/sdk.md 里没有可复制的导入示例，这份文档不是在教用法"
+    assert "pip install nexusloom" in text, "安装方式没写，读者不知道装什么才会有这个 SDK"

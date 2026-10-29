@@ -59,6 +59,27 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Docs（2026-10-29，#10：SDK 从"存在"变成"可发现"）
+
+`LoomClient`（产品评审 A7）随 v3.15.0 起就在包里、也与 OpenAPI 同源，但**用户文档里零命中**：
+`docs/` 没有任何 SDK 页，README 只在计数段落里提过它一次 —— 集成方只能读源码才知道有这个
+东西。这跟此前 `retention.*` 在用户文档零命中是同一类缺陷（功能在、但等于没交付）。
+
+- 新增 `docs/sdk.md`：安装（`pip install nexusloom`，零第三方依赖）、快速开始、认证三态与
+  **信任模型原文**（为什么刻意不做 base_url 白名单）、16 个方法的完整表（方法 / HTTP 动词 /
+  路由 / 用途）、错误模型（`LoomError` / `LoomTimeoutError` 的 `status=0` / 本地 `ValueError`
+  / `URLError` 不包装）、以及五条**语义边界**（`paused` 不是终态、`approve` 只在等待中受理、
+  `deliveries` 没有翻页、`locks()` 回答的是"现在"、产物下载没有）。末尾单列「还没做」，
+  避免把"没有"读成"应该有"。
+- README 增加「Python SDK」小节与文档表入口；英文版说明里注明该页**暂无英译**，不让读者以为漏了。
+- 修一处随版本前进而变假的注释：`client.locks()` 原写"运行时的 config_hash/topology_hash
+  不落库，后者今天无法回答"——v3.15.0 起它们随交付记录落库、#79 又从明细读面暴露，改为指向
+  `delivery(run_id)`。
+- 判据 +2 条（`tests/test_doc_consistency.py`）：① 文档方法表 ↔ `LoomClient._ROUTES` **双向**
+  相等且 method/path 逐条一致（先断言表里至少解析出 10 行，挡住"解析器什么都不认"这种假绿）；
+  ② 可发现性——README 必须链到 `docs/sdk.md`，且该文档里要有可复制的导入示例与安装命令。
+  加上原有的 `_ROUTES` ↔ OpenAPI 门禁，**文档 / 实现 / spec 三处现在只改一边就会红**。
+
 ## [3.16.0] - 2026-10-29
 
 把「功能写好了但跑不到 / 跑了看不见」这一类收口：A6 保留期回收在有活的 worker、
