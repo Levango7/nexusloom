@@ -327,11 +327,12 @@ class TestDeliveryLedgerCleanup:
         from loom_core.deliveries import DeliveryLedger
         return DeliveryLedger()
 
-    def _seed(self, led, run_id, *, finished_at, status="done"):
+    def _seed(self, led, run_id, *, finished_at, status="done",
+              output_path=None):
         led.record({"run_id": run_id, "pipeline": "p", "status": status,
                     "finished_at": float(finished_at),
                     "duration_sec": 1.0,
-                    "output_path": f"{run_id}.md",
+                    "output_path": output_path or f"{run_id}.md",
                     "nodes": []})
 
     def test_age_deletes_old(self, state):
@@ -416,6 +417,24 @@ class TestDeliveryLedgerCleanup:
         for status in run_store.TERMINAL_STATUSES:
             assert led.get(f"r-{status}") is None
         assert led.get("alive") is not None
+
+    def test_cleanup_never_deletes_the_delivered_file(self, state, tmp_path):
+        """账本行走了，磁盘产物还在——清理只删行，不碰用户声明的输出。
+
+        交付物的所有权不在 GC：output_path 指向的是用户仓库里的产物，
+        删账本的保留期策略不该外溢成删文件。这条防的是将来有人把
+        "清理过期记录"扩写成"清理过期产物"。
+        """
+        doc = tmp_path / "result.md"
+        doc.write_text("# 交付\n正文", encoding="utf-8")
+        led = self._led(state)
+        now = 10_000_000.0
+        self._seed(led, "with-file", finished_at=now - 100 * 86400,
+                   output_path=str(doc))
+        assert led.cleanup(retention_days=30, now=now) == 1
+        assert doc.exists(), "GC 不该删磁盘上的交付物"
+        assert doc.read_text(encoding="utf-8").startswith("# 交付")
+        assert led.get("with-file") is None
 
     def test_gc_runs_includes_deliveries(self):
         """gc_runs 汇总里应含 deliveries 键（A2 接线判据）。"""
