@@ -320,6 +320,7 @@ class TestDeliveryLedgerCleanup:
       - max_runs > 0：只保留 finished_at 最新的 N 条
       - 两个判据可同时生效
       - 0/0 = 不清理（返回 0）
+      - 只碰终态（done/failed/cancelled），进行中的行一行都不删
     """
 
     def _led(self, state):
@@ -372,6 +373,49 @@ class TestDeliveryLedgerCleanup:
         self._seed(led, "x", finished_at=1.0)
         assert led.cleanup(now=10_000_000.0) == 0
         assert led.get("x") is not None
+
+    def test_non_terminal_rows_are_untouched_by_age(self, state):
+        """年龄判据也不碰进行中的行：活账本（finished_at=0）比过期记录更该留。"""
+        led = self._led(state)
+        now = 10_000_000.0
+        self._seed(led, "old", finished_at=now - 100 * 86400)
+        self._seed(led, "running", finished_at=0.0, status="running")
+        deleted = led.cleanup(retention_days=30, now=now)
+        assert deleted == 1
+        assert led.get("old") is None
+        assert led.get("running") is not None
+
+    def test_non_terminal_rows_ignored_by_max_runs(self, state):
+        """数量判据同样不碰进行中的行：它不占"最近 N 条"的名额。"""
+        led = self._led(state)
+        now = 10_000_000.0
+        self._seed(led, "t1", finished_at=now - 30)
+        self._seed(led, "t2", finished_at=now - 10)
+        self._seed(led, "running", finished_at=0.0, status="running")
+        deleted = led.cleanup(max_runs=1, now=now)
+        assert deleted == 1
+        assert led.get("t1") is None
+        assert led.get("t2") is not None
+        assert led.get("running") is not None
+
+    def test_terminal_statuses_agree_with_run_store(self, state):
+        """两处"终态"必须是同一套三值：判据漂移会让一张表删了、另一张没删。"""
+        from loom_core import run_store
+        from loom_core import deliveries as deliveries_mod
+
+        assert tuple(deliveries_mod.TERMINAL_STATUSES) == tuple(
+            run_store.TERMINAL_STATUSES)
+        # 行为级钉面：run_store 认作终态的每种状态，账本清理都要敢删。
+        now = 10_000_000.0
+        led = self._led(state)
+        for status in run_store.TERMINAL_STATUSES:
+            self._seed(led, f"r-{status}", finished_at=0.0, status=status)
+        self._seed(led, "alive", finished_at=0.0, status="running")
+        assert led.cleanup(retention_days=1, now=now) == len(
+            run_store.TERMINAL_STATUSES)
+        for status in run_store.TERMINAL_STATUSES:
+            assert led.get(f"r-{status}") is None
+        assert led.get("alive") is not None
 
     def test_gc_runs_includes_deliveries(self):
         """gc_runs 汇总里应含 deliveries 键（A2 接线判据）。"""

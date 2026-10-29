@@ -772,7 +772,7 @@ class TestPostgresDeliveryCostQuality:
         rid = f"pg{uuid.uuid4().hex[:10]}"
         rec = {
             "run_id": rid, "pipeline": "test-pipe",
-            "status": "completed", "finished_at": 1000.0,
+            "status": "done", "finished_at": 1000.0,
             "duration_sec": 42.5, "output_path": "/tmp/out.pdf",
             "payload": {"note": "hello"},
         }
@@ -780,14 +780,14 @@ class TestPostgresDeliveryCostQuality:
         got = ledger.get(rid)
         assert got is not None, "PG 上应能读回交付记录"
         assert got["pipeline"] == "test-pipe"
-        assert got["status"] == "completed"
+        assert got["status"] == "done"
         assert got["payload"] == {"note": "hello"}
 
-        # 幂等覆盖
-        rec2 = dict(rec, status="re-ran", finished_at=2000.0)
+        # 幂等覆盖（覆盖后仍是终态，cleanup 才会删它——与 run_store 同口径）
+        rec2 = dict(rec, status="failed", finished_at=2000.0)
         ledger.record(rec2)
         got2 = ledger.get(rid)
-        assert got2["status"] == "re-ran", "INSERT OR IGNORE + UPDATE 应覆盖"
+        assert got2["status"] == "failed", "INSERT OR IGNORE + UPDATE 应覆盖"
         assert got2["finished_at"] == 2000.0
 
         items = ledger.list(limit=100)

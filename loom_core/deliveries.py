@@ -21,6 +21,7 @@ from artesian.fast_json import loads as _fast_loads
 
 from . import state_paths
 from .db_backend import resolve_backend
+from .run_store import TERMINAL_STATUSES
 
 
 class DeliveryLedger:
@@ -98,28 +99,36 @@ class DeliveryLedger:
                 now: float | None = None) -> int:
         """按保留期判据清理交付账本。返回删除行数。
 
-        与 run_store.cleanup 同一双判据口径：
+        与 run_store.cleanup 同一双判据口径，且**同样只碰终态**
+        （TERMINAL_STATUSES 自 run_store 引入，两处不得漂）：进行中的
+        账本行一行都不删——活运行的观测面比过期记录更该留着。
         - retention_days > 0：删除 finished_at 早于 now - days*86400 的记录
-        - max_runs > 0：只保留 finished_at 最新的 N 条，其余删除
+        - max_runs > 0：只保留 finished_at 最新的 N 条终态记录，其余删除
         两个判据可同时生效（年龄判据在保留集内也适用）。
         """
         import time as _time
         if retention_days <= 0 and max_runs <= 0:
             return 0
         now_ts = now if now is not None else _time.time()
+        cutoff = now_ts - retention_days * 86400.0
         with self._pool.conn() as conn:
-            deleted = 0
-            if retention_days > 0:
-                cutoff = now_ts - retention_days * 86400
-                cur = conn.execute(
-                    "DELETE FROM deliveries WHERE finished_at < ?", (cutoff,))
-                deleted += cur.rowcount
+            # 候选先圈定终态行（与 run_store 同序），判删是两条判据的并集，
+            # 再逐行 DELETE——走 db_backend 双方言（psycopg3 Connection 无
+            # executemany），也避开 DELETE ... NOT IN (SELECT 自表) 的语义坑。
+            rows = conn.execute(
+                "SELECT run_id, finished_at FROM deliveries "
+                "WHERE status IN (?, ?, ?) ORDER BY finished_at DESC",
+                TERMINAL_STATUSES).fetchall()
+            to_delete: list[str] = []
             if max_runs > 0:
-                cur = conn.execute(
-                    "DELETE FROM deliveries WHERE run_id NOT IN "
-                    "(SELECT run_id FROM deliveries ORDER BY finished_at DESC LIMIT ?)",
-                    (max_runs,))
-                deleted += cur.rowcount
+                to_delete += [r[0] for r in rows[max_runs:]]
+            if retention_days > 0:
+                to_delete += [r[0] for r in rows
+                              if float(r[1] or 0) < cutoff]
+            deleted = 0
+            for rid in sorted(set(to_delete)):
+                deleted += conn.execute(
+                    "DELETE FROM deliveries WHERE run_id = ?", (rid,)).rowcount
         return deleted
 
 

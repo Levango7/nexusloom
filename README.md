@@ -1111,11 +1111,10 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3185 个测试本机全绿**（`3185 passed, 24 skipped, 6 deselected`，2026-10-29 Windows 本机全量实测，
-耗时 73 分 08 秒 / 4388.42s——同机还有别的会话在跑测试，这个耗时是**负载态**，别拿去当基准；
-更早一轮轻负载下同一套判据是 19 分 37 秒 / 1177.27s）；这一轮里唯一一条红就是这条计数护栏自身
-（它读到的还是旧的 `3179 passed`，按新口径应为 3185，别的判据一条没变）；
-实际收集 **3209** 条（Windows 本机）/ **3217** 条（Linux CI，多 8 条为 POSIX-only 用例），
+**3188 个测试本机全绿**（`3188 passed, 24 skipped, 6 deselected`，2026-10-29 Windows 本机全量实测，
+耗时 26 分 23 秒 / 1583.16s——同机还有别的会话在跑测试，这个耗时是**负载态**，别拿去当基准；
+更早一轮轻负载下同一套判据是 19 分 37 秒 / 1177.27s）；
+实际收集 **3212** 条（Windows 本机）/ **3220** 条（Linux CI，多 8 条为 POSIX-only 用例），
 差值 **24** = 22 条真 PG 门（`test_state_backend` 21 + `test_schedule_lease` 1，`LOOM_TEST_PG_URL`
 未设时跳过，CI 四条腿都挂真 PG 会执行）+ 1 条仅 POSIX 语义的路径用例 + 1 条可选 JSON 后端缺包；
 护栏的上界 = 本行自报的 `skipped`（Windows 侧精确）+ 在 Linux 上再加实测的 8 条平台差；
@@ -1130,6 +1129,10 @@ python -m pytest tests/ -v
 - A2 `output_sha256`：交付产物内容哈希（64 位 hex，无产物时空串）
 - A5 `loom plan --diff`：CLI flag，比对当前流水线与锁文件，报告漂移项
 - A2 `DeliveryLedger.cleanup()`：双判据（retention_days + max_runs），接入 `gc_runs()`；
+  **+3 条**（2026-10-29 `tests/test_maintenance.py` 终态对齐）：cleanup 只碰终态
+  （`TERMINAL_STATUSES` 自 `run_store` 引入不得漂）——进行中的账本行连年龄判据都不碰、
+  也不占 `max_runs` 名额（与 `run_store.cleanup` 字面同口径）；同步把 `test_state_backend.py`
+  PG 腿种子状态改成终态（旧种子 `completed`/`re-ran` 非终态，新口径会把它留下）；
 **上一批 +11 条**（2026-10-27 `tests/test_state_backend.py` B5）：RunStore 双后端真 PG 腿——
 六表 schema 幂等 / open_run 生命周期 / events after_seq+limit / record_nodes 批量 upsert /
 **上一批 +7 条**（2026-10-27 `tests/test_client_sdk.py`）：LoomClient Python SDK（产品评审 A7）
