@@ -1127,13 +1127,14 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3212 个测试本机全绿**（`3212 passed, 24 skipped, 6 deselected`，2026-10-29 Windows 本机实测，
+**3213 个测试本机全绿**（`3213 passed, 24 skipped, 6 deselected`，2026-10-29 Windows 本机实测，
 耗时 26 分 23 秒 / 1583.16s——同机还有别的会话在跑测试，这个耗时是**负载态**，别拿去当基准；
 更早一轮轻负载下同一套判据是 19 分 37 秒 / 1177.27s；本行在 SDK 文档批追加 2 条判据后按
 「同 skipped 集 +2」改为 3190 / 收集 3214；#83 +1 条（清理不删磁盘交付物）、+5 条
 （sqlite_util 标识符白名单）、+16 条（telemetry 双路径）后按同 skipped 集推为 3212 / 收集 3236，
+1 条（run.py 纳入 mypy 类型门的防退化判据）后再推为 3213 / 收集 3237，
 SKIPPED 集合未变）；
-实际收集 **3236** 条（Windows 本机）/ **3244** 条（Linux CI，多 8 条为 POSIX-only 用例），
+实际收集 **3237** 条（Windows 本机）/ **3245** 条（Linux CI，多 8 条为 POSIX-only 用例），
 差值 **24** = 22 条真 PG 门（`test_state_backend` 21 + `test_schedule_lease` 1，`LOOM_TEST_PG_URL`
 未设时跳过，CI 四条腿都挂真 PG 会执行）+ 1 条仅 POSIX 语义的路径用例 + 1 条可选 JSON 后端缺包；
 护栏的上界 = 本行自报的 `skipped`（Windows 侧精确）+ 在 Linux 上再加实测的 8 条平台差；
