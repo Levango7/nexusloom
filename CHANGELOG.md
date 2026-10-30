@@ -59,6 +59,26 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Fixed（2026-10-31，类型门漏洞：run.py 从没进过 mypy）
+
+`mypy run.py` 在 main 上实测两条 `no-any-return`（`_result_for` 返回 dict、`_resolve_cli_input`
+返回 `args_args.input`），而 CI 的 mypy 步骤只查包目录——CLI 入口一直是类型门的法外之地，
+尽管覆盖率口径 `[tool.coverage.run]` 早就算着它。两处收窄后类型干净；`_resolve_cli_input`
+把 argparse 的 `None` 归一成空串（引擎约定的"无输入"形状）并如实标注。mypy 命令补上 `run.py`，
+新增一条判据按 **token** 核这条命令行——YAML 块标量里的注释也是字符串，第一版拿整段 `run:`
+做子串匹配，被自己写的解释性注释骗成了绿。
+
+### Tests（2026-10-31，账本面板补渲染面判据）
+
+`tests/check_dashboard_browser.py`（真 Chrome，手动门）补交付账本用例：mock `/api/deliveries`
+与详情端点，断言列表行、明细路径、产物摘要进 DOM，再点「返回账本列表」。此前 M10b 变异
+（`state.deliveries` 被覆写成空态）0 failed；现在同形态变异实测红在 `badge-deliveries` 0≠1。
+
+### Docs（2026-10-31，设计锚点重钉）
+
+`scripts/check_design_anchors.py` 两条 `deliveries.py` 锚点随 #81 的"清理只碰终态"漂移
+（`def record` 49→50、`def list` 89→90），重钉后 52/52。该脚本不进 CI，并 main 后要手跑。
+
 ### Docs（2026-10-29，#10：SDK 从"存在"变成"可发现"）
 
 `LoomClient`（产品评审 A7）随 v3.15.0 起就在包里、也与 OpenAPI 同源，但**用户文档里零命中**：

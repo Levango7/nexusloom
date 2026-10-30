@@ -15,7 +15,7 @@ ANCHORS = [
     ("loom_core/message_bus_v3.py", 128, "save_message"),
     ("loom_core/message_store.py", 171, "sqlite3.connect"),
     ("loom_core/audit.py", 31, "def write_audit"),
-    ("loom_core/deliveries.py", 49, "def record"),
+    ("loom_core/deliveries.py", 50, "def record"),
     # Stage 3a：审批的三个写点从 approvals.py 搬进了 RunStore（投影 + 同事务事件）。
     # §1 那一行"审批本身就是一个写面"的结论必须指向新位置，而不是退役成无处可指。
     # Stage 3c 补账把这三口整体下推 12 行（`close_run` 长成条件裁决版）。
@@ -95,7 +95,7 @@ ANCHORS = [
     ("loom_core/scheduler.py", 338, "def resolve_lock_path"),
     ("loom_core/scheduler.py", 357, "def lock_drift"),
     # 账本的读口：`list` 在本批之前**没有任何生产调用者**（只有测试读它）。
-    ("loom_core/deliveries.py", 89, "def list(self, limit"),
+    ("loom_core/deliveries.py", 90, "def list(self, limit"),
 ]
 
 root = pathlib.Path(__file__).resolve().parent.parent
