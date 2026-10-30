@@ -179,11 +179,16 @@ def gc_interval_seconds(config: Any) -> int:
     """常驻服务模式两次 GC 之间的秒数（`maintenance.gc_seconds`，默认 600）。
 
     0（或读成非正数）= 服务模式不跑 GC——那是一个**显式选择**，不是忘了接。
+    写成空值（YAML 里 `gc_seconds:` 不给值，读回来是 None）**不算显式选择**：
+    它落进默认 600，否则"填了键却没填值"会把回收静默关掉，正是 #79 修过的那类坑。
     """
     if config is None:
         return 600
+    raw = config.get(GC_SECONDS_KEY, 600)
+    if raw is None:
+        return 600
     try:
-        value = int(config.get(GC_SECONDS_KEY, 600) or 0)
+        value = int(raw or 0)
     except (TypeError, ValueError):
         return 600
     return max(value, 0)
