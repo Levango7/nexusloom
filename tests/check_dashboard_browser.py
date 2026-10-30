@@ -30,6 +30,21 @@ def check(browser, base: str) -> None:
         "/api/logs": {"logs": [{"level": "info", "message": "browser-log-sample"}]},
         "/api/approvals": {"approvals": []},
         "/api/pipeline": {"pipeline_files": ["demo.yaml"]},
+        "/api/deliveries": {"deliveries": [{
+            "run_id": "run-browser-1", "pipeline": "demo", "status": "done",
+            "finished_at": 1700000000, "output_sha256": "a" * 64,
+            "node_count": 2, "artifact_count": 3,
+        }]},
+        "/api/deliveries/run-browser-1": {"delivery": {
+            "run_id": "run-browser-1", "pipeline": "demo", "status": "done",
+            "output_path": "/tmp/out/runner-output.md", "output_sha256": "a" * 64,
+            "node_count": 2, "artifact_count": 3, "duration_sec": 12,
+            "topology_hash": "b" * 64, "config_hashes": {"alpha": "c" * 12},
+            "nodes": [{
+                "node": "alpha", "status": "done", "artifact_keys": ["doc"],
+                "artifacts": {"doc": {"sha256": "d" * 64, "bytes": 2048, "kind": "str"}},
+            }],
+        }},
         "/tasks/sample": {
             "id": "sample", "pipeline": "demo", "status": "paused",
             "dag": {"nodes": [], "layers": []},
@@ -58,6 +73,19 @@ def check(browser, base: str) -> None:
         expect(page.locator("#badge-quality")).to_have_text("avg 83.5")
         expect(page.locator("#panel-logs")).to_contain_text("browser-log-sample")
         print("PASS: cost, quality and logs reach the rendered panels")
+
+        # 账本面板此前只有静态源断言，M10b 变异（入参被覆写成空态）0 failed。
+        # 这里从真实渲染面判：列表行来自 /api/deliveries，明细来自 /api/deliveries/<run_id>。
+        expect(page.locator("#badge-deliveries")).to_have_text("1")
+        expect(page.locator("#panel-deliveries")).to_contain_text("run-browser-1")
+        expect(page.locator("#panel-deliveries")).to_contain_text("2 / 3")
+        page.locator("#panel-deliveries tr.row-clickable").click()
+        expect(page.locator("#panel-deliveries")).to_contain_text("runner-output.md")
+        expect(page.locator("#panel-deliveries")).to_contain_text("节点 alpha 的产物")
+        expect(page.locator("#panel-deliveries")).to_contain_text("2.0 KB")
+        page.locator("#panel-deliveries .run-back").click()
+        expect(page.locator("#panel-deliveries")).to_contain_text("run-browser-1")
+        print("PASS: delivery ledger list and detail come from the API payload")
 
         statuses.update({"/api/quality/feedback": 403, "/api/logs": 403})
         page.reload()
