@@ -31,6 +31,10 @@
 
   let refreshTimer = null;
 
+  /* 账本明细开着时，5 秒轮询不得回画列表——否则点开即被覆盖（实测缺陷：
+     明细在下一轮轮询后消失）。返回列表时显式清旗。 */
+  let deliveriesDetailOpen = false;
+
   // ----------------------------------------------------------
   // DOM cache
   // ----------------------------------------------------------
@@ -114,13 +118,26 @@
     return box;
   }
 
+  /* 键盘可达（评审 10-20 要求）：行/节点等"点击即操作"的元素要能 Tab 到、Enter/Space 触发。 */
+  function makeKeyboardActivatable (el, activate) {
+    el.tabIndex = 0;
+    el.setAttribute('role', 'button');
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        activate();
+      }
+    });
+    return el;
+  }
+
   function timeAgo (date) {
     const diff = Date.now() - date.getTime();
     const sec = Math.floor(diff / 1000);
-    if (sec < 5) return 'just now';
-    if (sec < 60) return sec + 's ago';
+    if (sec < 5) return '刚刚';
+    if (sec < 60) return sec + ' 秒前';
     const min = Math.floor(sec / 60);
-    if (min < 60) return min + 'm ago';
+    if (min < 60) return min + ' 分钟前';
     return date.toLocaleTimeString();
   }
 
@@ -224,7 +241,7 @@
   /* ---- Pipeline Status (top-left) ---- */
   function renderStatus (health) {
     if (!health || !health.status) {
-      els.statusPanel.replaceChildren(emptyState('i-status', 'No status data'));
+      els.statusPanel.replaceChildren(emptyState('i-status', '暂无状态数据'));
       return;
     }
 
@@ -287,7 +304,7 @@
     if (els.badgeTasks) els.badgeTasks.textContent = count;
 
     if (!tasks.length) {
-      els.tasksPanel.replaceChildren(emptyState('i-tasks', 'No active tasks'));
+      els.tasksPanel.replaceChildren(emptyState('i-tasks', '暂无活跃任务'));
       return;
     }
 
@@ -302,8 +319,11 @@
     const tbody = elt('tbody');
     for (const t of tasks) {
       const sCls = statusClass(t.status);
+      // 终态完成的运行没有"进行中的进度"可报（投影里 progress=0）：画满而非 0%，
+      // 否则一个 done 的任务常年显示 0%，看起来像卡死。
+      const isDone = sCls === 'done';
       const progress = t.progress != null ? Number(t.progress) || 0 : 0;
-      const pct = Math.min(100, Math.max(0, Math.round(progress)));
+      const pct = isDone ? 100 : Math.min(100, Math.max(0, Math.round(progress)));
 
       const tdId = elt('td', 'task-id', t.id == null ? '' : String(t.id));
       tdId.title = tdId.textContent;
@@ -341,10 +361,12 @@
         tr.classList.add('expandable');
         tr.title = '点击展开实时进度';
         tr.addEventListener('click', () => toggleLiveStream(String(t.id)));
+        makeKeyboardActivatable(tr, () => toggleLiveStream(String(t.id)));
       } else {
         tr.classList.add('row-clickable');
         tr.title = '查看运行详情';
         tr.addEventListener('click', () => openRun(String(t.id)));
+        makeKeyboardActivatable(tr, () => openRun(String(t.id)));
       }
       tbody.appendChild(tr);
       if (liveStreams.has(String(t.id))) {
@@ -495,6 +517,7 @@
       e.stopPropagation();
       openInspector(taskId, n.name);
     });
+    makeKeyboardActivatable(box, () => openInspector(taskId, n.name));
     // when 不成立 = 作者声明的可选分支 → 虚线边框（spec §4.2 S2）
     if (state === 'skipped' && n.skip_reason === 'condition') {
       box.classList.add('dag-skip-condition');
@@ -575,6 +598,9 @@
   function renderInspector (d) {
     const frag = document.createDocumentFragment();
     const node = d.node || {};
+    // 跨进程运行从 RunStore 投影答（admin_api._node_inspector_from_projection）：
+    // 投影只存节点摘要——四类进程内明细不落投影，文案要如实换，不能把 None 说成"没有"。
+    const projection = d.source === 'runstore';
 
     // ── 状态与执行 ──
     const st = elt('div', 'insp-block');
@@ -594,11 +620,32 @@
     }
     frag.appendChild(st);
 
+    if (projection) {
+      frag.appendChild(elt('div', 'insp-note',
+        '跨进程运行：以下为 RunStore 投影摘要。节点正文、幂等落库态、熔断/限流与质量门'
+        + '明细为进程内状态、不落投影——按「取不到就不编」显示为不可用。'));
+    }
+
     // ── artifact 结构预览 ──
     const art = d.artifact || {};
     const ab = elt('div', 'insp-block');
     ab.appendChild(elt('h4', null, '产物（artifact）'));
-    if (!art.keys || !art.keys.length) {
+    if (projection) {
+      const keys = node.artifact_keys || [];
+      if (!keys.length) {
+        ab.appendChild(elt('div', 'insp-empty', '该节点没有产物键'));
+      } else {
+        const table = elt('div', 'insp-artifact');
+        for (const k of keys) {
+          const row = elt('div', 'insp-art-row');
+          row.appendChild(elt('span', 'insp-art-key', k));
+          row.appendChild(elt('span', 'insp-art-type', '—'));
+          row.appendChild(elt('span', 'insp-art-val', '投影不存正文（跨进程运行）'));
+          table.appendChild(row);
+        }
+        ab.appendChild(table);
+      }
+    } else if (!art.keys || !art.keys.length) {
       ab.appendChild(elt('div', 'insp-empty', '该节点没有产出'));
     } else {
       const table = elt('div', 'insp-artifact');
@@ -629,7 +676,9 @@
     const key = elt('code', 'insp-key', idem.key || '—');
     ib.appendChild(key);
     ib.appendChild(inspectorRow('已记录',
-      idem.recorded == null ? '查不到（store 未就绪）' : (idem.recorded ? '是——重复执行会被跳过' : '否——首次执行'),
+      idem.recorded == null
+        ? (projection ? '不落投影（跨进程运行）' : '查不到（store 未就绪）')
+        : (idem.recorded ? '是——重复执行会被跳过' : '否——首次执行'),
       idem.recorded ? 'insp-ok' : 'insp-muted'));
     frag.appendChild(ib);
 
@@ -641,14 +690,16 @@
       rb.appendChild(inspectorRow('熔断器', cbv.state + '（连续失败 ' + (cbv.failure_count || 0) + ' 次）',
         cbv.state === 'CLOSED' ? 'insp-ok' : 'insp-warn'));
     } else {
-      rb.appendChild(elt('div', 'insp-empty', '熔断器未建立（该 Agent 尚未被熔断逻辑接管）'));
+      rb.appendChild(elt('div', 'insp-empty',
+        projection ? '不落投影（跨进程运行）' : '熔断器未建立（该 Agent 尚未被熔断逻辑接管）'));
     }
     if (rlv) {
       rb.appendChild(inspectorRow('限流', 'rate ' + rlv.rate + ' / burst ' + rlv.burst
         + ' / 余量 ' + rlv.available_tokens));
       rb.appendChild(inspectorRow('累计', '放行 ' + rlv.total_acquired + ' / 阻塞 ' + rlv.total_blocked));
     } else {
-      rb.appendChild(elt('div', 'insp-empty', '限流器未建立（该 Agent 未配 rate_limit）'));
+      rb.appendChild(elt('div', 'insp-empty',
+        projection ? '不落投影（跨进程运行）' : '限流器未建立（该 Agent 未配 rate_limit）'));
     }
     frag.appendChild(rb);
 
@@ -1133,6 +1184,9 @@
       els.ntPipeline.replaceChildren();
       for (const f of files) {
         const name = String(f).replace(/\.ya?ml$/i, '');
+        // 与 CLI 的 --pipeline choices 同口径：下划线前缀是内部片段
+        // （如 _quality-tail，供 pack 内联拼装用），不是可独立提交的流水线。
+        if (name.startsWith('_')) continue;
         const opt = document.createElement('option');
         opt.value = name;
         opt.textContent = name;
@@ -1215,7 +1269,7 @@
     hideError();
     if (!state.loaded) return;
 
-    els.lastUpdated.textContent = 'Updated ' + timeAgo(state.lastUpdated)
+    els.lastUpdated.textContent = '更新于 ' + timeAgo(state.lastUpdated)
       + (state.partialFail ? ' · 部分数据不可用' : '');
 
     renderStatus(state.health);
@@ -1308,6 +1362,7 @@
 
   function renderDeliveries (data) {
     if (renderPanelError(data, els.deliveriesPanel, els.badgeDeliveries, 'i-download')) return;
+    if (deliveriesDetailOpen) return;  // 明细视图持有面板：轮询只更新数据、不回画
     const items = (data && Array.isArray(data.deliveries)) ? data.deliveries : [];
     if (els.badgeDeliveries) els.badgeDeliveries.textContent = String(items.length);
     if (!items.length) {
@@ -1345,6 +1400,7 @@
   async function openDelivery (runId) {
     try {
       const data = await fetchJson(API_BASE + '/api/deliveries/' + encodeURIComponent(runId));
+      deliveriesDetailOpen = true;
       renderDeliveryDetail((data && data.delivery) || {});
     } catch (err) {
       els.deliveriesPanel.replaceChildren(emptyState('i-download',
@@ -1400,7 +1456,10 @@
     const bar = elt('div', 'deliv-bar');
     const back = elt('button', 'run-back', '返回账本列表');
     back.type = 'button';
-    back.onclick = () => renderDeliveries(state.deliveries);
+    back.onclick = () => {
+      deliveriesDetailOpen = false;
+      renderDeliveries(state.deliveries);
+    };
     bar.appendChild(back);
     bar.appendChild(elt('span', 'insp-muted', String(delivery.run_id || '')));
     wrap.appendChild(bar);

@@ -1242,10 +1242,12 @@ class AdminHandler(BaseHTTPRequestHandler):
 
         spec §4.2 S3 主区内容：**artifact 结构预览 / 幂等键 / 熔断限流态 /
         质量门明细**。约定：
-        - 越权与不存在同形（404）——复用 `_scoped_task`，不泄露存在性；
+        - 越权与不存在同形（404）——复用 `_scoped_task` / `_scoped_run`，不泄露存在性；
         - 各类明细**取不到就不编**：熔断器没建过、限流器没建过、质量门不是
           本节点的产物，对应字段给 None 而不是空对象或猜的值（防"显示假分"）；
         - artifact 预览是**形状 + 截断**，不是全量回传（节点结果可能很大）。
+        - 内存只是缓存：跨进程跑完的运行（被淘汰 / 别的进程）从 RunStore 投影答
+          ——与 `/tasks/<id>` 的回退同一口径，否则"列表能开详情、点节点必 404"。
         """
         if not self.orch:
             return self._json({"error": "orchestrator not set"}, 500)
@@ -1253,7 +1255,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             return self._json({"error": "missing node name"}, 400)
         task = self._scoped_task(task_id)
         if not task:
-            return self._json({"error": "task not found"}, 404)
+            return self._node_inspector_from_projection(task_id, node_name)
         node = (getattr(task, "dag_nodes", None) or {}).get(node_name)
         if node is None:
             return self._json({"error": "node not found"}, 404)
@@ -1278,6 +1280,51 @@ class AdminHandler(BaseHTTPRequestHandler):
             "rate_limit": self._agent_rate_limit(agent_name),
             "quality": self._node_quality_detail(node),
             "checkpoint": self._task_checkpoint_view(task),
+        })
+
+    def _node_inspector_from_projection(self, task_id: str, node_name: str):
+        """内存里没有（被淘汰 / 别的进程跑完）时的节点明细：从 RunStore 投影给可读事实。
+
+        与 `_get_task_from_projection` 同一口径：越权与不存在同形（404，经 `_scoped_run`）。
+        投影只存节点摘要（status/attempts/时间/artifact_keys），四类明细（artifact 正文
+        预览 / 幂等键落库态 / 熔断限流 / 质量门明细）从不落进投影——按"取不到就不编"给
+        None，并显式标 `source: "runstore"`，前端据此换文案而不是把 None 当"没有内容"。
+        """
+        run = self._scoped_run(task_id)
+        if run is None:
+            return self._json({"error": "task not found"}, 404)
+        handle = self.orch.run_handle(task_id)
+        node = next((n for n in handle.nodes() if n.get("node") == node_name), None)
+        if node is None:
+            return self._json({"error": "node not found"}, 404)
+        n_started = float(node.get("started_at") or 0.0)
+        n_finished = float(node.get("finished_at") or 0.0)
+        duration_ms = (round((n_finished - n_started) * 1000, 1)
+                       if n_finished > n_started else None)
+        self._json({
+            "task_id": task_id,
+            "task_status": run.get("status"),
+            "source": "runstore",
+            "node": {
+                "name": node_name,
+                # 投影不存节点→Agent 绑定（同 _get_task_from_projection 的回退）
+                "agent": node_name,
+                "status": str(node.get("status") or "pending"),
+                "attempts": int(node.get("attempts") or 0),
+                "skip_reason": "",
+                "error": str(node.get("error") or ""),
+                "dependencies": [],
+                # 投影不存重试上限：给 None 让前端显示 "?"，不拿 0 冒充"不许重试"
+                "max_retries": None,
+                "duration_ms": duration_ms,
+                "artifact_keys": list(node.get("artifact_keys") or []),
+            },
+            "artifact": None,
+            "idempotency": None,
+            "circuit_breaker": None,
+            "rate_limit": None,
+            "quality": None,
+            "checkpoint": None,
         })
 
     @staticmethod

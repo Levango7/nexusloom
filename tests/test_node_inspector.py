@@ -298,3 +298,85 @@ class TestS2CarriesCheckpoint:
             assert data["dag"]["checkpoint"]["exists"] is False
         finally:
             api.stop()
+
+
+class TestProjectionFallback:
+    """内存淘汰 / 跨进程运行：节点明细从 RunStore 投影答（与 `/tasks/<id>` 同口径）。
+
+    回归动机（2026-10-30 控制台实测评审）：列表能开运行详情、点节点却 404——
+    `_handle_node_inspector` 只查内存，没有 `/tasks/<id>` 已有的投影回退；
+    跨进程跑完的运行（本仓控制台的主用例）点任何节点必 404。
+    """
+
+    RUN = {
+        "run_id": "t9", "workflow": "demo", "status": "done", "principal": "",
+        "started_at": 1000.0, "finished_at": 1002.0, "error": "",
+    }
+
+    NODES = [{
+        "node": "writer", "status": "success", "attempts": 2,
+        "started_at": 1000.0, "finished_at": 1000.5,
+        "error": "", "artifact_keys": ["content"],
+    }]
+
+    def _handle(self, orch_mock, *, record, nodes):
+        handle = MagicMock()
+        handle.record.return_value = record
+        handle.nodes.return_value = nodes
+        orch_mock.get_task.return_value = None  # 内存里没有
+        orch_mock.run_handle.return_value = handle
+        return handle
+
+    def test_node_detail_from_projection_when_not_in_memory(self, orch_mock):
+        self._handle(orch_mock, record=self.RUN, nodes=self.NODES)
+        port, api = _start(orch_mock)
+        try:
+            status, data = _get(port, "/tasks/t9/nodes/writer")
+            assert status == 200
+            assert data["source"] == "runstore"
+            assert data["task_status"] == "done"
+            assert data["node"]["name"] == "writer"
+            assert data["node"]["status"] == "success"
+            assert data["node"]["attempts"] == 2
+            assert data["node"]["duration_ms"] == 500.0
+            assert data["node"]["artifact_keys"] == ["content"]
+            # 重试上限不落投影：给 None（前端显示 "?"），不拿 0 冒充"不许重试"
+            assert data["node"]["max_retries"] is None
+            # 四类明细不落投影：取不到就不编（显式 None，前端据此换文案）
+            for key in ("artifact", "idempotency", "circuit_breaker",
+                        "rate_limit", "quality", "checkpoint"):
+                assert data[key] is None, key
+        finally:
+            api.stop()
+
+    def test_ghost_node_in_projection_is_404(self, orch_mock):
+        self._handle(orch_mock, record=self.RUN, nodes=self.NODES)
+        port, api = _start(orch_mock)
+        try:
+            status, data = _get(port, "/tasks/t9/nodes/ghost")
+            assert status == 404
+            assert "node" in str(data).lower()
+        finally:
+            api.stop()
+
+    def test_unknown_task_still_404_from_projection(self, orch_mock):
+        """内存和投影都没有 → 404（越权与不存在同形由 `_scoped_run` 保证）。"""
+        self._handle(orch_mock, record=None, nodes=self.NODES)
+        port, api = _start(orch_mock)
+        try:
+            status, _ = _get(port, "/tasks/t9/nodes/writer")
+            assert status == 404
+        finally:
+            api.stop()
+
+    def test_memory_path_wins_when_task_is_present(self, orch_mock):
+        """内存里有任务时仍走内存路径（不回归：投影键 `source` 不出现）。"""
+        task = _Task([_Node("writer")])
+        orch_mock.get_task.return_value = task
+        port, api = _start(orch_mock)
+        try:
+            status, data = _get(port, "/tasks/t1/nodes/writer")
+            assert status == 200
+            assert "source" not in data
+        finally:
+            api.stop()
