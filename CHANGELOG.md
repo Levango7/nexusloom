@@ -59,6 +59,29 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Fixed（2026-10-31，`maintenance.gc_seconds` 写成空值不再等于关掉回收）
+
+YAML 里 `gc_seconds:` 只写键不给值时读回来是 `None`，旧写法 `int(cfg.get(key, 600) or 0)`
+把它折成 **0 = 服务模式不跑 GC**。README 与 `docs/deployment.md` 的口径都是"默认 600、
+`0` 是显式选择"——空值不是显式选择，这个折叠恰好把 #79 刚接上的那口气又静默关掉了。
+现在空值落回默认 600，`0` 仍然是显式关闭。
+
+### Tests（2026-10-31，维护面接线层 + SDK 契约面，+51 条）
+
+两处"门在、但那一层从来没被执行过"：
+
+- `tests/test_maintenance_wiring.py`（28 条）：`gc_from_orchestrator` 在三处用例里**一律被
+  monkeypatch 成替身**，函数体本身零执行；`_dlq_store` / `_run_cleanup` 零引用。补的是文档里
+  写明却没有判据的三条降级契约——配置写坏回退到"不启用"、RunStore 取不到只跳过并告警（其余面
+  照常回收）、store 缺清理方法/清理抛异常都记 `failed` 而不上抛。
+- `tests/test_client_contract.py`（23 条）：`docs/sdk.md` 列了 16 个方法，其中 8 个的
+  method/path/query/body 形状从没被断言过；`{"raw": ...}` 非 JSON 退路、空响应体读成 `{}`、
+  连不上抛 `URLError` 不包装、`token` 优先于 `api_key` 同样没有判据。用 stdlib 桩服务器逐条
+  对照 `client.routes()` 登记的那一帧长什么样。
+
+变异电池：C-8 九条、C-9 十四条，**全 RED（有射程）**，每条注入后字节级还原并核 sha；
+`client.py` 覆盖 83% → 98%、`content_digest.py` 89% → 100%。
+
 ### Fixed（2026-10-31，类型门漏洞：run.py 从没进过 mypy）
 
 `mypy run.py` 在 main 上实测两条 `no-any-return`（`_result_for` 返回 dict、`_resolve_cli_input`
