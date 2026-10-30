@@ -191,6 +191,29 @@ def test_ci_step_carries_the_output_fidelity_checks():
     assert "OUTPUT FIDELITY OK" in text, "护栏与被检对象一并失效，先确认这一步还在"
 
 
+def test_ci_type_check_covers_run_py():
+    """mypy 步骤必须把 run.py 一起查——它是 CLI 入口，也是覆盖率口径的一部分。
+
+    长期只在 py_compile 里露面的后果是实测攒下两条 `no-any-return` 没人发现。
+    只认真正的 `mypy ...` 命令行（按 token 判）：YAML 块标量里的注释也是字符串，
+    拿整段 `run:` 做子串匹配会被一句解释性注释骗过去。
+    """
+    import yaml
+
+    ci = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    )
+    runs = [step.get("run", "") for job in ci["jobs"].values()
+            for step in job.get("steps", []) if "mypy" in str(step.get("name", "")).lower()]
+    assert runs, "ci.yml 里找不到 mypy 步骤——类型门整个没了"
+    commands = [line.strip() for run in runs for line in str(run).splitlines()
+                if line.strip().startswith("mypy ")]
+    assert commands, f"mypy 步骤里已经没在跑 mypy：{runs!r}"
+    for command in commands:
+        assert "run.py" in command.split(), \
+            f"mypy 命令没带上 run.py，CLI 入口又回到类型门之外：{command!r}"
+
+
 # ─── 5. E2E Nightly 的触发实态与文档口径必须同步 ─────────────
 
 def _nightly_triggers(text: str) -> set:

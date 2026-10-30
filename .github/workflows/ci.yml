@@ -76,7 +76,9 @@ jobs:
 
       - name: Type check (mypy)
         run: |
-          mypy loom_core/ loom_doc/ docpipeline/ pipeline_core/ agents/ packs/ --ignore-missing-imports
+          # run.py 与 py_compile / 覆盖率是同一份源码面（命中口径见 [tool.coverage.run]），
+          # 类型门不能只查包目录——漏掉它时 CLI 入口会悄悄攒下 no-any-return。
+          mypy loom_core/ loom_doc/ docpipeline/ pipeline_core/ agents/ packs/ run.py --ignore-missing-imports
 
       - name: Run tests with coverage
         run: |

@@ -346,8 +346,9 @@ def _result_for(task, agent: str) -> dict:
     from loom_core.naming import agent_of
 
     results = getattr(task, "result", None) or {}
-    if isinstance(results.get(agent), dict):
-        return results[agent]
+    direct = results.get(agent)
+    if isinstance(direct, dict):
+        return direct
     matches = [v for k, v in results.items() if agent_of(str(k)) == agent
                and isinstance(v, dict)]
     return matches[0] if len(matches) == 1 else {}
@@ -475,7 +476,10 @@ def _cli_typed_inputs(args_args: argparse.Namespace) -> dict:
 
 
 def _resolve_cli_input(args_args: argparse.Namespace, plan, task_id: str) -> str:
-    """CLI 提交口的闸门，返回实际使用的 input_file 路径。
+    """CLI 提交口的闸门，返回实际使用的 input_file 路径；没给输入文档时返回空串。
+
+    空串是引擎约定的"无输入"形状（`run_plan(input_file="")` 即此意），
+    `argparse` 的位置参数默认是 None，这里归一成空串再交出去。
 
     两种输入形状过同一个闸门口子（与 HTTP/MCP 同一实现）：typed 载荷走 `prepare_inputs`
     （逐字段校验 + 填默认值 + 渲染），位置参数 `input` 那份自由文本走 `gate_freeform`
@@ -503,7 +507,10 @@ def _resolve_cli_input(args_args: argparse.Namespace, plan, task_id: str) -> str
     except InputValidationError as e:
         print(f"[run] ✗ {e}")
         sys.exit(2)
-    return args_args.input
+    freeform_input = args_args.input
+    if not freeform_input:
+        return ""
+    return str(freeform_input)
 
 
 def _run_single_task(args_args: argparse.Namespace, orch: PipelineOrchestrator,
