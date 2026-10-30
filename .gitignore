@@ -6,6 +6,8 @@ tmp_fetcher/
 tmp/
 benchmark_results.json
 benchmark_history.jsonl
+# `run.py demo` 在 cwd 建的沙盒（留给用户改 input.md 重跑，但不该进 git status）
+loom-demo-*/
 
 # Python
 __pycache__/
