@@ -1127,14 +1127,15 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3213 个测试本机全绿**（`3213 passed, 24 skipped, 6 deselected`，2026-10-29 Windows 本机实测，
+**3224 个测试本机全绿**（`3224 passed, 24 skipped, 6 deselected`，2026-10-29 Windows 本机实测，
 耗时 26 分 23 秒 / 1583.16s——同机还有别的会话在跑测试，这个耗时是**负载态**，别拿去当基准；
 更早一轮轻负载下同一套判据是 19 分 37 秒 / 1177.27s；本行在 SDK 文档批追加 2 条判据后按
 「同 skipped 集 +2」改为 3190 / 收集 3214；#83 +1 条（清理不删磁盘交付物）、+5 条
 （sqlite_util 标识符白名单）、+16 条（telemetry 双路径）后按同 skipped 集推为 3212 / 收集 3236，
-1 条（run.py 纳入 mypy 类型门的防退化判据）后再推为 3213 / 收集 3237，
+1 条（run.py 纳入 mypy 类型门的防退化判据）后再推为 3213 / 收集 3237；+11 条（控制台修复批：
+节点检查器投影回退 4 + 端点契约 4 + 账本明细跨轮询 3）后再推为 3224 / 收集 3248，
 SKIPPED 集合未变）；
-实际收集 **3237** 条（Windows 本机）/ **3245** 条（Linux CI，多 8 条为 POSIX-only 用例），
+实际收集 **3248** 条（Windows 本机）/ **3256** 条（Linux CI，多 8 条为 POSIX-only 用例），
 差值 **24** = 22 条真 PG 门（`test_state_backend` 21 + `test_schedule_lease` 1，`LOOM_TEST_PG_URL`
 未设时跳过，CI 四条腿都挂真 PG 会执行）+ 1 条仅 POSIX 语义的路径用例 + 1 条可选 JSON 后端缺包；
 护栏的上界 = 本行自报的 `skipped`（Windows 侧精确）+ 在 Linux 上再加实测的 8 条平台差；
@@ -1156,6 +1157,10 @@ SKIPPED 集合未变）；
 - A2 `DeliveryLedger.cleanup()` 不删磁盘交付物：**+1 条**（2026-10-30 `tests/test_maintenance.py`）
   ——清理只删账本行，`output_path` 指向的用户产物原样保留；防的是将来把「清理过期记录」
   扩写成「清理过期产物」。变异验证：给 cleanup 临时加上按 `output_path` 删文件的实现，这条即红；
+- 控制台缺陷修复批：**+11 条**（2026-10-31）——节点检查器跨进程投影回退（`test_node_inspector` +4，
+  修"列表能开详情、点节点必 404"）、账本明细跨轮询存活接线（`test_dashboard_s2` +3，
+  修"明细 ≤5 秒被轮询覆盖"）、控制台端点 ↔ OpenAPI 同源契约（`test_dashboard_contract` +4，
+  评审 §4.3 判据 1 落地）；
 - 安全加固 `sqlite_util` 标识符白名单：**+5 条**（2026-10-30 `tests/test_sqlite_util.py`）——
   PRAGMA/ALTER 的插值点无法参数化，把「调用方只传字面常量」从约定升级为强制校验
   （表名/列名严格标识符；DDL 类型片段拒 `;` `--` `/*` 等结构字符），真 DDL 幂等行为不变；

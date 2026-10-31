@@ -161,3 +161,32 @@ class TestConsoleShipping:
             api.stop()
             # start() 写的是类属性，清掉避免污染后续用例
             AdminHandler.dashboard_dir = None
+
+
+class TestDeliveriesDetailSurvivesPolling:
+    """账本明细跨轮询存活（2026-10-31 实测缺陷回归）。
+
+    缺陷现场：`openDelivery` 点开明细后，`render()` 的 5 秒轮询无条件重画
+    交付面板 → 明细 ≤5 秒被列表覆盖（点开即消失）。修法：明细开着时置
+    `deliveriesDetailOpen`，`renderDeliveries` 遇旗只更新数据不回画；
+    「返回账本列表」显式清旗。本判据静态钉住三处接线（零浏览器）。
+    """
+
+    def setup_method(self):
+        self.js = _read("app.js")
+
+    def test_flag_declared_and_guarded(self):
+        assert "deliveriesDetailOpen" in self.js
+        assert "if (deliveriesDetailOpen) return;" in self.js, \
+            "renderDeliveries 缺轮询守卫——明细会被 5 秒轮询覆盖"
+
+    def test_open_sets_flag_before_rendering_detail(self):
+        open_body = self.js.split("async function openDelivery", 1)[1]
+        set_at = open_body.index("deliveriesDetailOpen = true;")
+        render_at = open_body.index("renderDeliveryDetail(")
+        assert set_at < render_at, "必须先置旗再渲染明细"
+
+    def test_back_button_clears_flag(self):
+        detail_body = self.js.split("function renderDeliveryDetail", 1)[1]
+        assert "deliveriesDetailOpen = false;" in detail_body, \
+            "返回账本列表必须清旗，否则列表再也回不来"

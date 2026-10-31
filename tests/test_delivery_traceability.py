@@ -237,7 +237,12 @@ class TestConsoleWiring:
         region = _console_region()
         assert "openDelivery(String(item.run_id || ''))" in region
         assert "renderDeliveryDetail((data && data.delivery) || {})" in region
-        assert "back.onclick = () => renderDeliveries(state.deliveries)" in region
+        # 返回按钮（2026-10-31 更新）：原先钉 `() => renderDeliveries(state.deliveries)`
+        # 单行；该形态下明细会被 5s 轮询覆盖（点开即消失，浏览器实测复现），
+        # 改为"先清明细持有旗、再回列表"。行为契约不变（回列表），新增清旗接线，
+        # 对应判据见 test_dashboard_s2.TestDeliveriesDetailSurvivesPolling。
+        assert "back.onclick = () => {" in region
+        assert "deliveriesDetailOpen = false;" in region
 
     def test_missing_digest_has_two_separate_truths(self):
         region = _console_region()
