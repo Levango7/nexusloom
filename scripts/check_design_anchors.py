@@ -79,17 +79,17 @@ ANCHORS = [
     # `list_runs`（内存缓存 ∪ 投影）——锚点跟着换而不是删，否则"读侧已并轨"
     # 这句话在表里就没有对应物了。
     ("loom_core/admin_api.py", 1090, "list_runs"),
-    ("loom_core/admin_api.py", 1389, "def _task_checkpoint_view"),
-    ("loom_core/admin_api.py", 1785, "list_runs"),
-    ("loom_core/admin_api.py", 2278, "list_runs"),
-    ("loom_core/admin_api.py", 2642, "task = _aio.run(orch.run_plan_async("),
-    ("loom_core/admin_api.py", 2711, "existing_callback = get_callback(task_id)"),
+    ("loom_core/admin_api.py", 1436, "def _task_checkpoint_view"),
+    ("loom_core/admin_api.py", 1835, "list_runs"),
+    ("loom_core/admin_api.py", 2325, "list_runs"),
+    ("loom_core/admin_api.py", 2689, "task = _aio.run(orch.run_plan_async("),
+    ("loom_core/admin_api.py", 2758, "existing_callback = get_callback(task_id)"),
     # #8：账本与锁的只读 HTTP 面。三条 handler 进表，"文档教了这三个口"才在代码里
     # 有对应物（`test_doc_consistency` 只把文档对到 openapi 规范，规范和 handler
     # 之间没人守——这条就是补那段距离的）。
-    ("loom_core/admin_api.py", 1894, "def _handle_deliveries"),
-    ("loom_core/admin_api.py", 1912, "def _handle_delivery_detail"),
-    ("loom_core/admin_api.py", 1972, "def _handle_locks"),
+    ("loom_core/admin_api.py", 1941, "def _handle_deliveries"),
+    ("loom_core/admin_api.py", 1959, "def _handle_delivery_detail"),
+    ("loom_core/admin_api.py", 2019, "def _handle_locks"),
     # 锁路径解析只留一处：巡检口（`lock_drift`）与执行口（`_verify_lock_after_parse`）
     # 各自解析一次就会报出执行时根本不会发生的漂移。
     ("loom_core/scheduler.py", 338, "def resolve_lock_path"),

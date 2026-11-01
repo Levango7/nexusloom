@@ -59,6 +59,43 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 ## [Unreleased]
 
+### Fixed（2026-10-31，控制台审计与节点检查器；PR #87，代记）
+
+> 这条由 qoder 代 zcode 记：#87 改的是 `admin_api.py` / `dashboard` / `openapi_spec`，
+> 没动 CHANGELOG，而发版说明是 `release.yml` 从本文件 awk 抽的——不补就等于这一批
+> 用户能撞到的修复在 Release notes 里不存在。**功能与判据归 #87 的作者**，这里只补索引。
+
+- **跨进程运行的节点检查器不再必 404**：内存里没有那次运行（被淘汰 / 别的进程跑的）时，
+  `/api/tasks/<id>/nodes/<node>` 改从 RunStore 投影给可读事实，并显式标 `source: "runstore"`；
+  投影里从不落的四类明细（artifact 正文预览 / 幂等键 / 熔断限流 / 质量门）按"取不到就不编"给
+  `None`，前端据此换文案，而不是把 `None` 读成"没有内容"。越权与不存在仍同形（404）。
+- **交付账本明细被轮询覆盖**：账本详情页会被 5 秒轮询刷回列表 ⇒ 返回按钮 pin 到同一渲染口径。
+- 控制台端点契约与键盘可达性判据 +11 条（`tests/test_dashboard_contract.py`、
+  `tests/test_node_inspector.py`、`tests/test_delivery_traceability.py`、`tests/test_dashboard_s2.py`）。
+
+### Fixed（2026-10-31，`maintenance.gc_seconds` 写成空值不再等于关掉回收）
+
+YAML 里 `gc_seconds:` 只写键不给值时读回来是 `None`，旧写法 `int(cfg.get(key, 600) or 0)`
+把它折成 **0 = 服务模式不跑 GC**。README 与 `docs/deployment.md` 的口径都是"默认 600、
+`0` 是显式选择"——空值不是显式选择，这个折叠恰好把 #79 刚接上的那口气又静默关掉了。
+现在空值落回默认 600，`0` 仍然是显式关闭。
+
+### Tests（2026-10-31，维护面接线层 + SDK 契约面，+51 条）
+
+两处"门在、但那一层从来没被执行过"：
+
+- `tests/test_maintenance_wiring.py`（28 条）：`gc_from_orchestrator` 在三处用例里**一律被
+  monkeypatch 成替身**，函数体本身零执行；`_dlq_store` / `_run_cleanup` 零引用。补的是文档里
+  写明却没有判据的三条降级契约——配置写坏回退到"不启用"、RunStore 取不到只跳过并告警（其余面
+  照常回收）、store 缺清理方法/清理抛异常都记 `failed` 而不上抛。
+- `tests/test_client_contract.py`（23 条）：`docs/sdk.md` 列了 16 个方法，其中 8 个的
+  method/path/query/body 形状从没被断言过；`{"raw": ...}` 非 JSON 退路、空响应体读成 `{}`、
+  连不上抛 `URLError` 不包装、`token` 优先于 `api_key` 同样没有判据。用 stdlib 桩服务器逐条
+  对照 `client.routes()` 登记的那一帧长什么样。
+
+变异电池：C-8 九条、C-9 十四条，**全 RED（有射程）**，每条注入后字节级还原并核 sha；
+`client.py` 覆盖 83% → 98%、`content_digest.py` 89% → 100%。
+
 ### Fixed（2026-10-31，类型门漏洞：run.py 从没进过 mypy）
 
 `mypy run.py` 在 main 上实测两条 `no-any-return`（`_result_for` 返回 dict、`_resolve_cli_input`
@@ -78,6 +115,12 @@ Loom 首个 PyPI 发行版（发行名 `nexusloom`；原名 doc-pipeline，2026-
 
 `scripts/check_design_anchors.py` 两条 `deliveries.py` 锚点随 #81 的"清理只碰终态"漂移
 （`def record` 49→50、`def list` 89→90），重钉后 52/52。该脚本不进 CI，并 main 后要手跑。
+
+并 #87 进本分支后同一轮再重钉 8 条 `admin_api.py` 锚点（`_task_checkpoint_view` 1389→1436、
+两处 `list_runs` 1785→1835 / 2278→2325、`run_plan_async` 2642→2689、`existing_callback`
+2711→2758、`_handle_deliveries` 1894→1941、`_handle_delivery_detail` 1912→1959、
+`_handle_locks` 1972→2019）——这 8 条漂移是 #87 自己往上加代码推出来的，不是 main 的账；
+重钉后实跑 `checked=52 mismatched=0`。
 
 ### Docs（2026-10-29，#10：SDK 从"存在"变成"可发现"）
 
