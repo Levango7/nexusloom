@@ -725,6 +725,19 @@ body {
 .row-clickable { cursor: pointer; }
 .row-clickable:hover .task-id-link { color: var(--highlight); }
 
+/* Runs 面状态过滤（评审 §4.2）：卡头里的小选择器，沿用暗色运维台配色 */
+.card-header .task-filter {
+  margin-left: auto;
+  font: inherit;
+  font-size: 0.72rem;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+.task-filter:focus-visible { outline: 2px solid var(--highlight); outline-offset: 2px; }
+
 /* --- DAG 分层流 ------------------------------------------- */
 .dag-flow { display: flex; flex-direction: column; gap: 4px; padding: 8px 0 4px; }
 .dag-layer {

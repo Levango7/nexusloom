@@ -77,6 +77,13 @@
   <div class="card" id="panel-tasks">
     <div class="card-header">
       <h2><svg class="ico" aria-hidden="true"><use href="#i-tasks"/></svg> Tasks</h2>
+      <select id="task-filter" class="task-filter" aria-label="按状态过滤任务">
+        <option value="all">全部</option>
+        <option value="running">运行中</option>
+        <option value="pending">等待</option>
+        <option value="done">完成</option>
+        <option value="failed">失败</option>
+      </select>
       <span id="badge-tasks" class="badge">0</span>
     </div>
     <div class="card-body">
