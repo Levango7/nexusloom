@@ -190,3 +190,39 @@ class TestDeliveriesDetailSurvivesPolling:
         detail_body = self.js.split("function renderDeliveryDetail", 1)[1]
         assert "deliveriesDetailOpen = false;" in detail_body, \
             "返回账本列表必须清旗，否则列表再也回不来"
+
+
+class TestRunsDeepLinkAndFilter:
+    """Runs 面 P0（评审 §4.2）：深链 `#/runs/{id}` 与状态过滤的接线护栏（零浏览器）。
+
+    评审原文："运行列表（状态/工作流/principal/耗时/成本/质量分）｜过滤、新建运行、
+    深链 `/#/runs/{id}`｜P0"。深链的价值是"把某一次运行发给同事/从书签直达"——
+    因此 hash→视图只能有一个真源（`routeFromHash`），且浏览器前进/后退必须同步。
+    """
+
+    def setup_method(self):
+        self.js = _read("app.js")
+        self.html = _read("index.html")
+
+    def test_hash_route_helpers_exist(self):
+        assert "RUN_HASH_PREFIX = '#/runs/'" in self.js
+        for token in ("runIdFromHash", "setRunHash", "clearRunHash", "routeFromHash"):
+            assert token in self.js, f"缺深链接线 {token}"
+        assert "addEventListener('hashchange', routeFromHash)" in self.js
+
+    def test_open_sets_hash_and_close_clears_it(self):
+        open_body = self.js.split("async function openRun", 1)[1]
+        assert "setRunHash(taskId);" in open_body, "点开运行必须写深链"
+        close_body = self.js.split("function closeRun", 1)[1]
+        assert "clearRunHash();" in close_body, "关闭运行必须清深链（否则后退链错乱）"
+        # hashchange 驱动的路径不得反向再写历史（防：每 3s 刷新写一条历史）
+        assert "openRun(id, { fromHash: true })" in self.js
+        assert "closeRun({ fromHash: true })" in self.js
+
+    def test_filter_element_and_render_wiring(self):
+        assert 'id="task-filter"' in self.html
+        assert "els.taskFilter" in self.js
+        assert "state.taskFilter" in self.js
+        # 动词级：过滤必须真按状态分类走，而不是拼个假计数
+        assert "all.filter(t => statusClass(t.status) === filter)" in self.js
+        assert "该状态下没有任务" in self.js, "过滤后空态要说清是'筛选空'，不是'没任务'"
