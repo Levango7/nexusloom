@@ -852,6 +852,13 @@ body {
 /* 节点可点 + 重试旗 + 断点角标 */
 .dag-node-clickable { cursor: pointer; }
 .dag-node-clickable:hover { border-color: var(--highlight); }
+
+/* 键盘可达（评审 10-20）：点击即操作的行/节点要能 Tab 到、且有可见焦点环 */
+.row-clickable:focus-visible,
+.dag-node-clickable:focus-visible {
+  outline: 2px solid var(--highlight);
+  outline-offset: 2px;
+}
 .dag-retried-flag {
   margin-left: auto; font-size: 0.62rem; padding: 0 5px;
   border-radius: 4px; background: var(--tint-warn); color: var(--status-warn);

@@ -183,6 +183,21 @@ def _task_paths() -> dict:
                 },
             },
         },
+        "/tasks/{task_id}/nodes/{node_name}": {
+            "get": {
+                "summary": "节点检查器（S3）：artifact 结构预览 / 幂等键 / 熔断限流态 / 质量门明细；"
+                           "跨进程运行从 RunStore 投影答（source=runstore，四类进程内明细为 null）",
+                "parameters": [
+                    {"name": "task_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                    {"name": "node_name", "in": "path", "required": True, "schema": {"type": "string"}},
+                ],
+                "responses": {
+                    "200": {"description": "节点明细"},
+                    "404": {"description": "任务或节点不存在",
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                },
+            },
+        },
         "/api/tasks": {
             "post": {
                 "summary": "提交新文档生成任务（query 自由文本 或 inputs 类型化载荷）",
