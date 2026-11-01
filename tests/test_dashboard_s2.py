@@ -261,3 +261,28 @@ class TestSettingsFace:
         """只读边界要写在界面上（不外推成'能改配置'）。"""
         assert "本面板只读" in self.js
         assert "不触发回滚" in self.js
+
+    def test_webhook_rows_only_read_fields_the_api_returns(self):
+        """前端只许读后端真返回的字段——空箭头就是这么漏出去的。
+
+        `/api/webhooks` 的响应键是 name / pipeline / enabled / secret_env / output，
+        而第一版前端渲染的是 `name → w.url`：`url` 从不存在 ⇒ 真机每个 webhook 后面都是空箭头。
+        浏览器门能抓到，但门不进 CI；这条把"字段对得上"搬进单测：后端改名或前端读不存在的字段都会红。
+        """
+        import re
+
+        admin_src = (DASH.parent / "admin_api.py").read_text(encoding="utf-8")
+        branch = admin_src.split('elif self.path == "/api/webhooks":', 1)
+        assert len(branch) == 2, "admin_api 里找不到 /api/webhooks 分支"
+        segment = branch[1].split("elif self.path", 1)[0]
+        backend_fields = set(re.findall(r'"(\w+)": w\.', segment))
+        assert backend_fields, f"解析不出 webhook 的响应字段：{segment[:200]!r}"
+        assert {"name", "pipeline"} <= backend_fields, backend_fields
+
+        rendered = self.js.split("function renderSettings", 1)[1].split("function renderError", 1)[0]
+        used = set(re.findall(r"\bw\.(\w+)", rendered))
+        assert used, "renderSettings 里没有读 webhook 字段"
+        assert used <= backend_fields | {"name"}, (
+            f"Settings 面读了后端不返回的字段：{sorted(used - backend_fields - {'name'})}"
+            f"（后端只有 {sorted(backend_fields)}）"
+        )

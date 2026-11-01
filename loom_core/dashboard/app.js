@@ -1642,7 +1642,8 @@
         'MCP 与队列没有暴露读端点（如实标注，不在这里编造）。'));
     } else {
       const rows = items.map((w, i) => ['webhook ' + (i + 1),
-        String(w.name || '') + ' → ' + String(w.url || '')]);
+        String(w.name || '') + ' → ' + String(w.pipeline || '—')
+        + (w.enabled === false ? '（已停用）' : '')]);
       wrap.appendChild(settingsSection('集成', rows,
         'MCP 与队列没有暴露读端点（如实标注，不在这里编造）。'));
     }

@@ -50,6 +50,17 @@ def check(browser, base: str) -> None:
             "dag": {"nodes": [], "layers": []},
             "awaiting_approval": {"nodes": ["gate"], "messages": {}},
         },
+        # Settings 面（评审 §4.2，只读 v1）的四源。**按后端真形状 mock**：
+        # `/api/webhooks` 只给 name/pipeline/enabled/secret_env/output，没有 url——
+        # 用作者想象的形状 mock，正好会放过"渲染一个不存在的字段"这类缺陷。
+        "/api/config": {"llm": {"model": "demo-model"}, "security": {"api_key": "sk-very-secret"},
+                        "runner": {"pool_size": 4}},
+        "/api/webhooks": {"webhooks": [{"name": "demo-hook", "pipeline": "demo.yaml",
+                                        "enabled": True, "secret_env": "HOOK_SECRET",
+                                        "output": "out"}]},
+        "/api/versions/stats": {"status": "ok", "tracked_files": 7, "total_versions": 21,
+                               "total_size_bytes": 4096, "max_versions_per_file": 5},
+        "/api/config/audit": {"audit_file": "audit/config.jsonl", "count": 2, "records": []},
     }
     statuses: dict[str, int] = {}
     posts: list[str] = []
@@ -149,6 +160,21 @@ def check(browser, base: str) -> None:
         page.locator("#token-save").click()
         expect(page.locator("#nt-pipeline option")).to_have_text(["after-login"])
         print("PASS: saving credentials reloads the workflow catalog")
+
+        # Settings 面（评审 §4.2，只读 v1）：四块真渲染 + 敏感键掩码 + 只读边界。
+        # 这一步是 PR #90 声称"真 Chrome 11 项全过"的**可复现版本**——那次是一次性脚本，
+        # 没进仓，别人没法重跑；而且它按想象的字段 mock，漏掉了 `/api/webhooks` 没有 url。
+        panel = page.locator("#panel-settings")
+        expect(panel).to_contain_text("运行配置")
+        expect(panel).to_contain_text("llm.model")
+        expect(panel).to_contain_text("***（已掩码）")
+        expect(panel).not_to_contain_text("sk-very-secret")
+        expect(panel).to_contain_text("demo-hook")
+        expect(panel).to_contain_text("demo.yaml")
+        expect(panel).to_contain_text("受跟踪文件")
+        expect(panel).to_contain_text("配置审计记录")
+        expect(panel).to_contain_text("不触发回滚")
+        print("PASS: settings face renders four sources, masks secrets and states read-only")
         assert not errors, errors
     finally:
         page.close()
