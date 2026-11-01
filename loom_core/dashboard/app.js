@@ -16,6 +16,9 @@
   /* 交付账本一次拉几条：面板要能一眼看完，明细是点开才取的。 */
   const DELIVERIES_LIMIT = 8;
 
+  /* Runs 面深链（评审 §4.2）：#/runs/<task_id> 直达运行详情，浏览器后退回列表。 */
+  const RUN_HASH_PREFIX = '#/runs/';
+
   // ----------------------------------------------------------
   // State
   // ----------------------------------------------------------
@@ -27,6 +30,7 @@
     error: null,
     lastUpdated: null,
     loaded: false,
+    taskFilter: 'all',
   };
 
   let refreshTimer = null;
@@ -60,6 +64,7 @@
     els.qualityPanel   = $('#panel-quality .card-body');
     els.costPanel      = $('#panel-cost .card-body');
     els.logsPanel      = $('#panel-logs .card-body');
+    els.taskFilter     = $('#task-filter');
 
     // New task form
     els.newTaskForm    = $('#newtask-form');
@@ -297,14 +302,19 @@
 
       /* ---- Tasks (top-right) ---- */
   function renderTasks (data) {
-    const tasks = (data && data.tasks) || [];
-    const count = data && data.task_count != null ? data.task_count : tasks.length;
+    const all = (data && data.tasks) || [];
+    const count = data && data.task_count != null ? data.task_count : all.length;
+    // Runs 面状态过滤（评审 §4.2）：只影响列表，徽章仍报总任务数。
+    const filter = state.taskFilter || 'all';
+    const tasks = filter === 'all' ? all
+      : all.filter(t => statusClass(t.status) === filter);
 
     // Update badge
     if (els.badgeTasks) els.badgeTasks.textContent = count;
 
     if (!tasks.length) {
-      els.tasksPanel.replaceChildren(emptyState('i-tasks', '暂无活跃任务'));
+      els.tasksPanel.replaceChildren(emptyState(
+        'i-tasks', filter === 'all' ? '暂无活跃任务' : '该状态下没有任务'));
       return;
     }
 
@@ -415,8 +425,45 @@
     return (ms / 1000).toFixed(1) + 's';
   }
 
-  async function openRun (taskId) {
+  // ── Runs 面深链（评审 §4.2）：#/runs/<task_id> 与列表点击共用一条路由 ──
+  function runIdFromHash () {
+    const h = String(location.hash || '');
+    if (!h.startsWith(RUN_HASH_PREFIX)) return null;
+    const raw = h.slice(RUN_HASH_PREFIX.length);
+    try { return decodeURIComponent(raw) || null; } catch (e) { return raw || null; }
+  }
+
+  function setRunHash (taskId) {
+    const want = RUN_HASH_PREFIX + encodeURIComponent(String(taskId));
+    if (location.hash === want) return;
+    try {
+      location.hash = want;   // 进历史栈：浏览器后退即回列表
+    } catch (e) { /* file:// 等环境限制：退化但不阻断打开 */ }
+  }
+
+  function clearRunHash () {
+    if (!location.hash) return;
+    try {
+      history.replaceState(null, '', location.pathname + location.search);
+    } catch (e) {
+      location.hash = '';
+    }
+  }
+
+  /* hash → 视图：深链直达、浏览器前进/后退都只走这一处 */
+  function routeFromHash () {
+    const id = runIdFromHash();
+    if (id) {
+      if (currentRunId !== id) openRun(id, { fromHash: true });
+    } else if (currentRunId) {
+      closeRun({ fromHash: true });
+    }
+  }
+
+  async function openRun (taskId, opts) {
     if (!taskId) return;
+    if (!opts || !opts.fromHash) setRunHash(taskId);
+    if (currentRunId === taskId && !runPanel.hidden) return;
     currentRunId = taskId;
     document.querySelectorAll('.card').forEach(c => {
       if (c.id !== 'panel-run') c.hidden = true;
@@ -429,7 +476,8 @@
     runTimer = setInterval(refreshRun, 3000);
   }
 
-  function closeRun () {
+  function closeRun (opts) {
+    if (!opts || !opts.fromHash) clearRunHash();
     if (runTimer) { clearInterval(runTimer); runTimer = null; }
     if (inspectorTimer) { clearInterval(inspectorTimer); inspectorTimer = null; }
     currentRunId = null;
@@ -1558,8 +1606,19 @@
         if (e.key === 'Enter') saveToken();
       });
     }
+    // Runs 面状态过滤（评审 §4.2）：选择即重画列表，不等下一轮轮询。
+    if (els.taskFilter) {
+      state.taskFilter = els.taskFilter.value || 'all';
+      els.taskFilter.addEventListener('change', () => {
+        state.taskFilter = els.taskFilter.value || 'all';
+        renderTasks(state.tasks);
+      });
+    }
+    // 深链：URL 带 #/runs/<id> 首屏直达；前进/后退同步视图。
+    window.addEventListener('hashchange', routeFromHash);
     els.lastUpdated.textContent = 'Loading…';
     update().then(scheduleRefresh).catch(() => scheduleRefresh());
+    routeFromHash();
   }
 
   if (document.readyState === 'loading') {
