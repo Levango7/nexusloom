@@ -226,3 +226,63 @@ class TestRunsDeepLinkAndFilter:
         # 动词级：过滤必须真按状态分类走，而不是拼个假计数
         assert "all.filter(t => statusClass(t.status) === filter)" in self.js
         assert "该状态下没有任务" in self.js, "过滤后空态要说清是'筛选空'，不是'没任务'"
+
+
+class TestSettingsFace:
+    """Settings 面 v1（评审 §4.2，P2 只读先行）的接线护栏（零浏览器）。
+
+    只读面四源：/api/config（运行配置快照）、/api/webhooks（集成）、
+    /api/versions/stats + /api/config/audit（版本与配置审计）；预算复用 /api/cost。
+    写操作（配置更新/调预算/版本回滚）需要 X-Confirm + admin，本批刻意不做。
+    """
+
+    def setup_method(self):
+        self.js = _read("app.js")
+        self.html = _read("index.html")
+
+    def test_panel_markup_exists(self):
+        assert 'id="panel-settings"' in self.html
+        assert 'id="badge-settings"' in self.html
+
+    def test_four_sources_are_wired(self):
+        for ep in ("/api/config'", "/api/webhooks'", "/api/versions/stats'",
+                   "/api/config/audit'"):
+            assert "API_BASE + '" + ep in self.js, f"Settings 缺数据源 {ep}"
+        assert "renderSettings(state.settings)" in self.js
+        assert "state.settings = data.settings;" in self.js
+
+    def test_sensitive_keys_are_masked(self):
+        """即便后端将来把密钥放进快照，前端也不得原样渲染。"""
+        assert "maskConfigValue" in self.js
+        assert "key|secret|token|password" in self.js
+        assert "***（已掩码）" in self.js
+
+    def test_read_only_scope_is_stated(self):
+        """只读边界要写在界面上（不外推成'能改配置'）。"""
+        assert "本面板只读" in self.js
+        assert "不触发回滚" in self.js
+
+    def test_webhook_rows_only_read_fields_the_api_returns(self):
+        """前端只许读后端真返回的字段——空箭头就是这么漏出去的。
+
+        `/api/webhooks` 的响应键是 name / pipeline / enabled / secret_env / output，
+        而第一版前端渲染的是 `name → w.url`：`url` 从不存在 ⇒ 真机每个 webhook 后面都是空箭头。
+        浏览器门能抓到，但门不进 CI；这条把"字段对得上"搬进单测：后端改名或前端读不存在的字段都会红。
+        """
+        import re
+
+        admin_src = (DASH.parent / "admin_api.py").read_text(encoding="utf-8")
+        branch = admin_src.split('elif self.path == "/api/webhooks":', 1)
+        assert len(branch) == 2, "admin_api 里找不到 /api/webhooks 分支"
+        segment = branch[1].split("elif self.path", 1)[0]
+        backend_fields = set(re.findall(r'"(\w+)": w\.', segment))
+        assert backend_fields, f"解析不出 webhook 的响应字段：{segment[:200]!r}"
+        assert {"name", "pipeline"} <= backend_fields, backend_fields
+
+        rendered = self.js.split("function renderSettings", 1)[1].split("function renderError", 1)[0]
+        used = set(re.findall(r"\bw\.(\w+)", rendered))
+        assert used, "renderSettings 里没有读 webhook 字段"
+        assert used <= backend_fields | {"name"}, (
+            f"Settings 面读了后端不返回的字段：{sorted(used - backend_fields - {'name'})}"
+            f"（后端只有 {sorted(backend_fields)}）"
+        )

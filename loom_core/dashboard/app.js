@@ -31,6 +31,7 @@
     lastUpdated: null,
     loaded: false,
     taskFilter: 'all',
+    settings: null,
   };
 
   let refreshTimer = null;
@@ -86,6 +87,8 @@
     els.badgeQuality   = $('#badge-quality');
     els.badgeCost      = $('#badge-cost');
     els.badgeLogs      = $('#badge-logs');
+    els.settingsPanel  = $('#panel-settings .card-body');
+    els.badgeSettings  = $('#badge-settings');
   }
 
   // ----------------------------------------------------------
@@ -217,6 +220,11 @@
       fetchJson(API_BASE + '/api/logs?limit=30&since=86400'),
       fetchJson(API_BASE + '/api/approvals'),
       fetchJson(API_BASE + '/api/deliveries?limit=' + DELIVERIES_LIMIT),
+      /* Settings 面（评审 §4.2，只读 v1）的四源 */
+      fetchJson(API_BASE + '/api/config'),
+      fetchJson(API_BASE + '/api/webhooks'),
+      fetchJson(API_BASE + '/api/versions/stats'),
+      fetchJson(API_BASE + '/api/config/audit'),
     ]);
     const settle = (r) => {
       if (r.status === 'fulfilled') return r.value;
@@ -234,6 +242,12 @@
       logs: settle(results[4]),
       approvals: settle(results[5]),
       deliveries: settle(results[6]),
+      settings: {
+        config: settle(results[7]),
+        webhooks: settle(results[8]),
+        versionStats: settle(results[9]),
+        configAudit: settle(results[10]),
+      },
       failedCount: results.filter(r => r.status === 'rejected'
         && (!r.reason || r.reason.status !== 403)).length,
     };
@@ -1296,6 +1310,7 @@
       state.logs = data.logs;
       state.approvals = data.approvals;
       state.deliveries = data.deliveries;
+      state.settings = data.settings;
       state.partialFail = data.failedCount > 0;
 
       // If all endpoints failed, treat it as offline
@@ -1329,6 +1344,7 @@
     renderCost(state.cost);
     renderLogs(state.logs);
     renderDeliveries(state.deliveries);
+    renderSettings(state.settings);
   }
 
   /* ---- Approvals（跨运行待批收件箱） ---- */
@@ -1544,6 +1560,117 @@
       if (block) wrap.appendChild(block);
     }
     els.deliveriesPanel.replaceChildren(wrap);
+  }
+
+  /* ---- Settings（评审 §4.2 Settings 面 v1：只读） ----
+     数据源：/api/config（运行配置快照）、/api/webhooks（集成）、
+     /api/versions/stats + /api/config/audit（版本与配置审计）；预算复用 /api/cost。
+     只读不写：写操作（配置更新/调预算/版本回滚）要 X-Confirm + admin，留待后续批。 */
+  function maskConfigValue (key, value) {
+    // 防御性掩码：即便后端将来把密钥放进快照，这里也不把值原样画出来
+    if (/key|secret|token|password|passwd|credential/i.test(String(key))) {
+      return '***（已掩码）';
+    }
+    if (Array.isArray(value)) return value.join(', ');
+    if (value == null) return '—';
+    return String(value);
+  }
+
+  function flattenConfig (obj, prefix, out) {
+    for (const k of Object.keys(obj || {}).sort()) {
+      const v = obj[k];
+      const path = prefix ? prefix + '.' + k : k;
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        flattenConfig(v, path, out);
+      } else {
+        out.push([path, maskConfigValue(path, v)]);
+      }
+    }
+    return out;
+  }
+
+  function settingsSection (title, rows, note) {
+    const block = elt('div', 'insp-block');
+    block.appendChild(elt('h4', null, title));
+    for (const [label, value, cls] of rows) {
+      block.appendChild(inspectorRow(label, value, cls));
+    }
+    if (note) block.appendChild(elt('div', 'insp-note', note));
+    return block;
+  }
+
+  function renderSettings (data) {
+    if (!data || !els.settingsPanel) return;
+    const wrap = document.createDocumentFragment();
+
+    /* 运行配置快照（敏感键已掩码） */
+    const cfg = data.config || {};
+    if (cfg.__error || cfg.__forbidden) {
+      wrap.appendChild(settingsSection('运行配置',
+        [['读取', cfg.__forbidden ? '需要 admin 权限' : '失败：' + cfg.__error, 'insp-muted']]));
+    } else {
+      wrap.appendChild(settingsSection('运行配置（GET /api/config · 敏感键已掩码）',
+        flattenConfig(cfg, '', []),
+        '进程当前的运行配置快照；修改走 POST /api/config（需 X-Confirm + admin），本面板只读。'));
+    }
+
+    /* 预算（复用 cost 载荷） */
+    const cost = state.cost || {};
+    if (cost.__error || cost.__forbidden) {
+      wrap.appendChild(settingsSection('预算',
+        [['读取', cost.__forbidden ? '需要 admin 权限' : '失败：' + cost.__error, 'insp-muted']]));
+    } else {
+      const budget = Number(cost.budget) > 0 ? '$' + Number(cost.budget).toFixed(2) : '不限';
+      const remaining = cost.budget_remaining == null
+        ? '不限' : '$' + Number(cost.budget_remaining).toFixed(4);
+      wrap.appendChild(settingsSection('预算', [
+        ['总预算', budget, 'mono'],
+        ['剩余', remaining, 'mono'],
+        ['已超支', cost.budget_exceeded ? '是' : '否',
+          cost.budget_exceeded ? 'insp-warn' : 'insp-ok'],
+      ], '预算熔断线来自 /api/cost；调预算走 POST /api/cost/budget（本面板只读）。'));
+    }
+
+    /* 集成 */
+    const hooks = data.webhooks || {};
+    const items = Array.isArray(hooks.webhooks) ? hooks.webhooks : [];
+    if (hooks.__error || hooks.__forbidden) {
+      wrap.appendChild(settingsSection('集成',
+        [['webhook', hooks.__forbidden ? '需要 admin 权限' : '失败：' + hooks.__error, 'insp-muted']]));
+    } else if (!items.length) {
+      wrap.appendChild(settingsSection('集成', [['webhook', '未配置', 'insp-muted']],
+        'MCP 与队列没有暴露读端点（如实标注，不在这里编造）。'));
+    } else {
+      const rows = items.map((w, i) => ['webhook ' + (i + 1),
+        String(w.name || '') + ' → ' + String(w.pipeline || '—')
+        + (w.enabled === false ? '（已停用）' : '')]);
+      wrap.appendChild(settingsSection('集成', rows,
+        'MCP 与队列没有暴露读端点（如实标注，不在这里编造）。'));
+    }
+
+    /* 版本与配置审计 */
+    const vs = data.versionStats || {};
+    const ca = data.configAudit || {};
+    const vrows = [];
+    if (vs.__error || vs.__forbidden) {
+      vrows.push(['版本', vs.__forbidden ? '需要 admin 权限' : '失败：' + vs.__error, 'insp-muted']);
+    } else {
+      vrows.push(['受跟踪文件', String(vs.tracked_files == null ? '—' : vs.tracked_files), 'mono']);
+      vrows.push(['版本总数', String(vs.total_versions == null ? '—' : vs.total_versions), 'mono']);
+      vrows.push(['占用', fmtBytes(vs.total_size_bytes), 'mono']);
+      vrows.push(['单文件上限',
+        String(vs.max_versions_per_file == null ? '—' : vs.max_versions_per_file) + ' 版', 'mono']);
+    }
+    if (ca.__error || ca.__forbidden) {
+      vrows.push(['配置审计', ca.__forbidden ? '需要 admin 权限' : '失败：' + ca.__error, 'insp-muted']);
+    } else {
+      vrows.push(['配置审计记录', String(ca.count == null ? '—' : ca.count), 'mono']);
+    }
+    wrap.appendChild(settingsSection('版本与配置审计', vrows,
+      '来源：/api/versions/stats 与 /api/config/audit；只读展示，不触发回滚。'));
+
+    els.settingsPanel.replaceChildren(wrap);
+    if (els.badgeSettings) els.badgeSettings.textContent = '只读';
   }
 
   function renderError () {
