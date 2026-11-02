@@ -56,6 +56,7 @@
     els.tokenPrompt    = $('#token-prompt');
     els.tokenInput     = $('#token-input');
     els.tokenSave      = $('#token-save');
+    els.themeToggle    = $('#theme-toggle');
 
     // Panel containers
     els.statusPanel    = $('#panel-status .card-body');
@@ -186,6 +187,31 @@
   const TOKEN_KEY = 'docpipe_token';
 
   function getToken () { return sessionStorage.getItem(TOKEN_KEY) || ''; }
+
+  /* ---- 主题（浅色默认；data-theme 切换；偏好持久化到 localStorage） ---- */
+  const THEME_KEY = 'loom_dashboard_theme';
+
+  function applyTheme (theme) {
+    const t = theme === 'dark' ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', t);
+    if (els.themeToggle) {
+      els.themeToggle.textContent = t === 'dark' ? '浅色' : '深色';
+    }
+  }
+
+  function initTheme () {
+    let stored = '';
+    try { stored = localStorage.getItem(THEME_KEY) || ''; } catch (e) { /* 隐私模式 */ }
+    applyTheme(stored === 'dark' ? 'dark' : 'light');
+    if (els.themeToggle) {
+      els.themeToggle.addEventListener('click', () => {
+        const now = document.documentElement.getAttribute('data-theme') === 'dark'
+          ? 'light' : 'dark';
+        applyTheme(now);
+        try { localStorage.setItem(THEME_KEY, now); } catch (e) { /* 忽略 */ }
+      });
+    }
+  }
 
   async function fetchJson (url) {
     const token = getToken();
@@ -1713,6 +1739,7 @@
   // ----------------------------------------------------------
   function init () {
     cacheDom();
+    initTheme();
     if (els.retryBtn) els.retryBtn.addEventListener('click', handleRetry);
     if (els.newTaskForm) els.newTaskForm.addEventListener('submit', submitTask);
     if (runBack) runBack.addEventListener('click', closeRun);
