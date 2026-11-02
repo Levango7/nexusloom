@@ -286,3 +286,74 @@ class TestSettingsFace:
             f"Settings 面读了后端不返回的字段：{sorted(used - backend_fields - {'name'})}"
             f"（后端只有 {sorted(backend_fields)}）"
         )
+
+
+class TestDashboardTheme:
+    """视觉改版 v1（2026-10-31 用户反馈"太暗/阴沉、内容乱杂"）。
+
+    契约：浅色为默认（旧深色只在 `[data-theme=dark]` 下存活）；切换按钮把选择
+    持久化到 localStorage；主操作（新建任务）前置到首屏；浅色主题里不得残留
+    "只在深色下成立"的白色高光与旧主题深蓝底。
+    """
+
+    def setup_method(self):
+        self.js = _read("app.js")
+        self.html = _read("index.html")
+        self.css = _read("style.css")
+
+    def test_default_is_light(self):
+        assert "color-scheme: light" in self.css
+        # 2026-11-02 用户反馈：卡片与底布界限不分明 → 底布压深到 #e9edf5、卡身纯白、边框加深
+        assert "--bg-body: #e9edf5" in self.css
+        assert "--bg-card: #ffffff" in self.css
+
+    def test_dark_override_exists(self):
+        assert '[data-theme="dark"]' in self.css
+        assert "--bg-body: #0b0f16" in self.css
+
+    def test_card_vs_backdrop_layering_is_visible(self):
+        """卡片必须在底布上"浮起来"：底布与卡身不同色 + 边框比两者都深。
+
+        用户原话：「card 的边框线 和 底布 之间 界限分明一点，背景色也要有点区别」。
+        判据按 token 语义钉：三者在亮度上必须拉开（不是只差一两个色阶）。
+        """
+        def lum(hex_color: str) -> float:
+            hex_color = hex_color.lstrip("#")
+            rgb = [int(hex_color[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+            lin = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+            return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+        def ratio(a: str, b: str) -> float:
+            la, lb = sorted((lum(a), lum(b)), reverse=True)
+            return (la + 0.05) / (lb + 0.05)
+
+        for theme, body, card, border in (
+            ("light", "#e9edf5", "#ffffff", "#d3dae7"),
+            ("dark", "#0b0f16", "#1a2231", "#33405a"),
+        ):
+            assert card in self.css, theme
+            assert border in self.css, theme
+            # 卡身 vs 底布：≥1.15 才"看得出区别"（深色主题用绝对亮度差会天然偏小，故用比率）
+            assert ratio(card, body) >= 1.15, f"{theme}: 卡身与底布对比不足 {ratio(card, body):.2f}"
+            # 边框对两侧都≥1.15：卡界这条线本身要看得出
+            assert ratio(border, card) >= 1.15, f"{theme}: 边框对卡身对比不足 {ratio(border, card):.2f}"
+            assert ratio(border, body) >= 1.15, f"{theme}: 边框对底布对比不足 {ratio(border, body):.2f}"
+
+    def test_toggle_wiring_persists_choice(self):
+        assert 'id="theme-toggle"' in self.html
+        for token in ("THEME_KEY", "applyTheme", "initTheme", "data-theme",
+                      "localStorage.setItem(THEME_KEY"):
+            assert token in self.js, f"主题接线缺 {token}"
+
+    def test_light_theme_has_no_dark_only_highlights(self):
+        css = self.css
+        start = css.index('[data-theme="dark"]')
+        end = css.index('}', css.index("--shadow", start)) + 1
+        outside = (css[:start] + css[end:]).replace(" ", "")
+        assert "rgba(255,255,255" not in outside, \
+            "浅色主题里残留只在深色成立的白色高光"
+        assert "rgba(15,52,96" not in outside, "残留旧主题深蓝底色"
+
+    def test_primary_action_first(self):
+        assert self.html.index('id="panel-newtask"') < self.html.index(
+            'id="panel-approvals"'), "新建任务（主操作）必须前置到首屏"
