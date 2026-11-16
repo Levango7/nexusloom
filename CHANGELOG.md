@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.18.0] - 2026-11-17
+
 ### Fixed（2026-11-17，交付演练 D1：`/api/health/deep` message_bus 恒 unhealthy）
 
 - `MessageBus.health()` 补真生命位 `running`（worker 线程未 shutdown）：此前返回
