@@ -187,7 +187,7 @@ for art in client.artifacts(task["id"]):
 | `loom pack new <name>` | 生成新 pack 骨架（目录 + 模板文件；只生成，不注册不校验） |
 | `loom plugin list` | 列出全部 Agent / 插件（含来源标记） |
 | `loom demo` | 离线体验：沙盒里跑一次完整交付（无网络无 Key；沙盒建在 cwd 下） |
-| `loom reconcile` | 只读对账报告：列队列×投影的 stale-running 漂移（三类）+ 最后事件时间；不自动杀进程、不写库 |
+| `loom reconcile` | 对账报告：列队列×投影的 stale-running 漂移（三类）+ 最后事件时间；默认只读、不写库。`--reap` 显式回收确证死亡的①类僵尸（终态 cancelled＋投影盖章＋`run.reaped` 审计事件；慢任务防护＝owner_pid 存活一律不碰） |
 
 **其余参数**（服务/运维开关保持 flag）：
 
@@ -1157,7 +1157,10 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3932 个测试本机全绿**（`3932 passed, 25 skipped, 6 deselected`，2026-11-13 按 +1 条
+**3945 个测试本机全绿**（`3945 passed, 25 skipped, 6 deselected`，2026-11-16 按 +13 条
+（A7-C 僵尸回收：`tests/test_reconcile_reap.py` +13——端到端四处落点/负控零写入/幂等/
+dry-run 零写/竞态跳过/投影已终态不覆写/投影缺失自建行/失败隔离/env 门/CLI 人类＋JSON
+双通道/旗标翻译与拒收）自 3932 同 skipped 集推为；2026-11-13 按 +1 条
 （T8 A1 真 PG 判据腿：`tests/test_approvals.py` TestApprovalDurableOnPostgres，本机无 PG
 整类 skip，passed 不变、skipped 24→25）自 3932 推为；2026-11-12 按 +12 条
 （T6 控制台 UI 批：交付物下载端点 9 条（`tests/test_deliveries_api.py`：逐字节流 +

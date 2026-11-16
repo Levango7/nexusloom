@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added（2026-11-16，A7-C 僵尸运行回收）
+
+- **`loom reconcile --reap`**：把「确证死亡」的 stale-running 行终态收尾为
+  `cancelled`——只动分类①（队列 running＋开始时间超过阈值＋owner_pid 已死/缺失，
+  判据与只读报告同源）；每行写 `run.reaped` 审计事件（与执行事实可区分）并盖
+  终态投影（缺失的投影行由事件写入顺带补齐，`close_run` 条件 UPDATE 保证至多
+  一条终态事件），队列健康位先悲观（incomplete）后升格（ok）。**慢任务防护**：
+  owner_pid 存活的行一律不碰（写前复检）；不加 `--reap` 时行为与既往完全一致
+  （只读、不写库）。②projection-running／③projection-unstamped 仍归补账
+  （`--replay-*`）与人工，reaper 只在输出里给出剩余计数。
+- **`LOOM_REAP_STALE_SECONDS`**（默认关）：管理 API 服务启动时显式设置才跑一次
+  启动回收（未设/非法/≤0 不跑；失败只记日志、不挡启动）。与 `--recover` 的
+  「翻回 pending 重试」互补：recover 给任务第二次机会，reap 宣告它死亡
+  （终态 cancelled，不再重试）。
+- 判据：`test_reconcile_reap.py` +13（端到端四处落点／负控零写入／幂等／
+  dry-run／竞态跳过／投影已终态不覆写／投影缺失自建行／失败隔离／env 门／
+  CLI 人类＋JSON 双通道／旗标脱离动词拒收）。
+
 ### Added（2026-11-11，T6 控制台 UI 批：声明式输入表单 + 交付物下载）
 
 - **控制台新建任务面按声明渲染表单**：选中声明了 `inputs` 的流水线时，自由文本框让位给
