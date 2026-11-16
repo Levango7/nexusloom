@@ -446,7 +446,12 @@ class MessageBus:
     # ─── 查询 ─────────────────────────────────
 
     def health(self) -> dict:
-        result = {"status": "ok", "subscribers": len(self._subscribers)}
+        # `running` 是真生命位（worker 线程未 shutdown）：/api/health/deep 用它判
+        # message_bus 组件的 healthy/unhealthy。此前只暴露 status 常量、无运行位
+        # ⇒ 消费端 .get("running") 恒 None ⇒ 组件恒 unhealthy（2026-11-17 交付演练
+        # D1 实证：shipped 3.17.0 与 main 同源）。
+        result = {"status": "ok", "running": self._worker_running,
+                  "subscribers": len(self._subscribers)}
         store = self._get_store()
         if store:
             result["store"] = store.health()

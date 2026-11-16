@@ -1157,7 +1157,10 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3945 个测试本机全绿**（`3945 passed, 25 skipped, 6 deselected`，2026-11-16 按 +13 条
+**3947 个测试本机全绿**（`3947 passed, 25 skipped, 6 deselected`，2026-11-17 按 +2 条
+（交付演练 D1：真总线 `running` 生命周期钉 + admin health_deep 真总线判 healthy，
+均入 `tests/test_message_bus_v3.py`／`tests/test_admin_api_ext.py`）自 3945 同 skipped 集推为；
+2026-11-16 按 +13 条
 （A7-C 僵尸回收：`tests/test_reconcile_reap.py` +13——端到端四处落点/负控零写入/幂等/
 dry-run 零写/竞态跳过/投影已终态不覆写/投影缺失自建行/失败隔离/env 门/CLI 人类＋JSON
 双通道/旗标翻译与拒收）自 3932 同 skipped 集推为；2026-11-13 按 +1 条

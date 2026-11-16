@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed（2026-11-17，交付演练 D1：`/api/health/deep` message_bus 恒 unhealthy）
+
+- `MessageBus.health()` 补真生命位 `running`（worker 线程未 shutdown）：此前返回
+  dict 无该键，而 `/api/health/deep` 以 `bus_h.get("running")` 判组件状态 ⇒ 恒
+  `None` ⇒ message_bus 永远 unhealthy、overall 永远 degraded（shipped 3.17.0 与
+  main 同源实证；干净环境 dashboard 首屏即"假红"）。双重掩盖已定点：admin 侧
+  测试用 MagicMock 喂假形状、`test_api_extensions` 对真总线却用恒真断言。
+  判据三钉：真总线 `running` 生命周期（True→shutdown→False）／admin health_deep
+  换**真总线**判 healthy（非 mock）／恒真断言收紧为 `== "healthy"`。
+
 ### Added（2026-11-16，A7-C 僵尸运行回收）
 
 - **`loom reconcile --reap`**：把「确证死亡」的 stale-running 行终态收尾为

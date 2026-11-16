@@ -101,6 +101,19 @@ class TestMessageBusBackpressure:
         assert "peak_depth" in h
         assert "backpressure_watermark" in h
 
+    def test_health_exposes_running_lifecycle(self):
+        """`health()["running"]` 是真生命位：alive=True、shutdown 后 False。
+
+        2026-11-17 交付演练 D1 回归钉：此前 health() 无 running 键，消费端
+        （/api/health/deep）`.get("running")` 恒 None ⇒ 组件恒 unhealthy。
+        """
+        b = MessageBus(db_path=":memory:")
+        try:
+            assert b.health()["running"] is True
+        finally:
+            b.shutdown()
+        assert b.health()["running"] is False
+
 
 class TestMessageBusDLQ:
     """死信队列"""

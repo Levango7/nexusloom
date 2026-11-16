@@ -192,7 +192,10 @@ class TestAdminAPIEndpoints:
         result["components"]["checkpoint"] = {
             "status": "healthy" if orch.checkpoint_dir.exists() else "degraded",
         }
-        assert result["components"]["message_bus"]["status"] in ("healthy", "unhealthy")
+        # 真总线 + 真判据：alive 的 bus 必须判 healthy。旧断言
+        # `in ("healthy", "unhealthy")` 是恒真形态，2026-11-17 交付演练 D1 断言之——
+        # 它掩盖了 bus.health() 缺 running 键、组件恒 unhealthy 的缺陷。
+        assert result["components"]["message_bus"]["status"] == "healthy"
         assert result["components"]["registry"]["agent_count"] > 0
 
     def test_hook_register_via_api(self):

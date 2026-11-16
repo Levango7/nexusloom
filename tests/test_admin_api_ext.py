@@ -651,6 +651,35 @@ class TestHealthDeepAndCaches:
         assert data["components"]["checkpoint"]["status"] == "healthy"
         assert data["overall"] in ("healthy", "degraded")
 
+    def test_health_deep_real_bus_reports_healthy(self, handler, tmp_path):
+        """真 MessageBus（非 mock）：message_bus 组件必须 healthy。
+
+        2026-11-17 交付演练 D1：mock 形状掩盖了 bus.health() 缺 running 键的
+        缺陷（消费端 .get("running") 恒 None ⇒ 恒 unhealthy），这里换真对象钉死。
+        """
+        from loom_core.message_bus_v3 import MessageBus
+
+        bus = MessageBus(db_path=str(tmp_path / "bus.db"))
+        try:
+            handler.orch.bus = bus
+            handler.orch.registry.list.return_value = [{"name": "writer"}]
+            handler.orch.checkpoint_dir = tmp_path
+            handler.orch._cb_registry.list.return_value = []
+            router = MagicMock()
+            router.list_providers.return_value = ["p1"]
+            router.get_active.return_value = "p1"
+            mgr = MagicMock()
+            mgr.list_engines.return_value = []
+            with patch("loom_core.llm_router.get_router", return_value=router), \
+                    patch("artesian.search_engines.SearchEngineManager.from_env",
+                          return_value=mgr):
+                handler._handle_health_deep()
+            data = handler._json.call_args[0][0]
+            assert data["components"]["message_bus"]["status"] == "healthy"
+            assert data["components"]["message_bus"]["details"]["running"] is True
+        finally:
+            bus.shutdown()
+
     def test_health_deep_component_errors(self, handler, tmp_path):
         handler.orch.bus.health.return_value = {"running": False}
         handler.orch.registry.list.return_value = []
