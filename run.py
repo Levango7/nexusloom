@@ -659,7 +659,7 @@ def _run_daemon(orch: PipelineOrchestrator) -> None:
 
 # ─── CLI 动词收敛（spec §7.3 第 7 步 / §5.3 CLI 行）─────────────
 #: 七个动词：run / plan / lock / pack / plugin / demo / reconcile
-#（demo = A4 离线体验；reconcile = A7 只读对账报告）
+#（demo = A4 离线体验；reconcile = A7 对账报告，默认只读，--reap 显式回收）
 VERBS = ("run", "plan", "lock", "pack", "plugin", "demo", "reconcile")
 
 _PACK_ACTIONS = {"list": "pack_list", "check": "pack_check", "new": "pack_new"}
@@ -726,7 +726,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
   loom pack new <name>  生成新 pack 骨架（目录 + 模板文件，不注册不校验）
   loom plugin list      列出全部 Agent / 插件（含来源标记）
   loom demo             离线体验：沙盒里跑一次完整交付（无网络无 Key）
-  loom reconcile        只读对账报告：列队列×投影 stale-running 漂移（不杀进程不写库）
+  loom reconcile        只读对账报告：列队列×投影 stale-running 漂移（默认不杀进程不写库；
+                        --reap 显式回收确证死亡的①类僵尸行）
 
 示例:
   # 运行完整流水线 (自动发现 pipeline YAML；动词可省)
@@ -808,6 +809,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="回收 running 行的租约阈值（秒）")
     parser.add_argument("--stale-seconds", type=float, default=900.0,
                         help="reconcile 报告判 running 行过期的阈值（秒），默认与 --lease-stale 同口径")
+    parser.add_argument("--reap", action="store_true",
+                        help="reconcile 执行器：把确证死亡的 stale-running 行（owner_pid "
+                             "已死/缺失且过期）收尾为 cancelled 并盖终态投影；不加此旗标"
+                             "＝只读报告，什么都不写")
     parser.add_argument("--triggers", action="store_true",
                         help="定时触发常驻模式：按 triggers.yaml 的 cron 提交 run（Ctrl+C 退出）")
     parser.add_argument("--triggers-file", default=None,
@@ -880,6 +885,11 @@ def main():
                                     "plugin_list",
                                     "demo", "reconcile"):
         parser.error('input required (or use verbs loom plan/lock/pack/plugin/demo/reconcile, or flags like --check)')
+
+    # --reap 是 reconcile 的执行器旗标：脱离该动词时静默忽略最危险——会让操作者
+    # 以为「回收过了」而其实跑的是普通 run，直接拒收。
+    if args.reap and verb_action != "reconcile":
+        parser.error("--reap 只在 loom reconcile 动词下生效（例：loom reconcile --reap）")
 
     print_banner()
 
@@ -1022,13 +1032,40 @@ def main():
         orch.shutdown()
         return
 
-    # ─── 只读对账报告（loom reconcile，A7）─────────────────
-    # 只报告、不修复：不自动杀进程、不写库（与 --recover 的回收写库语义刻意
-    # 分开；人在圈内看了报告再决定动什么）。三类判据见 loom_core/reconcile.py。
+    # ─── 对账报告与回收（loom reconcile，A7/A7-C）─────────────
+    # 默认只报告、不修复：不自动杀进程、不写库（与 --recover 的回收重试语义
+    # 刻意分开；人在圈内看了报告再决定动什么）。--reap 显式回收确证死亡的
+    # ①类僵尸行（终态 cancelled＋投影盖章＋run.reaped 审计事件）。三类判据
+    # 见 loom_core/reconcile.py。
     if verb_action == "reconcile":
-        from loom_core.reconcile import stale_running_report
+        from loom_core.reconcile import reap_stale_running, stale_running_report
         from loom_core.run_store import RunStore
         from loom_core.task_queue import TaskQueue
+
+        if args.reap:
+            res = reap_stale_running(TaskQueue(), RunStore(),
+                                     stale_seconds=args.stale_seconds)
+            if args.json_output:
+                out = _RESULT_OUT if _RESULT_OUT is not None else sys.stdout
+                print(json.dumps(res, ensure_ascii=False), file=out)
+                out.flush()
+            else:
+                print(f"[reap] 僵尸回收（stale_seconds={args.stale_seconds}；"
+                      f"仅 ①stale-owner-dead，②③未动）")
+                for r in res["reaped"]:
+                    print(f"  [reaped] task={r['task_id']} "
+                          f"pid={r['owner_pid'] or '—'} "
+                          f"projection_closed={r['projection_closed']} "
+                          f"marker_upgraded={r['marker_upgraded']}")
+                for r in res["skipped"]:
+                    print(f"  [skipped] task={r['task_id']} {r['reason']}")
+                for r in res["failed"]:
+                    print(f"  [failed] task={r['task_id']} {r['reason']}")
+                print(f"[reap] 回收 {len(res['reaped'])} 行、"
+                      f"跳过 {len(res['skipped'])} 行、失败 {len(res['failed'])} 行；"
+                      f"其余 {res['other_categories']} 行属 ②③ 类未动"
+                      f"（incomplete 走补账、其余人工）")
+            return
 
         rows = stale_running_report(TaskQueue(), RunStore(),
                                     stale_seconds=args.stale_seconds)

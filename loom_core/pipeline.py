@@ -570,6 +570,26 @@ class PipelineOrchestrator:
         """批量补账：当前所有 `incomplete` 运行。"""
         return self._backfill().replay_incomplete(limit=limit, dry_run=dry_run)
 
+    def reap_stale_runs(self, stale_seconds: float = 900.0) -> dict:
+        """A7-C：回收确证死亡的 stale-running 行（显式动作；只动分类①）。
+
+        与 `recover_tasks()`（翻回 pending 重试）互补：这里是终态收尾
+        （cancelled，不再重试）。语义与安全边界见
+        `loom_core.reconcile.reap_stale_running`。
+        """
+        from .reconcile import reap_stale_running
+
+        store = self._runstore()
+        if store is None:
+            # 分类①的判据（run_status/last_event_ts）在投影侧——读口建不起来
+            # 就宁可不回收也不猜。返回空结果并带原因，调用方负责记日志。
+            return {"stale_seconds": stale_seconds, "dry_run": False,
+                    "checked": 0, "reaped": [], "skipped": [], "failed": [],
+                    "other_categories": 0,
+                    "unavailable": "RunStore 建口失败"}
+        return reap_stale_running(self.task_queue, store,
+                                  stale_seconds=stale_seconds)
+
     def _runstore_open(self, task: PipelineTask, plan: ExecutionPlan,
                        input_file: str, trigger: str) -> None:
         store = self._runstore()
@@ -2213,7 +2233,33 @@ class PipelineOrchestrator:
                                    serve_static=serve_static,
                                    dashboard_dir=dashboard_dir,
                                    tokens_file=tokens_file)
-        return self._admin_api.start(self)  # type: ignore[no-any-return,attr-defined]
+        ok = self._admin_api.start(self)  # type: ignore[no-any-return,attr-defined]
+        if ok:
+            self._maybe_startup_reap()
+        return bool(ok)
+
+    def _maybe_startup_reap(self) -> None:
+        """A7-C 启动回收：`LOOM_REAP_STALE_SECONDS` 显式设置才跑（默认关）。
+
+        失败/异常只记日志，绝不挡服务启动；回收动作本身写 `run.reaped`
+        审计事件（同 reconcile 的显式路径，语义单源）。
+        """
+        import os
+
+        if not str(os.environ.get("LOOM_REAP_STALE_SECONDS", "") or "").strip():
+            return
+        try:
+            from .reconcile import reap_from_env
+
+            res = reap_from_env(self.task_queue, self._runstore())
+            if res is not None:
+                self._log("info", "启动僵尸回收完成",
+                          reaped=len(res["reaped"]),
+                          skipped=len(res["skipped"]),
+                          failed=len(res["failed"]),
+                          other_categories=res["other_categories"])
+        except Exception as e:  # noqa: BLE001 观测面动作，不挡启动
+            self._log("warning", "启动僵尸回收失败（不挡启动）", error=str(e))
 
     def stop_admin_api(self):
         if self._admin_api:

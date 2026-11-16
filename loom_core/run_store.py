@@ -56,6 +56,9 @@ RUN_FAILED = "run.failed"
 RUN_CANCELLED = "run.cancelled"
 #: 事后补账（投影写失败后按交付账本重放）——不是执行事实，必须与原始事件可区分
 RUN_REPLAYED = "run.replayed"
+#: 操作者回收僵尸运行（A7-C，`loom reconcile --reap`）——同样不是执行事实，
+#: 必须与原始事件可区分（纪律同 `RUN_REPLAYED`）。
+RUN_REAPED = "run.reaped"
 
 #: 终态投影状态：`close_run` 用它做"至多一条终态事件"的原子裁决
 TERMINAL_STATUSES = ("done", "failed", "cancelled")

@@ -4,8 +4,13 @@
 - tasks.db 的 task_queue 行是**执行侧真源**（status/started_at/finished_at/owner_pid）；
 - runs.db 的 runs 行 + events 表是**交付投影**（open_run 盖 running、close_run 盖终态章）。
 正常收尾链是 队列终态 → 终态事件 → 投影盖章 → 交付账本；任何一环中断都会留下
-双源不一致。本模块把不一致**列出来**——只报告、不修复：不自动杀进程、不写任何库，
-与 task_queue.recover() 的「回收写库」语义刻意分开（人在圈内看了报告再决定动什么）。
+双源不一致。本模块把不一致**列出来**——默认只报告、不修复：不自动杀进程、不写
+任何库（人在圈内看了报告再决定动什么）。A7-C 起另提供**显式回收**入口
+`reap_stale_running`（`loom reconcile --reap` / 启动 env 钩子 `LOOM_REAP_STALE_SECONDS`）：
+仅对分类①「确证死亡」（owner_pid 已死/缺失且过期）的行做终态收尾（cancelled）＋
+投影盖章＋`run.reaped` 审计事件；②③类不归它管（marker=incomplete 走 backfill 补账、
+其余留人判断）。与 task_queue.recover() 的「翻回 pending 重试」语义刻意互补：recover
+给任务第二次机会，reap 宣告它死亡（终态 cancelled，不再重试），互不替代。
 
 三类漂移（互斥划分，每行恰好归一类）：
 1. stale-owner-dead：队列仍 running，但 started_at 缺失/过期（超过 stale_seconds）
@@ -17,11 +22,15 @@
 """
 from __future__ import annotations
 
+import logging
+import os
 import time
 from typing import Any
 
-from .run_store import TERMINAL_STATUSES, RunStore
+from .run_store import RUN_REAPED, TERMINAL_STATUSES, RunStore
 from .task_queue import TaskQueue, _pid_alive
+
+_logger = logging.getLogger(__name__)
 
 #: 三类漂移的 category 取值（判据钉死：CLI 人类输出 / JSON / 测试同源）。
 CAT_STALE_OWNER_DEAD = "stale-owner-dead"
@@ -125,3 +134,141 @@ def stale_running_report(task_queue: TaskQueue, run_store: RunStore, *,
                              q, owner_pid, run_status, last_ts))
         # 队列终态 + 投影终态 = 一致行，跳过。
     return rows
+
+
+# ── A7-C：僵尸运行回收（显式动作，默认不跑）────────────────────────
+
+#: 回收动作写进队列 `error` 列的固定前缀（判据钉死；CLI 人类输出与 JSON 同源）。
+REAP_ERROR_PREFIX = "reaped: "
+
+
+def reap_stale_running(task_queue: TaskQueue, run_store: RunStore, *,
+                       now: float | None = None,
+                       stale_seconds: float = 900.0,
+                       dry_run: bool = False,
+                       source: str = "loom reconcile --reap") -> dict[str, Any]:
+    """回收分类①（stale-owner-dead）的僵尸行：终态收尾为 cancelled（显式写库）。
+
+    只动**确证死亡**的行——队列 running 且 started_at 过期且 owner_pid 死/缺
+    （判据与 `stale_running_report` 同源，不存在第二套分类）。慢任务防护：
+    owner_pid 存活的行一律不碰，写前还复检一次（pid 复用导致「复活」也跳过）。
+
+    写序（每行）：
+    1. `task_queue.finish(..., "cancelled", allow_states=("running",))`——条件 UPDATE，
+       竞态下读到新状态就 0 行，计入 skipped 不再往下写；
+    2. `run_store.record(RUN_REAPED, ...)`——审计事件先行（`_append` 的
+       INSERT OR IGNORE 顺带补出缺失的投影行，杜绝「有事件无投影」的半条事实）；
+    3. `run_store.close_run("cancelled", ...)`——投影盖章 + 终态事件，条件 UPDATE
+       保证「至多一条终态事件」，已终态的行不被覆写（`projection_closed=False` 披露）；
+    4. 队列健康位升格 `ok`（先悲观后升格，同 finish 的 projection 参数口径）。
+
+    投影写入失败的行停在 marker=incomplete（回到 ② 类漂移，reconcile 报告可见，
+    可人工处置）——单行失败不拖垮整批，如实计入 failed。
+
+    Args:
+        task_queue: 任务队列（tasks.db）。
+        run_store: 运行投影（runs.db）。
+        now: 当前时间（秒）；None = time.time()。测试注入以钉死判据。
+        stale_seconds: running 行算过期的阈值（与报告同口径默认值）。
+        dry_run: True 只预测不写（返回的 reaped 行 action="dry-run"）。
+        source: 审计事件 payload 里的动作来源标注。
+
+    Returns:
+        dict：`stale_seconds` / `dry_run` / `checked`（报告行总数）/
+        `reaped` / `skipped` / `failed` / `other_categories`（②③计数，未动）。
+    """
+    if now is None:
+        now = time.time()
+    report = stale_running_report(task_queue, run_store, now=now,
+                                  stale_seconds=stale_seconds)
+    targets = [r for r in report if r["category"] == CAT_STALE_OWNER_DEAD]
+    result: dict[str, Any] = {
+        "stale_seconds": stale_seconds,
+        "dry_run": dry_run,
+        "checked": len(report),
+        "reaped": [],
+        "skipped": [],
+        "failed": [],
+        "other_categories": len(report) - len(targets),
+    }
+
+    for row in targets:
+        task_id = row["task_id"]
+        owner_pid = int(row["owner_pid"] or 0)
+        # 慢任务防护最后一闸：写前复检。pid 万一「复活」（复用）就不碰。
+        if owner_pid and _pid_alive(owner_pid):
+            result["skipped"].append({
+                "task_id": task_id,
+                "reason": "owner_pid 写前复检存活（pid 复用？），跳过"})
+            continue
+        reason = (f"stale-owner-dead：队列 running 超过 {stale_seconds:g}s 且 "
+                  f"owner_pid={owner_pid or '缺'} 已死/缺失（来源：{source}）")
+        if dry_run:
+            result["reaped"].append({
+                "task_id": task_id, "action": "dry-run",
+                "owner_pid": owner_pid, "reason": reason})
+            continue
+
+        # 1) 队列行终态（条件 UPDATE：状态已变则 0 行）。
+        if not task_queue.finish(task_id, "cancelled",
+                                 error=REAP_ERROR_PREFIX + reason,
+                                 allow_states=("running",),
+                                 projection="incomplete"):
+            result["skipped"].append({
+                "task_id": task_id,
+                "reason": "写前队列状态已变（已收尾/已重排），跳过"})
+            continue
+        try:
+            # 2) 审计事件先行：不是执行事实，但必须可区分、可追溯。
+            run_store.record(task_id, RUN_REAPED, {
+                "category": row["category"],
+                "owner_pid": owner_pid,
+                "stale_seconds": stale_seconds,
+                "source": source,
+                "queue_started_at": row["queue_started_at"],
+                "queue_status_before": "running",
+                "times": "queue-facts-only",
+            }, ts=now)
+            # 3) 投影盖章（已终态则 0 行，不覆写、不二发终态事件）。
+            seq = run_store.close_run(task_id, "cancelled", finished_at=now,
+                                      error=REAP_ERROR_PREFIX + reason)
+            # 4) 健康位升格（失败则停在 incomplete，见 docstring）。
+            upgraded = task_queue.set_projection(task_id, "ok")
+        except Exception as e:  # noqa: BLE001 单行失败不拖垮整批，如实计入
+            result["failed"].append({
+                "task_id": task_id, "reason": f"投影写入失败：{e}"})
+            continue
+        result["reaped"].append({
+            "task_id": task_id,
+            "action": "reaped",
+            "owner_pid": owner_pid,
+            "projection_closed": seq is not None,
+            "marker_upgraded": upgraded,
+            "reason": reason,
+        })
+    return result
+
+
+def reap_from_env(task_queue: TaskQueue, run_store: RunStore, env=None, *,
+                  source: str = "startup auto-reap") -> dict[str, Any] | None:
+    """服务启动钩子：读 `LOOM_REAP_STALE_SECONDS`，显式设置才跑回收。
+
+    未设 / 空 / 非数字 / ≤0 ⇒ 返回 None（不跑、不炸；非数字记一条 warning）。
+    其余情况等价 `reap_stale_running(..., stale_seconds=<env 值>)`。
+    """
+    env_map = os.environ if env is None else env
+    raw = str(env_map.get("LOOM_REAP_STALE_SECONDS", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        stale = float(raw)
+    except ValueError:
+        _logger.warning("LOOM_REAP_STALE_SECONDS=%r 不是数字，启动回收跳过", raw)
+        return None
+    if stale <= 0:
+        return None
+    if run_store is None:
+        _logger.warning("启动回收跳过：RunStore 建口失败，分类判据不齐")
+        return None
+    return reap_stale_running(task_queue, run_store, stale_seconds=stale,
+                              source=source)
