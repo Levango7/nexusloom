@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed（2026-11-17，清理脚本连接卫生）
+
+- `scripts/cleanup_state.py` 的连接统一走模块内唯一 `_connect()` 助手：connect 后
+  即设 `busy_timeout=3000`（与 approvals/message_store/db_backend 同口径）。此前
+  4 处裸 connect 无 busy_timeout——运行中的 loom（worker/dashboard）持写锁时，
+  扫描或 `--apply` 清理遇竞争直接抛 "database is locked" 在收尾半途炸掉（备份与
+  提交状态对不上；§三十四 台账低风险项，本批消除）。判据 3 条：`_connect` 的
+  busy_timeout 实值／源码形状（裸 connect 归零，唯一 connect 点在助手内）／
+  扫描与样本路径连接计数（5 次全走助手，单点退化即红）。
+
 ## [3.18.0] - 2026-11-17
 
 ### Fixed（2026-11-17，交付演练 D1：`/api/health/deep` message_bus 恒 unhealthy）

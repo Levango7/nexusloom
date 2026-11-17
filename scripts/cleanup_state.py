@@ -71,6 +71,19 @@ KEY_TABLES = {
 }
 
 
+def _connect(db: Path) -> sqlite3.Connection:
+    """本模块唯一的连接点：connect 后即设 busy_timeout=3000。
+
+    为什么要它：这些库可能正被运行中的 loom（worker/dashboard）持写锁——裸
+    connect 无 busy_timeout 时 SQLite 遇竞争立即抛 "database is locked"，
+    扫描或清理会在半途炸掉（备份与提交状态对不上）。3000ms 与 approvals/
+    message_store/db_backend 同口径（#129 起本仓的连接卫生线）。
+    """
+    con = sqlite3.connect(db)
+    con.execute("PRAGMA busy_timeout=3000")
+    return con
+
+
 def _task_id_of(store: str, table: str, raw: str) -> str:
     """从一行的键里取出 task_id。
 
@@ -107,7 +120,7 @@ def _scan_stores() -> tuple[dict, int, int]:
         if not db.exists():
             report[fname] = []
             continue
-        con = sqlite3.connect(db)
+        con = _connect(db)
         try:
             per_table = []
             for table, id_col, _pk in KEY_TABLES[store]:
@@ -131,13 +144,13 @@ def _task_id_samples(limit: int = 12) -> tuple[list[str], list[str]]:
     raw_ids: list[str] = []
     bus = STATE_DIR / "message_bus.db"
     if bus.exists():
-        con = sqlite3.connect(bus)
+        con = _connect(bus)
         with contextlib.suppress(sqlite3.Error):
             raw_ids += [k for (k,) in con.execute("select key from processed_keys")]
         con.close()
     tdb = STATE_DIR / "tasks.db"
     if tdb.exists():
-        con = sqlite3.connect(tdb)
+        con = _connect(tdb)
         with contextlib.suppress(sqlite3.Error):
             raw_ids += [t for (t,) in con.execute("select task_id from task_queue")]
         con.close()
@@ -197,7 +210,7 @@ def _apply_store_purge(store: str, fname: str) -> int:
     db = STATE_DIR / fname
     if not db.exists():
         return 0
-    con = sqlite3.connect(db)
+    con = _connect(db)
     removed = 0
     try:
         for table, id_col, _pk in KEY_TABLES[store]:
