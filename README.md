@@ -1157,7 +1157,9 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3950 个测试本机全绿**（`3950 passed, 25 skipped, 6 deselected`，2026-11-17 按 +3 条
+**3954 个测试本机全绿**（`3954 passed, 25 skipped, 6 deselected`，2026-11-18 按 +4 条
+（recover_tasks stale-running 只读对账告警四判据：漂移告警/无漂移对照/异常降级/只读性，
+`tests/test_recover_sync.py` +4）自 3950 同 skipped 集推为；2026-11-17 按 +3 条
 （连接卫生：cleanup_state 唯一 connect 点 busy_timeout 实值/形状归零/路由计数三钉，
 判据文件 `tests/test_cleanup_state_connect.py`）自 3947 同 skipped 集推为；2026-11-17 按 +2 条
 （交付演练 D1：真总线 `running` 生命周期钉 + admin health_deep 真总线判 healthy，

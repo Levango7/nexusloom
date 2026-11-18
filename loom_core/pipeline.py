@@ -29,6 +29,7 @@ from .event_hook import emit_event
 from .executor_factory import create_executor, shutdown_executor
 from .naming import agent_of, family_of
 from .observability import get_logger, get_metrics
+from .reconcile import stale_running_report
 
 if TYPE_CHECKING:  # pragma: no cover
     from .backfill import RunBackfill
@@ -2022,16 +2023,36 @@ class PipelineOrchestrator:
         内存侧同步：_running_tasks 中同 id 且仍为 RUNNING 的任务一并置为 PENDING，
         避免 get_task()/list_tasks() 返回与持久化队列不一致的旧状态
         （PAUSED/DONE 等其他状态不动）。
+
+        收尾副作用：恢复后顺带跑一次只读 stale-running 对账（有漂移才告警，
+        零写库；报告失败或投影口建不起时降级，不阻断恢复主链）。
         """
         recovered = self.task_queue.recover()
-        if not recovered:
-            return recovered
-        with self._lock:
-            for entry in recovered:
-                task = self._running_tasks.get(entry.get("task_id", ""))
-                if task is not None and task.status == TaskStatus.RUNNING:
-                    task.status = TaskStatus.PENDING
+        if recovered:
+            with self._lock:
+                for entry in recovered:
+                    task = self._running_tasks.get(entry.get("task_id", ""))
+                    if task is not None and task.status == TaskStatus.RUNNING:
+                        task.status = TaskStatus.PENDING
+        self._report_stale_running_drift()
         return recovered
+
+    def _report_stale_running_drift(self) -> None:
+        """重启恢复后顺带对账投影侧 stale-running 漂移（§四十四 B2）。
+
+        只读报告（零写库），有漂移才打 warning；报告失败或投影口建不起时
+        降级为一条 warning 日志，绝不阻断恢复主链。明细用 `loom reconcile` 复查。
+        """
+        try:
+            run_store = self._runstore()
+            drift = stale_running_report(self.task_queue, run_store) if run_store else []
+        except Exception as e:  # noqa: BLE001
+            self._logger.log("warning", "stale-running 对账报告失败", error=str(e))
+            return
+        if drift:
+            self._logger.log(
+                "warning", "stale-running 漂移待对账（loom reconcile 可复查）",
+                count=len(drift), task_ids=[r["task_id"] for r in drift])
 
     def list_queued_tasks(self, status: str = None) -> list[dict]:
         """列出持久化队列中的任务"""
