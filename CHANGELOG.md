@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.18.1] - 2026-11-20
+
+### Fixed（2026-11-18，B2 recover_tasks 对账告警）
+
+- `recover_tasks` 重启恢复收尾时，对账任务队列与运行投影并列出 stale-running 漂移：区分队列 running 过期且 owner_pid 死/缺、队列终态投影仍 running、投影未盖章三类；**只读告警，不自动杀进程、不写库**，与 A7-C `loom reconcile --reap` 的人手显式回收互补。锚点门随 main 累计漂移与本批插入一次性 re-pin 复验。
+
 ### Fixed（2026-11-17，清理脚本连接卫生）
 
 - `scripts/cleanup_state.py` 的连接统一走模块内唯一 `_connect()` 助手：connect 后
