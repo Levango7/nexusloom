@@ -1,0 +1,39 @@
+# office-daily-report —— 办公系统日报/周报等已鉴权上下文成稿流水线。
+#
+# 与 docgen 的区别：输入不是主题，而是调用方已经按自身权限聚合好的业务上下文。
+# 因此不走 researcher/fetcher，不做公网检索，避免把数据库里的内部材料外送。
+# 调用方通常经 POST /api/tasks（pipeline=office-daily-report, wait=true）提交。
+_name: office-daily-report
+_version: "1.0"
+description: 办公系统已鉴权上下文日报（writer → 质量尾；无公网检索）
+
+defaults:
+  parallelism:
+    mode: single
+    max_workers: 1
+
+agents:
+  - name: writer
+    version: "2.0"
+    timeout: 300
+    dependencies: []
+    config:
+      prompt_profile: generic-tech
+
+  # 质量尾整段来自共享片段：评分、检查、排版、落盘与 docgen 同一份实现。
+  # 日报是内部上下文成稿，默认不做公网事实核查（fact_check: false）。
+  - name: quality_tail
+    call: _quality-tail
+    dependencies: ["writer"]
+    inputs:
+      fact_check: false
+      min_score: 0
+
+topology:
+  type: dag
+  levels:
+    - [writer]
+    - [quality_tail]
+
+  edges:
+    - [writer, quality_tail]

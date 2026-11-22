@@ -23,6 +23,7 @@ pipelines:
   - docgen-lean
   - docreq
   - kb-docgen
+  - office-daily-report
   - demo
 quality_profiles:
   - technical-doc

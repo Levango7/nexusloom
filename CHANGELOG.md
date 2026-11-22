@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added（2026-11-22，办公系统嵌入试点）
+
+- **`office-daily-report` 流水线**：面向办公系统已按权限聚合的内部上下文，
+  只走 `writer → _quality-tail(fact_check=false)`，不走 researcher/fetcher，
+  不做公网检索，避免内部材料外送。提供 lockfile，支持 `POST /api/tasks`
+  自由文本提交；供 Corps 日报等 sidecar adapter 复用。
+
 ## [3.18.1] - 2026-11-20
 
 ### Fixed（2026-11-18，B2 recover_tasks 对账告警）
