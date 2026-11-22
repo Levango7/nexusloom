@@ -106,6 +106,18 @@ class TestMCPServer:
     def test_initialized_notification(self, server):
         resp = server._handle_request({"jsonrpc": "2.0", "method": "initialized"})
         assert resp is None
+        assert server._initialized is True
+
+    def test_notifications_initialized_standard_name(self, server):
+        """宿主（Modulo）发的标准 JSON-RPC 通知名：必须认、必须不回帧。"""
+        resp = server._handle_request({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        assert resp is None
+        assert server._initialized is True
+
+    def test_unknown_notification_never_replies(self, server):
+        """任意无 id 通知一律静默 —— 回 {"id": null} 的错误帧会被宿主畸形帧校验拒掉。"""
+        resp = server._handle_request({"jsonrpc": "2.0", "method": "notifications/whatever", "params": {}})
+        assert resp is None
 
     def test_list_pipelines(self, server):
         resp = server._handle_request({

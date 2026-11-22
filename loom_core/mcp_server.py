@@ -225,6 +225,14 @@ class MCPServer:
 
     def _handle_request(self, request: dict) -> dict | None:
         method = request.get("method", "")
+        # JSON-RPC 2.0：无 "id" 键 = 通知，规范要求不回帧（未知通知静默忽略）。
+        # 修复：宿主（Modulo 联结验收）发标准通知 "notifications/initialized"，
+        # 旧代码只认 "initialized"，标准名落进未知方法分支回了 {"id": null} 的
+        # 错误帧 —— 被宿主的畸形帧校验拒掉，MCP stdio 集成卡死在这一帧上。
+        if "id" not in request:
+            if method in ("initialized", "notifications/initialized"):
+                self._initialized = True
+            return None
         req_id = request.get("id")
         params = request.get("params", {})
 
@@ -236,9 +244,6 @@ class MCPServer:
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
                 })
-            elif method == "initialized":
-                self._initialized = True
-                return None
             elif method == "tools/list":
                 return self._ok(req_id, {"tools": TOOLS})
             elif method == "tools/call":
