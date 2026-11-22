@@ -18,6 +18,7 @@ Loom 是一个自托管的 Agent 工作流运行时：声明式 YAML 编排可�
 | **省钱** | 文档生成 + **条件升级核查** | `--pipeline docgen-lean` | fact_checker 挂 `when`：质量分达标才付核查成本，不达标时该节点被跳过而下游照常跑 |
 | **主打** | **文档生成 + 多格式渲染** | `--pipeline docgen-render` | 追加 renderer 节点，产出 **docx / pdf**（可编辑 Word / 可打印归档） |
 | **主打** | **本地资料 → 知识库接地文档** | `--pipeline kb-docgen` | 摄入自己的 PDF/图片/文本 → 切块向量入库 → 检索命中驱动写作；离线可跑（无 LLM 时如实产出抽取式草稿） |
+| **办公** | 已鉴权上下文日报 | `--pipeline office-daily-report` | 不走公网检索，适合办公系统已按权限聚合的内部数据 |
 | **实验性** | 需求分析 | `--pipeline docreq` | requirements_analyzer 输出结构化 DocumentSpec |
 | **通用** | 任意 JSON 接口 → 报告 | `--pipeline api-report` | 无领域节点：`http_request` 取接口 → `transform` 挑字段渲染 → 落盘 |
 | **通用** | 接口列表 → **逐项摘要** | `--pipeline api-digest` | 同一个 Agent 按 `foreach` 逐项跑 N 次，聚合产物再落盘（列表长度超 `max_items` 直接报错） |
@@ -275,7 +276,7 @@ for art in client.artifacts(task["id"]):
 | `loom_doc/ingest.py` | 摄入层：PDF/图片/文本 → 结构化 Markdown（PDF 按字号推断标题层级） |
 | `loom_doc/document_enhancer.py` | 文档增强：对已有 Markdown 逐章节 LLM 深化 + ASCII 图修复 + 导出 |
 | `agents/` | 14 个核心 Agent 实现（researcher/fetcher/safe_writer/requirements_analyzer/renderer/ingest/knowledge_base/http_request/transform + keyword_extract/readability/link_check/fact_coverage/tldr） |
-| `packs/docgen/` | 物理 pack（spec §5.2）：5 个文档件（writer/quality_gate/checker/layout/fact_checker）+ docgen 系 6 条流水线 + 2 个质量档案 + 2 个 prompt 模板，`pack.yaml` 为清册；引擎经 `loom_core.pack_manifest` 多目录发现，删掉本目录引擎照常工作 |
+| `packs/docgen/` | 物理 pack（spec §5.2）：5 个文档件（writer/quality_gate/checker/layout/fact_checker）+ docgen 系 7 条流水线 + 2 个质量档案 + 2 个 prompt 模板，`pack.yaml` 为清册；引擎经 `loom_core.pack_manifest` 多目录发现，删掉本目录引擎照常工作 |
 
 ---
 
@@ -1157,7 +1158,9 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3954 个测试本机全绿**（`3954 passed, 25 skipped, 6 deselected`，2026-11-18 按 +4 条
+**3957 个测试本机全绿**（`3957 passed, 25 skipped, 6 deselected`，2026-11-22 按 +3 条
+（office-daily-report 流水线：拓扑与 lock／自由文本闸门／无检索三钉，
+判据文件 `tests/test_office_daily_report_pipeline.py`）自 3954 同 skipped 集推为；2026-11-18 按 +4 条
 （recover_tasks stale-running 只读对账告警四判据：漂移告警/无漂移对照/异常降级/只读性，
 `tests/test_recover_sync.py` +4）自 3950 同 skipped 集推为；2026-11-17 按 +3 条
 （连接卫生：cleanup_state 唯一 connect 点 busy_timeout 实值/形状归零/路由计数三钉，
