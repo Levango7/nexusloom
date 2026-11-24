@@ -110,6 +110,12 @@ pipelines = [
     "pipelines/*.yaml",
     "pipelines/*.lock",
 ]
+"sdk/js" = [
+    "sdk/js/*.mjs",
+    "sdk/js/*.d.ts",
+    "sdk/js/package.json",
+    "sdk/js/README.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

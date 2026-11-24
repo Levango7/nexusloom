@@ -783,6 +783,19 @@ tools/list 与 tools/call。首版仅 admin Principal 可用：未鉴权 401、�
 `awaiting_approval`/`approvals`，便于客户端区分普通暂停与人工审批门。长任务建议
 `wait=false` 后轮询 `get_task`；审批等待只能 approve/reject，不能用 resume 绕过。
 
+### 嵌入 SDK（Python / JavaScript / TypeScript）
+
+应用项目可以用零依赖 SDK 把文档生成变成自身 AI 能力，不需要复制提交、轮询和审批状态机：
+
+```python
+client = LoomClient.from_env()
+result = client.generate(query="写一份本周工作摘要", pipeline="office-daily-report")
+```
+
+JavaScript 使用 `createLoomClientFromEnv()` 与同名 `generate()`。`done` 返回任务快照；
+失败/取消抛 `LoomTaskError`，人工审批等待默认抛 `LoomApprovalRequired`，只有显式
+`approval_handler` 才会继续。完整示例与异常表见 **[嵌入指南](docs/embedding.md)**。
+
 ### 编程句柄 `RunHandle`
 
 嵌入式调用方（MAOP 适配器、自研服务）拿的不该是一个裸 `task_id` 加一堆约定：
@@ -1166,7 +1179,9 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3989 个测试本机全绿**（`3989 passed, 25 skipped, 6 deselected`，2026-11-24 按 +2 条
+**3994 个测试本机全绿**（`3994 passed, 25 skipped, 6 deselected`，2026-11-25 按 +5 条
+（可嵌入 SDK：from_env 统一配置／demo generate 成功／失败任务结构化异常／审批默认拒绝与显式回调／
+JavaScript 零依赖契约套件经 pytest 包装执行）自 3989 同 skipped 集推为；2026-11-24 按 +2 条
 （T11：`tests/test_pack_manifest.py` 分列计数 + `tests/test_cli_verbs.py` 真 CLI 标签）自 3987 同 skipped 集推为；
 2026-11-24 按 +10 条
 （T10：`tests/test_typed_input_surfaces.py` 的 `GET /stream` 类型化输入、互斥载荷、重放与租户隔离判据）自 3977 同 skipped 集推为；

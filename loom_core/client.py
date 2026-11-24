@@ -21,12 +21,16 @@ spec 与实现只改一边会红，这是"同源"承诺的机器判据而不是�
 from __future__ import annotations
 
 import json
+import os
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from urllib.parse import urlencode
 
-__all__ = ["LoomClient", "LoomError", "LoomTimeoutError"]
+__all__ = [
+    "LoomClient", "LoomError", "LoomTimeoutError", "LoomTaskError", "LoomApprovalRequired",
+]
 
 #: `wait()` 认的终态三件套。`paused` 不在其中——它等人审批，不是运行结束；
 #: 把它算成终态会让"等审批的任务"在 wait 里静默提前返回。
@@ -44,6 +48,19 @@ class LoomError(RuntimeError):
 
 class LoomTimeoutError(LoomError):
     """`wait()` 轮询超时：任务还没进终态。status=0 表示"没拿到终态"，不是 HTTP 错误码。"""
+
+
+class LoomTaskError(LoomError):
+    """`generate()` 的任务终态失败；保留 task_id、task_status 与最后一次快照。"""
+
+    def __init__(self, task_id: str, task_status: str, body: dict):
+        self.task_id = task_id
+        self.task_status = task_status
+        super().__init__(0, body, f"任务 {task_id} 以 {task_status or '未知'} 状态结束")
+
+
+class LoomApprovalRequired(LoomTaskError):
+    """`generate()` 遇到人工审批门：调用方未显式提供审批回调。"""
 
 
 #: 公开方法 → (method, path template)。测试对照 generate_spec()["paths"]；
@@ -92,6 +109,15 @@ class LoomClient:
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
         self._headers = headers
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None,
+                 timeout: float = 30.0) -> LoomClient:
+        """从统一运行时配置创建客户端；`env` 仅用于测试/嵌入方显式传入。"""
+        source = os.environ if env is None else env
+        base_url = source.get("LOOM_RUNTIME_URL") or "http://127.0.0.1:8910"
+        token = source.get("LOOM_RUNTIME_API_KEY") or source.get("ADMIN_API_KEY") or None
+        return cls(base_url=base_url, token=token, timeout=timeout)
 
     # ── 传输层 ──────────────────────────────────────────────────────
 
@@ -162,6 +188,45 @@ class LoomClient:
         if output is not None:
             body["output"] = output
         return self._post("/api/tasks", body)
+
+    def generate(self, query: str | None = None, inputs: dict | None = None,
+                 pipeline: str | None = None, title: str | None = None,
+                 output: str | None = None, timeout: float = 300.0,
+                 poll_interval: float = 1.0,
+                 approval_handler: Callable[[dict], str] | None = None) -> dict:
+        """一次提交并等待成品；done 返回快照，失败/审批等待抛结构化异常。
+
+        `approval_handler` 接收暂停快照，返回 "approve" 或 "reject"。未提供时，
+        人工审批门立即抛 `LoomApprovalRequired`，绝不替调用方静默批准。
+        """
+        submitted = self.submit(query=query, inputs=inputs, pipeline=pipeline,
+                                title=title, wait=False, output=output)
+        task_id = str(submitted.get("task_id") or "")
+        if not task_id:
+            raise LoomError(0, submitted, "提交响应缺少 task_id")
+        deadline = time.monotonic() + timeout
+        while True:
+            data = self.status(task_id)
+            status = str(data.get("status") or "")
+            if status == "done":
+                return data
+            if status in TERMINAL_STATUSES:
+                raise LoomTaskError(task_id, status, data)
+            if status == "paused" and data.get("awaiting_approval"):
+                if approval_handler is None:
+                    raise LoomApprovalRequired(task_id, status, data)
+                action = approval_handler(data)
+                if action == "approve":
+                    self.approve(task_id)
+                elif action == "reject":
+                    self.reject(task_id)
+                else:
+                    raise ValueError("approval_handler 必须返回 'approve' 或 'reject'")
+            if time.monotonic() >= deadline:
+                raise LoomTimeoutError(
+                    0, {"task_id": task_id, "status": status},
+                    f"等待 {task_id} 终态超时（{timeout:.0f}s，当前 {status or '未知'}）")
+            time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
 
     def run_workflow(self, pipeline: str, inputs: dict,
                      wait: bool = False, output: str | None = None) -> dict:
