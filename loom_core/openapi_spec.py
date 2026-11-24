@@ -140,6 +140,31 @@ def _system_paths() -> dict:
                 },
             },
         },
+        "/mcp": {
+            "post": {
+                "summary": "MCP Streamable HTTP（admin-only；initialize/通知/tools/list/tools/call）",
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": {
+                        "type": "object",
+                        "required": ["jsonrpc", "method"],
+                        "properties": {
+                            "jsonrpc": {"type": "string", "enum": ["2.0"]},
+                            "id": {"oneOf": [{"type": "string"}, {"type": "integer"}],
+                                   "nullable": True},
+                            "method": {"type": "string"},
+                            "params": {"type": "object"},
+                        },
+                    }}},
+                },
+                "responses": {
+                    "200": {"description": "JSON-RPC 响应（含协议/业务错误帧）"},
+                    "202": {"description": "通知已受理，无响应体"},
+                    "401": {"description": "未鉴权"},
+                    "403": {"description": "具名非 admin token 或跨源请求被拒"},
+                },
+            },
+        },
         "/health": {
             "get": {
                 "summary": "健康检查",

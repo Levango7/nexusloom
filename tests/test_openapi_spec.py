@@ -56,6 +56,11 @@ class TestOpenAPISpec:
         assert "/api/openapi.json" not in paths  # 自身不需要
         assert "/stream" in paths
 
+    def test_mcp_streamable_http_path(self, spec):
+        op = spec["paths"]["/mcp"]["post"]
+        assert op["requestBody"]["required"] is True
+        assert {"200", "202", "401", "403"} <= set(op["responses"])
+
     def test_post_endpoints_have_request_body(self, spec):
         for path, methods in spec["paths"].items():
             for method, detail in methods.items():

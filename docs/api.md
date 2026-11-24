@@ -45,6 +45,7 @@ curl -X POST http://127.0.0.1:8910/api/cache/clear \
 | GET | `/api/health/deep` | 深度健康检查（LLM/搜索/缓存） | 是 |
 | GET | `/metrics` | Prometheus 格式指标 | 是 |
 | GET | `/api/dashboard` | Dashboard 聚合数据 | 是 |
+| POST | `/mcp` | MCP Streamable HTTP（initialize/通知/tools/list/tools/call；仅 admin Principal） | 是（非 admin token 403） |
 
 ### 任务
 

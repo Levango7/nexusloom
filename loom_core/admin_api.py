@@ -1047,6 +1047,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(content_length) if content_length > 0 else b""
 
             # 处理 POST 专属路由
+            if self.path == "/mcp":
+                self._handle_mcp(body)
+                return
             if self.path == "/api/tasks":
                 self._handle_submit_task(body)
                 return
@@ -1652,6 +1655,27 @@ class AdminHandler(BaseHTTPRequestHandler):
             name, getattr(self, "webhooks", {}) or {}, body,
             headers=self.headers, remote=remote, orch=getattr(self, "orch", None))
         self._json(payload, status)
+
+    def _handle_mcp(self, body: bytes):
+        """MCP Streamable HTTP 薄适配；执行语义仍归同一个 MCPServer/orchestrator。"""
+        if not self._require_admin():
+            return
+        try:
+            request = _fast_loads(body) if body else None
+        except Exception:
+            request = None
+        if request is None:
+            return self._json({"jsonrpc": "2.0", "id": None,
+                               "error": {"code": -32700, "message": "Parse error"}})
+        if not isinstance(request, dict):
+            return self._json({"jsonrpc": "2.0", "id": None,
+                               "error": {"code": -32600, "message": "Invalid request"}})
+        from .mcp_server import MCPServer
+        server = MCPServer(orch=self.orch, actor=self._approval_actor())
+        response = server._handle_request(request)
+        if response is None:
+            return self._text("", 202)
+        self._json(response)
 
     def _handle_submit_task(self, body: bytes):
         """提交新文档生成任务

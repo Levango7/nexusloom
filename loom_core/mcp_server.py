@@ -154,6 +154,7 @@ TOOLS = [
     },
     {
         "name": "get_task",
+        "annotations": {"readOnlyHint": True},
         "description": "查询任务状态和结果（含输出文档内容）。",
         "inputSchema": {
             "type": "object",
@@ -168,6 +169,7 @@ TOOLS = [
     },
     {
         "name": "list_tasks",
+        "annotations": {"readOnlyHint": True},
         "description": "列出所有任务（含 id/状态/流水线/进度）。",
         "inputSchema": {
             "type": "object",
@@ -176,6 +178,7 @@ TOOLS = [
     },
     {
         "name": "list_pipelines",
+        "annotations": {"readOnlyHint": True},
         "description": "列出可用的流水线定义。",
         "inputSchema": {
             "type": "object",
@@ -184,6 +187,7 @@ TOOLS = [
     },
     {
         "name": "get_pipeline_info",
+        "annotations": {"readOnlyHint": True},
         "description": "获取指定流水线的 Agent 拓扑和配置详情。",
         "inputSchema": {
             "type": "object",
@@ -196,14 +200,50 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "approve_task",
+        "description": "批准等待人工审批的任务并续跑；非审批等待中的任务会返回错误。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "任务 ID"},
+                "note": {"type": "string", "description": "审批备注（可选）"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "reject_task",
+        "description": "驳回等待人工审批的任务并终止运行；非审批等待中的任务会返回错误。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "任务 ID"},
+                "reason": {"type": "string", "description": "驳回原因（可选）"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "resume_task",
+        "description": "恢复用户暂停的任务；审批等待中的任务必须改用 approve_task/reject_task。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "任务 ID"},
+            },
+            "required": ["task_id"],
+        },
+    },
 ]
 
 
 class MCPServer:
     """MCP Server — JSON-RPC 2.0 over stdio"""
 
-    def __init__(self, orch=None):
+    def __init__(self, orch=None, actor="mcp"):
         self.orch = orch
+        self.actor = actor
         self._initialized = False
 
     def serve(self):
@@ -272,6 +312,12 @@ class MCPServer:
             return self._tool_list_pipelines(req_id, args)
         elif name == "get_pipeline_info":
             return self._tool_get_pipeline_info(req_id, args)
+        elif name == "approve_task":
+            return self._tool_approve_task(req_id, args)
+        elif name == "reject_task":
+            return self._tool_reject_task(req_id, args)
+        elif name == "resume_task":
+            return self._tool_resume_task(req_id, args)
         else:
             return self._error(req_id, -32602, f"Unknown tool: {name}")
 
@@ -463,6 +509,42 @@ class MCPServer:
                 empty: dict = {}
                 self._write_output_target(empty, content, target_path)
 
+    def _tool_approve_task(self, req_id: Any, args: dict) -> dict:
+        task_id = args.get("task_id", "")
+        if not _validate_task_id(task_id):
+            return self._tool_error(req_id, f"Invalid task_id: {task_id!r}")
+        if not self.orch:
+            return self._error(req_id, -32603, "Orchestrator not initialized")
+        note = str(args.get("note", "") or "")
+        ok, err = self.orch.approve(task_id, note=note, by=self.actor)
+        if not ok:
+            return self._tool_error(req_id, err)
+        return self._tool_result(req_id, {"approved": True, "task_id": task_id, "note": note})
+
+    def _tool_reject_task(self, req_id: Any, args: dict) -> dict:
+        task_id = args.get("task_id", "")
+        if not _validate_task_id(task_id):
+            return self._tool_error(req_id, f"Invalid task_id: {task_id!r}")
+        if not self.orch:
+            return self._error(req_id, -32603, "Orchestrator not initialized")
+        reason = str(args.get("reason", "") or "")
+        ok, err = self.orch.reject(task_id, reason=reason, by=self.actor)
+        if not ok:
+            return self._tool_error(req_id, err)
+        return self._tool_result(req_id, {"rejected": True, "task_id": task_id, "reason": reason})
+
+    def _tool_resume_task(self, req_id: Any, args: dict) -> dict:
+        task_id = args.get("task_id", "")
+        if not _validate_task_id(task_id):
+            return self._tool_error(req_id, f"Invalid task_id: {task_id!r}")
+        if not self.orch:
+            return self._error(req_id, -32603, "Orchestrator not initialized")
+        ok = self.orch.resume(task_id)
+        if not ok:
+            return self._tool_error(
+                req_id, "Task cannot be resumed (not paused or awaiting approval)")
+        return self._tool_result(req_id, {"resumed": True, "task_id": task_id})
+
     def _tool_get_task(self, req_id: Any, args: dict) -> dict:
         task_id = args.get("task_id", "")
         if not _validate_task_id(task_id):
@@ -486,6 +568,8 @@ class MCPServer:
             "pipeline": payload.get("pipeline", ""),
             "result": payload.get("result", {}),
             "error": payload.get("error"),
+            "awaiting_approval": payload.get("awaiting_approval"),
+            "approvals": payload.get("approvals", []),
             # 产物清单来自 RunHandle：接口消费者不必再从 result 的键里猜哪个是产出
             # （MAOP 侧此前是按节点名造伪 ID，那份猜测就属于这里该收掉的东西）
             "artifacts": payload.get("artifacts", []),
