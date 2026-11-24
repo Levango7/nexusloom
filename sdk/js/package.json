@@ -1,0 +1,27 @@
+{
+  "name": "@nexusloom/client",
+  "version": "0.1.0",
+  "description": "Zero-dependency nexusloom embedding SDK for Node.js and browsers",
+  "type": "module",
+  "main": "./nexusloom-client.mjs",
+  "types": "./nexusloom-client.d.ts",
+  "exports": {
+    ".": {
+      "types": "./nexusloom-client.d.ts",
+      "import": "./nexusloom-client.mjs"
+    }
+  },
+  "files": [
+    "nexusloom-client.mjs",
+    "nexusloom-client.d.ts",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT"
+}

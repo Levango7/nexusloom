@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added（2026-11-25，可嵌入 SDK：一次创建、一次生成）
+
+- **Python `LoomClient.from_env()`＋`generate()`**：统一读取
+  `LOOM_RUNTIME_URL` / `LOOM_RUNTIME_API_KEY`（兼容 `ADMIN_API_KEY`），一次提交并等待成品；
+  done 返回任务快照，failed/cancelled 抛 `LoomTaskError`，超时仍抛 `LoomTimeoutError`。
+  人工审批门默认抛 `LoomApprovalRequired`，只有调用方显式提供 approve/reject 回调才继续。
+- **零依赖 JavaScript SDK＋TypeScript 声明**：`createLoomClientFromEnv()` 与同名
+  `generate()`，支持 Node.js 与浏览器，含 package.json、使用说明与 Node 内建测试。
+  原低层 submit/status/wait/approve/resume 语义不变。新增 `docs/embedding.md`，区分应用
+  函数 SDK 与 Agent MCP 两种接入方式；β1 的运行时按需下载/自动启动不提前承诺。
+
 ### Added（2026-11-24，Interaction α：MCP Streamable HTTP 与任务控制）
 
 - **`POST /mcp`**：Admin API 新增 Streamable HTTP 薄适配，与 stdio 共用
