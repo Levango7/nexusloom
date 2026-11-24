@@ -22,13 +22,17 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from urllib.parse import quote
 
 import pytest
 
 from loom_core.admin_api import AdminAPI, AdminHandler
 from loom_core.mcp_server import MCPServer
+from loom_core.streaming import StreamCallback
+from loom_core.tokens import Principal
 from loom_core.webhooks import TOKEN_HEADER, Webhook, handle_inbound
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -265,6 +269,16 @@ class TestTasksEndpoint:
             {"pipeline": "plain_one", "query": "云成本", "title": "标题"}).encode())
         assert orch.calls[0]["input_text"] == "# 标题\n\n## 查询\n\n云成本\n", \
             orch.calls[0]["input_text"]
+
+    def test_query_and_inputs_together_are_rejected(self, root):
+        orch = RecordingOrch()
+        h = _handler("/api/tasks", orch)
+        h._handle_submit_task(json.dumps({
+            "pipeline": "typed_demo", "query": "云成本", "inputs": {"topic": "云成本"},
+        }).encode())
+        body, status = _sent(h)
+        assert status == 400 and "not both" in body["error"], body
+        assert orch.calls == []
 
     def test_missing_both_payloads_still_400(self, root):
         h = _handler("/api/tasks", RecordingOrch())
@@ -578,3 +592,117 @@ class TestRealHTTP:
                 {f["field"] for f in err["fields"]} == {"topic", "depth"}, err
         finally:
             api.stop()
+
+
+# ─── 5. GET /stream（SSE 发起口与 /api/tasks 同一道闸门，§3.3-5） ───
+
+class StreamOrch:
+    """假引擎：投影层按"不存在"处理，让 /stream 走新发起分支。"""
+
+    def run_handle(self, task_id):
+        h = MagicMock()
+        h.record.return_value = None
+        h.exists.return_value = False
+        return h
+
+
+class TestStreamEndpoint:
+    def _handler(self, qs: str) -> AdminHandler:
+        h = AdminHandler.__new__(AdminHandler)
+        h.path = f"/stream?{qs}"
+        h.headers = {}
+        h.orch = StreamOrch()
+        h.api_key = None
+        h.server_host = "127.0.0.1"
+        h.dashboard_dir = None
+        h.principal = None
+        h._json = MagicMock()
+        return h
+
+    def _launch(self, qs: str):
+        """过闸门走到写临时输入文件那步；worker 截住不起真线程。"""
+        h = self._handler(qs)
+        h.wfile = io.BytesIO()
+        h.close_connection = False
+        h.requestline = "GET /stream HTTP/1.1"
+        h.request_version = "HTTP/1.1"
+        with patch.object(AdminHandler, "send_response", lambda self, code: None), \
+             patch.object(AdminHandler, "send_header", lambda self, *a, **k: None), \
+             patch.object(AdminHandler, "end_headers", lambda self: None), \
+             patch.object(AdminHandler, "_find_streaming_agent",
+                          lambda self: MagicMock()), \
+             patch.object(AdminHandler, "_start_stream_worker") as start_worker, \
+             patch.object(AdminHandler, "_pump_sse", lambda self, *a, **k: None):
+            h._handle_stream()
+        return h, start_worker
+
+    def test_typed_inputs_render_same_doc_as_the_typed_surfaces(self, root):
+        h, start_worker = self._launch(
+            f"task_id={uuid.uuid4()}&inputs={quote(json.dumps({'topic': '云成本'}))}"
+            f"&pipeline=typed_demo")
+        assert start_worker.call_count == 1
+        text = Path(start_worker.call_args[0][2]).read_text(encoding="utf-8")
+        assert text == "# typed_demo\n\n## topic\n\n云成本\n\n## depth\n\n3\n"
+        assert start_worker.call_args.kwargs["pipeline_name"] == "typed_demo"
+        assert start_worker.call_args[0][3].owner == h._principal().id
+
+    def test_freeform_on_undeclared_pipeline_unchanged(self, root):
+        _, start_worker = self._launch(
+            f"task_id={uuid.uuid4()}&query=%E4%BA%91%E6%88%90%E6%9C%AC"
+            f"&title=%E6%A0%87%E9%A2%98&pipeline=plain_one")
+        text = Path(start_worker.call_args[0][2]).read_text(encoding="utf-8")
+        assert text == "# 标题\n\n## 查询\n\n云成本\n"
+
+    def test_query_and_inputs_together_are_rejected(self, root):
+        h = self._handler(
+            f"task_id={uuid.uuid4()}&query=x&inputs=%7B%7D&pipeline=plain_one")
+        h._handle_stream()
+        body, status = _sent(h)
+        assert status == 400 and "not both" in body["error"], body
+
+    def test_freeform_on_typed_pipeline_is_refused_before_any_run(self, root):
+        h = self._handler(f"task_id={uuid.uuid4()}&query=x&pipeline=typed_demo")
+        h._handle_stream()
+        body, status = _sent(h)
+        assert status == 400
+        assert "inputs" in body["fields"][0]["reason"]
+
+    def test_replay_does_not_parse_new_payload(self, root):
+        h = self._handler(f"task_id={uuid.uuid4()}&inputs=%7Bbroken")
+        h.principal = Principal(id="alice")
+        callback = StreamCallback(owner="alice")
+        with patch("loom_core.streaming.get_callback", return_value=callback), \
+             patch.object(AdminHandler, "send_response", lambda self, code: None), \
+             patch.object(AdminHandler, "send_header", lambda self, *a, **k: None), \
+             patch.object(AdminHandler, "end_headers", lambda self: None), \
+             patch.object(AdminHandler, "_stream_replay") as replay:
+            h._handle_stream()
+        replay.assert_called_once()
+        h._json.assert_not_called()
+
+    def test_active_stream_is_hidden_from_another_tenant(self, root):
+        h = self._handler(f"task_id={uuid.uuid4()}")
+        h.principal = Principal(id="bob")
+        callback = StreamCallback(owner="alice")
+        with patch("loom_core.streaming.get_callback", return_value=callback):
+            h._handle_stream()
+        body, status = _sent(h)
+        assert status == 404 and body == {"error": "task not found"}
+
+    def test_inputs_not_json_is_400(self, root):
+        h = self._handler(f"task_id={uuid.uuid4()}&inputs=%7Bbroken")
+        h._handle_stream()
+        body, status = _sent(h)
+        assert status == 400 and "inputs" in body["error"]
+
+    def test_inputs_not_object_is_400(self, root):
+        h = self._handler(f"task_id={uuid.uuid4()}&inputs=%5B1%5D")
+        h._handle_stream()
+        body, status = _sent(h)
+        assert status == 400 and "object" in body["error"]
+
+    def test_missing_both_payloads_is_400(self, root):
+        h = self._handler(f"task_id={uuid.uuid4()}")
+        h._handle_stream()
+        body, status = _sent(h)
+        assert status == 400 and "query" in body["error"] and "inputs" in body["error"]

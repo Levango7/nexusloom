@@ -1566,14 +1566,14 @@ class AdminHandler(BaseHTTPRequestHandler):
             "completed_nodes": done_nodes,
         }
 
-    def _attach_stream_callback(self, task_id: str):
+    def _attach_stream_callback(self, task_id: str, owner: str | None = None):
         """为 API 提交的任务挂接流式回调（供 GET /stream?task_id= 订阅实时进度）"""
         try:
             from .streaming import StreamCallback, register_callback
             writer_agent = self._find_streaming_agent()
             if writer_agent is None:
                 return None
-            callback = StreamCallback()
+            callback = StreamCallback(owner=owner)
             # 按 task_id 注册到 writer 的回调注册表（并发任务互不串扰；
             # 旧单槽 _active_stream_callback 在多任务并发时会互相覆盖）
             writer_agent._register_stream_callback(task_id, callback)
@@ -1698,6 +1698,8 @@ class AdminHandler(BaseHTTPRequestHandler):
 
         query = str(data.get("query", "") or "").strip()
         typed_inputs = data.get("inputs")
+        if typed_inputs is not None and query:
+            return self._json({"error": "provide either 'query' or 'inputs', not both"}, 400)
         if typed_inputs is None and not query:
             return self._json({"error": "missing 'query' or 'inputs' field"}, 400)
 
@@ -1818,7 +1820,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         input_file = Path(tempfile.gettempdir()) / f"task_{task_id}.md"
         input_file.write_text(input_text, encoding="utf-8")
 
-        callback = self._attach_stream_callback(task_id)
+        callback = self._attach_stream_callback(task_id, owner=self._principal().id)
 
         try:
             task = self.orch.run_plan(plan, input_file=str(input_file),
@@ -2888,7 +2890,7 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def _start_stream_worker(self, writer_agent, task_id: str,
                              input_file: Path, callback,
-                             owner: str = "") -> threading.Thread:
+                             owner: str = "", pipeline_name: str = "") -> threading.Thread:
         """后台线程执行完整流水线（fetcher/researcher/writer 走 run_plan_async 真异步，
         替代旧的 writer_agent.handle_streaming 单 Agent 方式），完成后回调 complete/error"""
         orch = self.orch
@@ -2900,7 +2902,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             try:
                 sched = Scheduler()
                 name, err = resolve_pipeline_name(
-                    "", _scheduler_mod.installed_pipelines(), _default_pipeline_from(orch))
+                    pipeline_name, _scheduler_mod.installed_pipelines(),
+                    _default_pipeline_from(orch))
                 if err:
                     callback.on_error(err)
                     return
@@ -2931,6 +2934,10 @@ class AdminHandler(BaseHTTPRequestHandler):
         """SSE 流式端点 —— 实时推送文档生成进度。
 
         用法: GET /stream?task_id=<id>&query=<topic>&title=<title>
+              或 GET /stream?task_id=<id>&inputs=<JSON>&pipeline=<name>
+              （query 与 inputs 二选一；pipeline 默认取 default_pipeline。
+              载荷形状与 POST /api/tasks 同一道闸门：声明了 inputs 的流水线
+              拒自由文本，类型化载荷经 prepare_inputs 校验后渲染成输入文档）
         重连: 客户端断线后携带 Last-Event-ID header 重连，从断点继续推送。
         指标: GET /stream/metrics 获取流式指标快照。
         返回: text/event-stream 格式，每个事件含 id/type/data/section/total 字段。
@@ -2977,6 +2984,12 @@ class AdminHandler(BaseHTTPRequestHandler):
 
         # 已有活跃流：直接挂接订阅（replay 历史后续推），不再重复起流水线
         existing_callback = get_callback(task_id)
+        principal = self._principal()
+        if existing_callback is not None and not principal.admin \
+                and existing_callback.owner is not None \
+                and existing_callback.owner != principal.id:
+            self._json({"error": "task not found"}, 404)
+            return
 
         # 投影里的这条运行在不在调用方的作用域内：越权与"不存在"同形（404），
         # 不能因为 SSE 走另一条路径就漏掉租户隔离。
@@ -2989,9 +3002,52 @@ class AdminHandler(BaseHTTPRequestHandler):
         has_run = bool(store_rec is not None or (
             self.orch is not None and self.orch.run_handle(task_id).exists()))
 
-        if not query and existing_callback is None and not has_run:
-            self._json({"error": "missing 'query' parameter"}, 400)
-            return
+        typed_inputs = None
+        if existing_callback is None and not has_run:
+            inputs_raw = params.get("inputs", [""])[0]
+            if inputs_raw:
+                try:
+                    typed_inputs = _fast_loads(inputs_raw)
+                except Exception:
+                    return self._json({"error": "invalid 'inputs' JSON"}, 400)
+                if not isinstance(typed_inputs, dict):
+                    return self._json({"error": "'inputs' must be a JSON object"}, 400)
+            if typed_inputs is not None and query:
+                return self._json(
+                    {"error": "provide either 'query' or 'inputs', not both"}, 400)
+            if typed_inputs is None and not query:
+                self._json({"error": "missing 'query' or 'inputs' parameter"}, 400)
+                return
+
+        # 新发起（非重连、非已有运行）：载荷过与 POST /api/tasks 同一道 A3 闸门。
+        # query 是自由文本形，inputs 是类型化形；声明了 inputs 的流水线拒自由
+        # 文本（gate_freeform），类型化载荷走 prepare_inputs 校验+默认值填充。
+        # 放在 SSE 头之前 ⇒ 拒绝仍是 JSON 400（带字段路径），与 /api/tasks 同形。
+        input_text = None
+        pipeline_name = ""
+        # orch 缺失时无法解析 default_pipeline，走下面既有的 "orchestrator not
+        # set" SSE 错误路径，不在这里用 pipeline 解析错误把它提前截胡。
+        if existing_callback is None and not has_run and self.orch is not None:
+            pipeline_name, pipeline_err = resolve_pipeline_name(
+                str(params.get("pipeline", [""])[0]),
+                _scheduler_mod.installed_pipelines(),
+                _default_pipeline_from(self.orch))
+            if pipeline_err:
+                return self._json({"error": pipeline_err}, 400)
+            try:
+                from .scheduler import Scheduler
+                plan = Scheduler().parse(pipeline_name)
+            except Exception as e:
+                return self._json(
+                    {"error": f"failed to parse pipeline '{pipeline_name}': {e}"}, 400)
+            try:
+                if typed_inputs is not None:
+                    input_text = prepare_inputs(plan, typed_inputs, title=pipeline_name)
+                else:
+                    gate_freeform(plan, surface="GET /stream")
+                    input_text = f"# {title}\n\n## 查询\n\n{query}\n"
+            except InputValidationError as e:
+                return self._json(e.to_dict(), 400)
 
         # SSE headers
         self.send_response(200)
@@ -3024,8 +3080,11 @@ class AdminHandler(BaseHTTPRequestHandler):
             return
 
         # 首次连接
-        self._send_sse(StreamEvent("connected", {"task_id": task_id, "query": query,
-                                                 "resumed_from": 0, "reconnect": False}))
+        connected = {"task_id": task_id, "query": query,
+                     "resumed_from": 0, "reconnect": False}
+        if typed_inputs is not None:
+            connected["inputs"] = typed_inputs
+        self._send_sse(StreamEvent("connected", connected))
 
         if not self.orch:
             self._send_sse(StreamEvent("error", {"error": "orchestrator not set"}))
@@ -3038,7 +3097,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._send_sse(StreamEvent("error", {"error": "writer agent not found"}))
                 return
 
-            callback = StreamCallback()
+            callback = StreamCallback(owner=principal.id)
             register_callback(task_id, callback)
             track_stream_callback(task_id, callback)
 
@@ -3051,15 +3110,15 @@ class AdminHandler(BaseHTTPRequestHandler):
                 sections = []
             callback.on_start(len(sections), title)
 
-            # 创建临时输入文件（供全流水线 fetcher→researcher→writer 使用）
+            # 创建临时输入文件（供全流水线 fetcher→researcher→writer 使用）。
+            # 内容就是上游闸门过的 input_text（类型化渲染或自由文本），不在此另立一份。
             import tempfile
             input_file = Path(tempfile.gettempdir()) / f"stream_{task_id}.md"
-            input_file.write_text(
-                f"# {title}\n\n## 查询\n\n{query}\n", encoding="utf-8")
+            input_file.write_text(input_text, encoding="utf-8")
 
             worker = self._start_stream_worker(
                 writer_agent, task_id, input_file, callback,
-                owner=self._principal().id)
+                owner=principal.id, pipeline_name=pipeline_name)
 
             # 流式推送事件（心跳 + 断管止损），直到 complete/error
             self._pump_sse(callback, task_id)

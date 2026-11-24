@@ -116,7 +116,7 @@ curl -X POST http://127.0.0.1:8910/api/cache/clear \
 | GET | `/dlq` | 死信列表 |
 | POST | `/dlq/{dlq_id}/replay` | 重放死信消息，需 `X-Confirm: yes`（GET 形式同样要求） |
 | GET | `/stream/metrics` | 流式推送指标快照（连接数/事件数等） |
-| GET | `/stream` | SSE 流式生成，query 参数：`query`（必填）、`title`、`task_id`；
+| GET | `/stream` | SSE 流式生成，query 参数：`task_id`（必填）、`query`（自由文本，与 `inputs` 互斥；流水线声明了 `inputs` 时拒收）、`inputs`（类型化 JSON 字符串，URL 编码）、`title`、`pipeline`（默认取运行期 default_pipeline）；
 支持 `Last-Event-ID` 断线重连。返回 `text/event-stream`（需鉴权） |
 | GET | `/api/versions?file=<path>` | 文件版本历史 |
 | GET | `/api/versions/diff?file=<path>&v1=N&v2=M` | 对比两个版本 |
@@ -166,7 +166,7 @@ HTTP 侧不复制那条规则（两处判据一定会分叉）。
 |------|------|------|
 | POST | `/api/workflows/{name}/runs` | 通用提交口：body `{"inputs": {...}, "wait": bool, "output": str}`，按该流水线 `pipeline.inputs` 声明校验后开一次运行 |
 | GET | `/api/workflows/{name}/inputs` | 读回声明（`{"pipeline", "declared", "inputs"}`），客户端据此生成表单；没声明时 `declared: false` 而不是报错 |
-| POST | `/api/tasks` | 除 `query` 外可选 `inputs`：给了 `inputs` 就走同一道闸门 |
+| POST | `/api/tasks` | `query`（自由文本）与 `inputs`（类型化对象）互斥；给了 `inputs` 就走同一道闸门 |
 
 `{name}` 先过与 `task_id` 同一套字符白名单，再交给 `resolve_pipeline_name` 的已安装名单——
 白名单只有一处，URL 段拼不出目录遍历，也不会出现两份名单各漂各的。

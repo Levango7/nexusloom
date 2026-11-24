@@ -1166,7 +1166,9 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3977 个测试本机全绿**（`3977 passed, 25 skipped, 6 deselected`，2026-11-24 按 +1 条
+**3987 个测试本机全绿**（`3987 passed, 25 skipped, 6 deselected`，2026-11-24 按 +10 条
+（T10：`tests/test_typed_input_surfaces.py` 的 `GET /stream` 类型化输入、互斥载荷、重放与租户隔离判据）自 3977 同 skipped 集推为；
+2026-11-24 按 +1 条
 （OpenAPI `/mcp` 路径、请求体与 200/202/401/403 响应契约）自 3975 同 skipped 集推为；2026-11-24 按 +11 条
 （MCP Streamable HTTP＋任务控制：只读/危险元数据、approve/reject/resume 委托与失败、
 非法 id 零调用、真 HTTP initialize/通知/9 工具/错误帧/401/403、真 orchestrator 审批链），

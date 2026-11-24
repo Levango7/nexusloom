@@ -36,6 +36,9 @@ ADMIN_API = ROOT / "loom_core" / "admin_api.py"
 REGISTERED_JSON_400 = {
     "body 必须是 JSON 对象",                    # 解析成功但不是对象
     '需要 JSON 体 {"file": <path>, "version": <int>}',  # 体合规但缺字段
+    "invalid 'inputs' JSON",                    # GET /stream 的 inputs 查询参数不是合法 JSON（GET 无请求体，与 CANONICAL 的 body 条件不同）
+    "'inputs' must be a JSON object",           # inputs 查询参数解析成功但不是对象（查询参数版，对应 body 版的上一条）
+    "provide either 'query' or 'inputs', not both",  # 两种载荷形状互斥，不能静默择一
 }
 
 
