@@ -141,7 +141,7 @@
 3. **`--daemon`（只是 sleep）** —— 误导；用 `loom serve`（admin+worker+triggers）替代。
 4. **未验证的能力声明** —— `executor_type: process`（0 条流水线使用、无端到端判据）、`AgentResult`（0 个 Agent 使用）。要么补判据，要么删。 —— **2026-11-13 T9 核验改判**：process 的端到端判据已补且双绿（`tests/test_executor_process_e2e.py` 6 条：真子进程端到端 / child_context 重建 / thread 默认对照 / 未注册代理清晰报错 / 卡死子进程有界失败；本机实跑 6 passed 31s，CI test (3.11) 逐条 PASSED，run 43382471512；死锁史实 462e791 / PR #78 已修）。「0 条流水线使用」仍属实（YAML/锁文件零命中），但「无端到端判据」已不成立 ⇒ 留作可选能力，本条由「补判据 or 删」改判为闭环。`AgentResult` 0 命中已随 B8 批删死代码一并处置，本条两项均闭环。
 5. **admin 提交的文档语义** —— `title/query → 临时 .md` 是旧领域契约，统一到 A3 的类型化输入。
-6. **13 条"builtin packs"的说法** —— 要么给每条 YAML 配 `pack.yaml` 成为真 pack，要么在清册里如实叫 `builtin pipelines`。
+6. **13 条"builtin packs"的说法** —— 要么给每条 YAML 配 `pack.yaml` 成为真 pack，要么在清册里如实叫 `builtin pipelines`。 —— **2026-11-24 T11 闭环（取轻路径：清册如实化）**：`loom pack list` 头部改为分列计数，实测 `[pack] 1 packs, 13 builtin pipelines`；散装流水线行标签 `[builtin]` → `[builtin pipeline]`（`run.py:919-930`）；`pack_manifest.stats()` 新增 `builtin_pipelines` 键，`packs` 保持总条目语义并在 docstring 写明（安装态探针 `test_installable_product.py:140` 用它判"装了东西没有"）；模块文档串不再把 `pipelines/*.yaml` 记作 "one pack"。bootstrap `--check` 此前已如实（"13 条内置流水线"，`bootstrap.py:262`）。判据：`test_pack_manifest.py::TestStatsHonesty`（分列计数与总条目对账）+ `test_cli_verbs.py::test_pack_list_labels_builtin_pipelines_honestly`（真 CLI 头部句式与标签）。不走重路径（逐条配 `pack.yaml`）的理由：散装单文件任务型流水线是核心运行时的合法形态，问题在命名不实而非缺件。
 
 ---
 

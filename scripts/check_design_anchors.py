@@ -90,23 +90,24 @@ ANCHORS = [
     # 2026-11-07 第三次：批次一（#107 F1 / #108 F2 / #109 F3 / #110 F4+F5）又在 admin_api.py
     # 增删了路由与校验，这组锚点再次整体下移（+83…+104，偏移同样不是常数）；
     # 逐条按**整行原文**在合并后的树上重新定位，未按偏移推算。
+    # 2026-11-24：MCP HTTP 与任务控制并入主线后整批下移，逐条按整行原文重钉。
     ("loom_core/admin_api.py", 754, "get_task"),
-    ("loom_core/admin_api.py", 1184, "list_tasks"),
+    ("loom_core/admin_api.py", 1187, "list_tasks"),
     # Stage 2：/tasks、dashboard、cost 三处读口从 `list_tasks`（内存）换成
     # `list_runs`（内存缓存 ∪ 投影）——锚点跟着换而不是删，否则"读侧已并轨"
     # 这句话在表里就没有对应物了。
-    ("loom_core/admin_api.py", 1202, "list_runs"),
-    ("loom_core/admin_api.py", 1548, "def _task_checkpoint_view"),
-    ("loom_core/admin_api.py", 1948, "list_runs"),
-    ("loom_core/admin_api.py", 2522, "list_runs"),
-    ("loom_core/admin_api.py", 2886, "task = _aio.run(orch.run_plan_async("),
-    ("loom_core/admin_api.py", 2955, "existing_callback = get_callback(task_id)"),
+    ("loom_core/admin_api.py", 1205, "list_runs"),
+    ("loom_core/admin_api.py", 1551, "def _task_checkpoint_view"),
+    ("loom_core/admin_api.py", 1972, "list_runs"),
+    ("loom_core/admin_api.py", 2546, "list_runs"),
+    ("loom_core/admin_api.py", 2910, "task = _aio.run(orch.run_plan_async("),
+    ("loom_core/admin_api.py", 2979, "existing_callback = get_callback(task_id)"),
     # #8：账本与锁的只读 HTTP 面。三条 handler 进表，"文档教了这三个口"才在代码里
     # 有对应物（`test_doc_consistency` 只把文档对到 openapi 规范，规范和 handler
     # 之间没人守——这条就是补那段距离的）。
-    ("loom_core/admin_api.py", 2056, "def _handle_deliveries"),
-    ("loom_core/admin_api.py", 2074, "def _handle_delivery_detail"),
-    ("loom_core/admin_api.py", 2216, "def _handle_locks"),
+    ("loom_core/admin_api.py", 2080, "def _handle_deliveries"),
+    ("loom_core/admin_api.py", 2098, "def _handle_delivery_detail"),
+    ("loom_core/admin_api.py", 2240, "def _handle_locks"),
     # 锁路径解析只留一处：巡检口（`lock_drift`）与执行口（`_verify_lock_after_parse`）
     # 各自解析一次就会报出执行时根本不会发生的漂移。
     ("loom_core/scheduler.py", 338, "def resolve_lock_path"),

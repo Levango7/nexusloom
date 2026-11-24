@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   五章节 `generic-tech`；新增 `restructure_max_tokens` 配置并在本流水线限为 768，避免
   多次长生成。模板只依据调用方已鉴权上下文成稿，缺信息写「未提供」，不得编造。
 
+### Changed（2026-11-24，T11 builtin pipelines 清册如实化）
+
+- `loom pack list` 将物理 pack 与核心散装流水线分开计数，行标签从 `[builtin]` 改为
+  `[builtin pipeline]`；`pack_manifest.stats()` 新增 `builtin_pipelines`，`packs` 保留
+  总条目语义供安装态探针使用。设计评审台账 §3.3-6 按轻路径闭环，不为 13 条核心 YAML
+  逐条补 `pack.yaml`。
+
 ### Added（2026-11-22，办公系统嵌入试点）
 
 - **`office-daily-report` 流水线**：面向办公系统已按权限聚合的内部上下文，
