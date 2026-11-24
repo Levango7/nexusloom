@@ -916,13 +916,18 @@ def main():
     if verb_action == "pack_list":
         from loom_core import pack_manifest as pack_mf
         infos = pack_mf.discover()
-        print(f"[pack] {len(infos)} packs")
+        # 散装流水线不是 pack（无 pack.yaml、无 bundle 目录）：头部计数单列，
+        # 行标签叫 builtin pipeline，清册里不把它们冒充成 pack（台账 §3.3-6）。
+        builtin = [i for i in infos if i.source == "builtin"]
+        pack_rows = [i for i in infos if i.source != "builtin"]
+        print(f"[pack] {len(pack_rows)} packs, {len(builtin)} builtin pipelines")
         for info in infos:
+            label = "builtin pipeline" if info.source == "builtin" else info.source
             if info.is_physical:
                 pipes = ", ".join(info.declared_pipelines) or "-"
-                print(f"  {info.name:14s} [{info.source}]  agents={len(info.agent_names)}  pipelines: {pipes}")
+                print(f"  {info.name:14s} [{label}]  agents={len(info.agent_names)}  pipelines: {pipes}")
             else:
-                print(f"  {info.name:14s} [{info.source}]  agents={len(info.agent_names)}")
+                print(f"  {info.name:14s} [{label}]  agents={len(info.agent_names)}")
         return
 
     # ─── pack new（loom pack new <name>）────────────

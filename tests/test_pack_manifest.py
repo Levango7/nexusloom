@@ -130,3 +130,16 @@ class TestCallNodesAreNotAgents:
         assert "fact_checker" in inlined, (
             "agents of the called sub-pipeline did not enter the caller pack; "
             "the assembly would silently lose them")
+
+
+class TestStatsHonesty:
+    """台账 §3.3-6：散装流水线在清册里必须与 pack 分开计数，不能叫 pack。"""
+
+    def test_stats_reports_builtin_pipelines_separately(self):
+        st = pm.stats()
+        builtin_names = {p.name for p in pm.discover() if p.source == "builtin"}
+        assert st["builtin_pipelines"] == len(builtin_names) >= 1
+        # packs 仍是总条目（安装态探针用它判"装了东西没有"），
+        # 扣掉 builtin_pipelines 才是真 pack 数。
+        real_packs = {p.name for p in pm.discover() if p.source != "builtin"}
+        assert st["packs"] - st["builtin_pipelines"] == len(real_packs)

@@ -1166,7 +1166,9 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3987 个测试本机全绿**（`3987 passed, 25 skipped, 6 deselected`，2026-11-24 按 +10 条
+**3989 个测试本机全绿**（`3989 passed, 25 skipped, 6 deselected`，2026-11-24 按 +2 条
+（T11：`tests/test_pack_manifest.py` 分列计数 + `tests/test_cli_verbs.py` 真 CLI 标签）自 3987 同 skipped 集推为；
+2026-11-24 按 +10 条
 （T10：`tests/test_typed_input_surfaces.py` 的 `GET /stream` 类型化输入、互斥载荷、重放与租户隔离判据）自 3977 同 skipped 集推为；
 2026-11-24 按 +1 条
 （OpenAPI `/mcp` 路径、请求体与 200/202/401/403 响应契约）自 3975 同 skipped 集推为；2026-11-24 按 +11 条

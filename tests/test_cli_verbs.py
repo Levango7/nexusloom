@@ -147,6 +147,22 @@ class TestVerbSmoke:
         assert "docgen" in proc.stdout
         assert "[pack]" in proc.stdout
 
+    def test_pack_list_labels_builtin_pipelines_honestly(self):
+        """散装流水线单列计数与标签，不冒充 pack（台账 §3.3-6）。"""
+        import re
+        proc = self._cli(["pack", "list"])
+        assert proc.returncode == 0, proc.stderr[-400:]
+        assert "[builtin pipeline]" in proc.stdout
+        m = re.search(r"\[pack\] (\d+) packs, (\d+) builtin pipelines",
+                      proc.stdout)
+        assert m, f"头部计数句式变了：{proc.stdout.splitlines()[0]!r}"
+        rows = [line for line in proc.stdout.splitlines() if line.startswith("  ")]
+        labels = [line.split("[", 1)[1].split("]", 1)[0]
+                  for line in rows if "[" in line and "]" in line]
+        assert int(m.group(1)) == len([label for label in labels
+                                       if label != "builtin pipeline"])
+        assert int(m.group(2)) == labels.count("builtin pipeline") >= 1
+
     def test_plugin_list_includes_pack_agents(self):
         """plugin list 列的是全清册（含 packs/docgen/agents 的文档件）。"""
         proc = self._cli(["plugin", "list"])

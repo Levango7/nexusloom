@@ -8,7 +8,10 @@ individual pack files; it may only ask the manifest**.
 
 Measured sources (all via loom_core.paths, which honours LOOM_ROOT
 and still resolves after a wheel install):
-  1. pipelines/*.yaml -- every non-underscore pipeline counts as one pack;
+  1. pipelines/*.yaml -- every non-underscore loose pipeline counts as one
+     **built-in pipeline**: a bare YAML in the core dir, not a pack (no
+     pack.yaml, no bundle dir). The inventory must not call these packs —
+     `stats()` reports the subset separately as builtin_pipelines;
   2. agents/*.py      -- built-in Agent modules;
   3. entry_points group loom.packs -- packs from external pip packages.
 """
@@ -291,13 +294,22 @@ def agent_inventory() -> tuple[list[str], list[str]]:
 
 
 def stats() -> dict:
-    """One-line summary for --check: pack count, available and missing agents."""
+    """One-line summary for --check: pack count, available and missing agents.
+
+    `packs` counts every inventory entry (physical packs + entry-point packs
+    + built-in loose pipelines) — it answers "did anything install at all"
+    （安装态探针用它判空）。`builtin_pipelines` isolates the loose-pipeline
+    subset so consumers neither re-derive it nor mistake those YAMLs for
+    packs（台账 §3.3-6）。
+    """
     packs = discover()
     available, missing = agent_inventory()
+    builtins = [p for p in packs if p.source == "builtin"]
     return {
         "packs": len(packs),
         "pack_names": [p.name for p in packs],
         "pack_infos": packs,
+        "builtin_pipelines": len(builtins),
         "agents": len(available),
         "agents_available": available,
         "agents_missing": missing,
