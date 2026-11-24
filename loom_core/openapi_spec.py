@@ -648,9 +648,14 @@ def _ops_paths() -> dict:
             "get": {
                 "summary": "SSE 流式文档生成",
                 "parameters": [
-                    {"name": "query", "in": "query", "required": True, "schema": {"type": "string"}},
+                    {"name": "task_id", "in": "query", "required": True, "schema": {"type": "string"}},
+                    {"name": "query", "in": "query", "schema": {"type": "string"},
+                     "description": "自由文本主题；与 inputs 二选一；流水线声明了 inputs 时本参数被拒"},
+                    {"name": "inputs", "in": "query", "schema": {"type": "string"},
+                     "description": "类型化载荷 JSON（URL 编码），按流水线的 pipeline.inputs 校验"},
+                    {"name": "pipeline", "in": "query", "schema": {"type": "string"},
+                     "description": "流水线名，默认取运行期 default_pipeline"},
                     {"name": "title", "in": "query", "schema": {"type": "string"}},
-                    {"name": "task_id", "in": "query", "schema": {"type": "string"}},
                     {
                         "name": "Last-Event-ID",
                         "in": "header",

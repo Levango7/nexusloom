@@ -137,7 +137,8 @@ class StreamCallback:
     BOUNDARY_EVENT_TYPES = frozenset({"start", "section", "complete", "error"})
     DROPPABLE_EVENT_TYPES = frozenset({"progress", "chunk"})
 
-    def __init__(self, max_queue_size: int = 100):
+    def __init__(self, max_queue_size: int = 100, *, owner: str | None = None):
+        self.owner = owner
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue_size)
         self._closed = threading.Event()
         self._lock = threading.Lock()

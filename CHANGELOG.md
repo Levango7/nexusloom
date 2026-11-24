@@ -34,6 +34,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   五章节 `generic-tech`；新增 `restructure_max_tokens` 配置并在本流水线限为 768，避免
   多次长生成。模板只依据调用方已鉴权上下文成稿，缺信息写「未提供」，不得编造。
 
+### Changed（2026-11-24，T10 GET /stream 统一类型化输入）
+
+- `GET /stream` 新发起连接与 `POST /api/tasks` 共用 A3 输入闸门：先解析流水线，
+  类型化载荷走 `prepare_inputs`，自由文本走 `gate_freeform`；临时 `.md` 直接写闸门
+  渲染结果。schema 校验失败在 SSE 头之前返回字段级 JSON 400。
+- `query` 与 URL 编码的 `inputs` 互斥，新增可选 `pipeline`（默认取运行期
+  `default_pipeline`）；重连与已有运行仍只 replay，不重复执行，也不解析新载荷。
+- 活跃流回调绑定发起者 Principal；投影尚未落行时，跨租户重连同样按“不存在”返回 404。
+  OpenAPI、API 文档与 `TestStreamEndpoint` 9 条判据、`TestTasksEndpoint` 双载荷互斥 1 条判据同步。
+
 ### Changed（2026-11-24，T11 builtin pipelines 清册如实化）
 
 - `loom pack list` 将物理 pack 与核心散装流水线分开计数，行标签从 `[builtin]` 改为

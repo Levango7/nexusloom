@@ -75,7 +75,11 @@ class TestOpenAPISpec:
     def test_stream_has_query_params(self, spec):
         path = spec["paths"]["/stream"]["get"]
         params = path["parameters"]
-        assert any(p["name"] == "query" and p["in"] == "query" for p in params)
+        names = {p["name"] for p in params}
+        assert {"query", "inputs", "pipeline", "task_id"} <= names
+        assert any(p["name"] == "task_id" and p.get("required") for p in params)
+        inputs_param = next(p for p in params if p["name"] == "inputs")
+        assert inputs_param["schema"]["type"] == "string"
 
     def test_responses_exist(self, spec):
         """每个操作都要声明 responses，且至少含一个 2xx 成功响应。
