@@ -770,10 +770,18 @@ tokens:
 python run.py --mcp
 ```
 
-提供 6 个 tools：`generate_document`、`run_workflow`（通用入口：任意已安装流水线 +
+Admin API 同时提供 **Streamable HTTP `POST /mcp`**（默认与 dashboard 同端口，例如
+`http://127.0.0.1:8910/mcp`），复用同一个 orchestrator，支持 initialize、标准通知、
+tools/list 与 tools/call。首版仅 admin Principal 可用：未鉴权 401、具名非 admin token 403；
+鉴权、Origin 写闸与请求体上限沿用 Admin API。
+
+提供 9 个 tools：`generate_document`、`run_workflow`（通用入口：任意已安装流水线 +
 任意 `inputs`，对象按「## 键」序列化为输入文档、字符串原样写入）、`get_task`、
-`list_tasks`、`list_pipelines`、`get_pipeline_info`。`get_task` 与 `GET /tasks/<id>`
-返回的 `artifacts` 字段来自同一个原语（见下）。
+`list_tasks`、`list_pipelines`、`get_pipeline_info`、`approve_task`、`reject_task`、
+`resume_task`。查询四工具带 `annotations.readOnlyHint=true`；写与控制工具保持危险确认。
+`get_task` 与 `GET /tasks/<id>` 返回的 `artifacts` 字段来自同一个原语（见下），并返回
+`awaiting_approval`/`approvals`，便于客户端区分普通暂停与人工审批门。长任务建议
+`wait=false` 后轮询 `get_task`；审批等待只能 approve/reject，不能用 resume 绕过。
 
 ### 编程句柄 `RunHandle`
 
@@ -1158,7 +1166,11 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3964 个测试本机全绿**（`3964 passed, 25 skipped, 6 deselected`，2026-11-24 按 +5 条
+**3977 个测试本机全绿**（`3977 passed, 25 skipped, 6 deselected`，2026-11-24 按 +1 条
+（OpenAPI `/mcp` 路径、请求体与 200/202/401/403 响应契约）自 3975 同 skipped 集推为；2026-11-24 按 +11 条
+（MCP Streamable HTTP＋任务控制：只读/危险元数据、approve/reject/resume 委托与失败、
+非法 id 零调用、真 HTTP initialize/通知/9 工具/错误帧/401/403、真 orchestrator 审批链），
+自 3964 同 skipped 集推为；2026-11-24 按 +5 条
 （DeepSeek/LLMRouter 可用性与短日报成本控制：路由异常不启用／仅路由器进入真实重构调用／
 章节 token 上限／office-daily-report 专用单节模板与 lock／输入 H1 标题传递），并补记 #146 通知帧判据 +2，
 自 3957 同 skipped 集推为；2026-11-22 按 +3 条

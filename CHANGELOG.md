@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added（2026-11-24，Interaction α：MCP Streamable HTTP 与任务控制）
+
+- **`POST /mcp`**：Admin API 新增 Streamable HTTP 薄适配，与 stdio 共用
+  `MCPServer._handle_request` 和同一个 orchestrator；支持 initialize、标准通知（202 空体）、
+  tools/list 与 tools/call。首版仅 admin Principal：未鉴权 401、具名非 admin token 403，
+  沿用鉴权、Origin 写闸与 10MiB 上限，不新增匿名或跨租户面。
+- **任务控制三工具**：`approve_task`/`reject_task`/`resume_task` 直接复用
+  `orch.approve/reject/resume`；查询四工具标 `readOnlyHint=true`，写/控制工具仍由宿主
+  执行危险确认。`get_task` 补 `awaiting_approval` 与 `approvals`，让 Interaction 能区分
+  人工审批门与普通暂停，避免用 resume 绕过审批。长任务推荐 `wait=false`＋轮询。
+- **真实跨仓验收**：Interaction 自有 MCP 客户端完成 9 工具发现、run 写调用一次、
+  审批暂停、resume 拒绝、approve 后 done；离线流水线零模型费用，另有 HTTP 鉴权/错误帧
+  与 approve→done、reject→cancelled 真 orchestrator 判据。
+
 ### Fixed（2026-11-24，DeepSeek 配置断链与短日报成本控制）
 
 - **writer 统一 LLM 可用性判断**：通用直连 Key 或 LLMRouter 活动供应商任一存在即可进入

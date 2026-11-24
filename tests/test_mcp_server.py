@@ -61,7 +61,7 @@ class TestMCPServer:
     def test_tools_list(self, server):
         resp = server._handle_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         tools = resp["result"]["tools"]
-        assert len(tools) == 6
+        assert len(tools) == 9
         names = [t["name"] for t in tools]
         assert "generate_document" in names
         assert "run_workflow" in names
@@ -69,6 +69,9 @@ class TestMCPServer:
         assert "list_tasks" in names
         assert "list_pipelines" in names
         assert "get_pipeline_info" in names
+        assert "approve_task" in names
+        assert "reject_task" in names
+        assert "resume_task" in names
 
     def test_tool_has_input_schema(self, server):
         resp = server._handle_request({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
@@ -138,6 +141,54 @@ class TestMCPServer:
         assert isinstance(content, list)
         assert content[0]["type"] == "text"
         assert isinstance(content[0]["text"], str)
+
+
+class TestTaskControlTools:
+    def test_readonly_annotations_and_control_schemas(self, server):
+        resp = server._handle_request({"jsonrpc": "2.0", "id": 20, "method": "tools/list"})
+        tools = {t["name"]: t for t in resp["result"]["tools"]}
+        readonly = {"get_task", "list_tasks", "list_pipelines", "get_pipeline_info"}
+        for name in readonly:
+            assert tools[name]["annotations"]["readOnlyHint"] is True
+        for name in {"generate_document", "run_workflow", "approve_task", "reject_task", "resume_task"}:
+            assert tools[name].get("annotations", {}).get("readOnlyHint") is not True
+            assert tools[name]["inputSchema"]["required"] == ["task_id"] if name.endswith("_task") else True
+
+    def test_approve_and_reject_delegate_with_actor(self):
+        orch = MagicMock()
+        orch.approve.return_value = (True, "")
+        orch.reject.return_value = (True, "")
+        server = MCPServer(orch=orch, actor="127.0.0.1|fingerprint")
+        approved = server._handle_request({"jsonrpc": "2.0", "id": 21, "method": "tools/call",
+            "params": {"name": "approve_task", "arguments": {"task_id": "run-1", "note": "ok"}}})
+        rejected = server._handle_request({"jsonrpc": "2.0", "id": 22, "method": "tools/call",
+            "params": {"name": "reject_task", "arguments": {"task_id": "run-1", "reason": "no"}}})
+        assert json.loads(approved["result"]["content"][0]["text"])["approved"] is True
+        assert json.loads(rejected["result"]["content"][0]["text"])["rejected"] is True
+        orch.approve.assert_called_once_with("run-1", note="ok", by="127.0.0.1|fingerprint")
+        orch.reject.assert_called_once_with("run-1", reason="no", by="127.0.0.1|fingerprint")
+
+    def test_resume_result_and_business_failure(self):
+        orch = MagicMock()
+        orch.resume.side_effect = [True, False]
+        server = MCPServer(orch=orch)
+        ok = server._handle_request({"jsonrpc": "2.0", "id": 23, "method": "tools/call",
+            "params": {"name": "resume_task", "arguments": {"task_id": "run-1"}}})
+        bad = server._handle_request({"jsonrpc": "2.0", "id": 24, "method": "tools/call",
+            "params": {"name": "resume_task", "arguments": {"task_id": "run-2"}}})
+        assert json.loads(ok["result"]["content"][0]["text"])["resumed"] is True
+        assert bad["result"]["isError"] is True
+
+    def test_controls_reject_invalid_task_id_without_calling_orch(self):
+        orch = MagicMock()
+        server = MCPServer(orch=orch)
+        for name in ("approve_task", "reject_task", "resume_task"):
+            resp = server._handle_request({"jsonrpc": "2.0", "id": 25, "method": "tools/call",
+                "params": {"name": name, "arguments": {"task_id": "../escape"}}})
+            assert resp["result"]["isError"] is True
+        orch.approve.assert_not_called()
+        orch.reject.assert_not_called()
+        orch.resume.assert_not_called()
 
 
 class TestRunWorkflowTool:
