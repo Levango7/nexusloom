@@ -270,7 +270,8 @@ class TestWriterGrounding:
         """无 LLM Key 时也必须交付真实内容（抽取式），且带可溯源参考清单。"""
         w = self._writer(tmp_path)
         w._llm_api_key = ""
-        res = w._build_from_kb(self.HITS, TOPIC, "测试文档", "t1")
+        with patch("loom_core.llm_router.get_router", return_value=None):
+            res = w._build_from_kb(self.HITS, TOPIC, "测试文档", "t1")
         assert res["status"] == "ok"
         assert res["stats"]["llm_used"] is False
         assert res["stats"]["kb_hits"] == 2
@@ -309,7 +310,8 @@ class TestWriterGrounding:
                                                  {"results": self.HITS}},
                            queries=[TOPIC], query=TOPIC,
                            title="测试文档")
-        res = w.handle(_msg(payload))
+        with patch("loom_core.llm_router.get_router", return_value=None):
+            res = w.handle(_msg(payload))
         assert res is not None
         assert res["status"] == "ok"
         assert "producer_byte_rate" in res["content"]
@@ -356,7 +358,8 @@ class TestKbPipelineOfflineE2E:
             # Windows 上的 asyncio/tempfile 行为随之失真）
             with patch.dict("os.environ",
                             {"LLM_API_KEY": "", "SILICONFLOW_API_KEY": ""},
-                            clear=False):
+                            clear=False), \
+                    patch("loom_core.llm_router.get_router", return_value=None):
                 # 必须用唯一 task_id：幂等键形如 `{task_id}:{node}:{attempts}`，
                 # 而 bus_data/message_bus.db 是按源码位置算出的**绝对路径**
                 # （message_store.py:28），同一份 checkout 里重复用同一个

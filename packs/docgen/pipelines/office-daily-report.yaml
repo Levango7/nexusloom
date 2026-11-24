@@ -18,7 +18,8 @@ agents:
     timeout: 300
     dependencies: []
     config:
-      prompt_profile: generic-tech
+      prompt_profile: office-daily-report
+      restructure_max_tokens: 768
 
   # 质量尾整段来自共享片段：评分、检查、排版、落盘与 docgen 同一份实现。
   # 日报是内部上下文成稿，默认不做公网事实核查（fact_check: false）。

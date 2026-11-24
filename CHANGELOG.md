@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed（2026-11-24，DeepSeek 配置断链与短日报成本控制）
+
+- **writer 统一 LLM 可用性判断**：通用直连 Key 或 LLMRouter 活动供应商任一存在即可进入
+  生成、重构、文章/KB 与润色路径。此前仅配置 `DEEPSEEK_API_KEY/URL/MODEL` 时，路由器虽已
+  识别供应商，handle 却在模型调用前落入「未采集到可整合的搜索结果」占位稿；真实请求
+  根本没有发出。路由器异常仍按不可用处理，完全无模型时的拒绝拼贴契约不变。
+- **保留 Admin API 传入的文档标题**：writer 现在即使已拿到 queries，也会从输入文档 H1
+  补回标题；显式 `payload.title` 仍优先。此前 `/api/tasks` 的 title 只出现在响应回显中，
+  正文仍叫「自动生成文档」。
+- **`office-daily-report` 改专用单节短日报模板**：不再复用要求技术教程、图表与代码的
+  五章节 `generic-tech`；新增 `restructure_max_tokens` 配置并在本流水线限为 768，避免
+  多次长生成。模板只依据调用方已鉴权上下文成稿，缺信息写「未提供」，不得编造。
+
 ### Added（2026-11-22，办公系统嵌入试点）
 
 - **`office-daily-report` 流水线**：面向办公系统已按权限聚合的内部上下文，

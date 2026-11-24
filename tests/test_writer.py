@@ -19,6 +19,8 @@ import time
 import types
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from loom_core.base_agent import AgentMeta, Message
 from loom_core.streaming import StreamCallback
 from loom_doc import degradation
@@ -46,6 +48,15 @@ def _make_writer(tmp_path, **cfg) -> WriterAgent:
 
 def _msg(payload: dict, topic: str = "writer.input") -> Message:
     return Message(topic=topic, payload=payload, from_agent="test")
+
+
+@pytest.fixture(autouse=True)
+def isolated_llm_router():
+    """默认无供应商；本文件任何降级判据都不得读取真实 Key 或访问模型。"""
+    router = MagicMock()
+    router.get_active_providers.return_value = []
+    with patch("loom_core.llm_router.get_router", return_value=router):
+        yield router
 
 
 # ─── TemplateManager / 转义 ────────────────────────────────
@@ -86,6 +97,11 @@ class TestLLMChat:
         with patch("loom_core.llm_router.get_router", return_value=router):
             assert w._llm_chat([{"role": "user", "content": "hi"}]) == "router-answer"
         router.chat.assert_called_once()
+
+    def test_router_error_is_not_llm_availability(self, tmp_path):
+        w = _make_writer(tmp_path)
+        with patch("loom_core.llm_router.get_router", side_effect=RuntimeError("no router")):
+            assert w._llm_available() is False
 
     def test_fallback_to_single_llm_openai_format(self, tmp_path):
         w = _make_writer(tmp_path)
@@ -481,6 +497,18 @@ class TestHandle:
         # 输入文件首行非注释内容被提取为 query 并传给重构
         assert w._restructure_document.call_args[0][2] == "实际主题内容行"
 
+    def test_input_file_h1_supplies_title_even_with_queries(self, tmp_path):
+        """Admin API 把 title 写成 H1；已有 queries 时也不得丢标题。"""
+        w = _make_writer(tmp_path)
+        w._llm_api_key = "k"
+        w._restructure_document = MagicMock(return_value="LLM-DOC")
+        inp = tmp_path / "daily.md"
+        inp.write_text("# 研发一组日报\n\n## 查询\n\n内部上下文\n", encoding="utf-8")
+        res = w.handle(_msg({"task_id": "t-title", "input_file": str(inp),
+                             "queries": ["内部上下文"]}))
+        assert res["status"] == "ok"
+        assert w._restructure_document.call_args[0][3] == "研发一组日报"
+
     def test_pending_results_consumed(self, tmp_path):
         w = _make_writer(tmp_path)
         results = [{"title": "PendT", "snippet": "PendS " * 20, "url": "https://p.com",
@@ -598,6 +626,27 @@ class TestHandle:
         w._restructure_document = MagicMock(return_value="LLM-DOC")
         res = w.handle(_msg({"task_id": "t10", "query": "主题"}))
         assert res["content"] == "LLM-DOC"
+
+    def test_no_results_with_router_only_generates_via_restructure(
+            self, tmp_path, isolated_llm_router):
+        """DEEPSEEK_* 只进入路由器，没有通用 Key 时也不得落入占位稿。"""
+        w = _make_writer(tmp_path)
+        isolated_llm_router.get_active_providers.return_value = ["deepseek"]
+        w._load_prompt_template = MagicMock(return_value={
+            "system_prompt": "sys",
+            "sections": [{"name": "日报", "prompt": "整理 {query}"}],
+        })
+        calls = []
+
+        async def _chat_async(messages, **kw):
+            calls.append((messages, kw))
+            return ("# 日报\n\nDEEPSEEK-DOC", "deepseek")
+
+        isolated_llm_router.chat_async = _chat_async
+        res = w.handle(_msg({"task_id": "t-router", "query": "内部日报上下文"}))
+        assert "DEEPSEEK-DOC" in res["content"]
+        assert degradation.EMPTY_RESULT_DOC not in res["content"]
+        assert len(calls) == 1
 
 
 class TestExpireStalePending:
@@ -1036,6 +1085,20 @@ class TestGenerateTextAsync:
         with patch("loom_core.llm_router.get_router", return_value=router):
             out = asyncio.run(w._generate_text_async("sp", "sys", "ctx"))
         assert out == "router-async-content"
+
+    def test_section_uses_configured_token_cap(self, tmp_path, isolated_llm_router):
+        w = _make_writer(tmp_path, restructure_max_tokens=768)
+        isolated_llm_router.get_active_providers.return_value = ["deepseek"]
+        seen = {}
+
+        async def _chat_async(messages, **kw):
+            seen.update(kw)
+            return ("短日报", "deepseek")
+
+        isolated_llm_router.chat_async = _chat_async
+        out = asyncio.run(w._generate_section_async(0, "日报", "p", "sys", "ctx"))
+        assert out[2] == "短日报"
+        assert seen["max_tokens"] == 768
 
     def test_fallback_to_llm_chat_async(self, tmp_path):
         w = _make_writer(tmp_path)
