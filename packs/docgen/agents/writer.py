@@ -163,6 +163,7 @@ class WriterAgent(BaseAgent):
 
         # Prompt 模板配置
         self._prompt_profile = config.get("prompt_profile", "default")
+        self._restructure_max_tokens = int(config.get("restructure_max_tokens", 4096))
         from loom_core.pack_manifest import prompts_dirs as _prompts_dirs
         self._prompts_dirs = _prompts_dirs()
         self._prompt_template_cache = CacheManager(
@@ -225,6 +226,18 @@ class WriterAgent(BaseAgent):
             if cb is None and task_id:
                 cb = self._stream_callbacks.get(self._LEGACY_STREAM_KEY)
             return cb
+
+    def _llm_available(self) -> bool:
+        """通用直连 Key 或 LLMRouter 活动供应商，任一存在即可走生成路径。"""
+        if self._llm_api_key:
+            return True
+        try:
+            from loom_core.llm_router import get_router
+            router = get_router()
+            return bool(router and router.get_active_providers())
+        except Exception as e:
+            self.log_debug(f"LLMRouter 可用性检查失败: {e}")
+            return False
 
     def _llm_chat(self, messages: list[dict], max_tokens: int = 4096,
                   temperature: float = 0.3, timeout: int = 120) -> str:
@@ -484,7 +497,7 @@ class WriterAgent(BaseAgent):
         if len(sections) <= 1:
             return sections
 
-        if not self._llm_api_key:
+        if not self._llm_available():
             return sections  # LLM 不可用，跳过润色
 
         polished = [None] * len(sections)
@@ -542,7 +555,7 @@ class WriterAgent(BaseAgent):
 
     def _polish_with_llm(self, content: str, query: str) -> str:
         """用 LLM 润色文档段落衔接（含缓存+质量门控+分段+规则兜底）"""
-        if not self._llm_api_key or not content.strip():
+        if not self._llm_available() or not content.strip():
             return content
 
         cache_key = hashlib.sha256((content[:200] + query).encode()).hexdigest()
@@ -637,11 +650,26 @@ class WriterAgent(BaseAgent):
                 self._llm_api_key = runtime_cfg["llm_api_key"]
             if "llm_model" in runtime_cfg:
                 self._llm_model = runtime_cfg["llm_model"]
+            if "restructure_max_tokens" in runtime_cfg:
+                self._restructure_max_tokens = int(runtime_cfg["restructure_max_tokens"])
             self.log_info(f"运行时配置已刷新: prompt_profile={self._prompt_profile}, model={self._llm_model}")
 
         template_name = payload.get("template", "default")
         title = payload.get("title", "自动生成文档")
         query = payload.get("query", "")
+
+        # Admin API 把 title 写成输入文档 H1；即使 queries 已提取，也要补回标题。
+        input_file = payload.get("input_file", "")
+        if title == "自动生成文档" and input_file and os.path.exists(input_file):
+            try:
+                with open(input_file, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("# "):
+                            title = line[2:].strip() or title
+                            break
+            except Exception as e:
+                self.log_warning(f"读取输入标题失败: {e}")
 
         # 从 DocumentSpec 增强标题和查询：优先使用 spec.doc_type 和 spec.scope
         spec = payload.get("spec") or {}
@@ -671,6 +699,7 @@ class WriterAgent(BaseAgent):
                     self.log_warning(f"读取输入文件失败: {e}")
 
         self._expire_stale_pending()
+        llm_available = self._llm_available()
 
         # ── 优先使用 fetcher 的完整文章 ──
         articles = payload.get("articles", [])
@@ -696,7 +725,7 @@ class WriterAgent(BaseAgent):
 
         if not results:
             # 无搜索结果也无文章：若 LLM 可用，仍尝试基于 query 生成文档
-            if query and self._llm_api_key:
+            if query and llm_available:
                 self.log_info(f"任务 {task_id}: 无文章无摘要，用 LLM 基于主题生成文档")
                 restructured = self._restructure_document("", [], query, title, task_id=task_id)
                 if restructured:
@@ -716,8 +745,8 @@ class WriterAgent(BaseAgent):
         with self._pending_lock:
             self.pending_results.pop(task_id, None)
 
-        # 治本（2026-11-10）：检索摘要路径同理，无 Key 不拼贴。
-        if not self._llm_api_key:
+        # 治本（2026-11-10）：检索摘要路径同理，无可用 LLM 不拼贴。
+        if not llm_available:
             content = self._keyless_refusal_content(
                 title, query, f"已检索 {len(results)} 条结果，无法整合成文")
             self.log_warning(
@@ -733,7 +762,7 @@ class WriterAgent(BaseAgent):
 
         # 裁决（2026-11-10 第三批）：同 articles 路径——空查询时重构没有
         # 目标，_generate_document 的摘要拼贴不得出厂。
-        if not query and self._llm_api_key:
+        if not query and llm_available:
             content = self._restructure_refusal_content(
                 title, query, f"已检索 {len(results)} 条结果，无查询主题可执行重构")
             self.log_warning(
@@ -748,7 +777,7 @@ class WriterAgent(BaseAgent):
                               "restructure_refused": True}}
 
         # LLM 重构：即使只有搜索摘要，也用 LLM 生成完整技术文档
-        if query and self._llm_api_key:
+        if query and llm_available:
             # 将搜索摘要转为伪文章上下文
             snippet_articles = []
             for r in results[:5]:
@@ -825,6 +854,7 @@ class WriterAgent(BaseAgent):
         有 LLM 时再走既有的重构路径 —— 素材上下文进 prompt 也进缓存键。
         """
         self.log_info(f"任务 {task_id}: 使用知识库命中 {len(hits)} 个切块接地")
+        llm_available = self._llm_available()
 
         parts = [f"# {title}", "",
                  f"> 生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}"]
@@ -856,7 +886,7 @@ class WriterAgent(BaseAgent):
                  # 这里只报查询，供主题绑定判据对账。
                  "query": query}
 
-        if query and self._llm_api_key:
+        if query and llm_available:
             restructured = self._restructure_document(
                 draft, self._kb_articles(hits), query, title, task_id=task_id)
             if restructured:
@@ -907,6 +937,7 @@ class WriterAgent(BaseAgent):
                               task_id: str) -> dict:
         """从完整文章构建文档（先骨架，再填内容）"""
         self.log_info(f"任务 {task_id}: 从 {len(articles)} 篇文章构建文档")
+        llm_available = self._llm_available()
 
         # Step 1: 读取所有本地文章内容（按相关性降序，优先用相关素材）
         sorted_articles = sorted(
@@ -941,7 +972,7 @@ class WriterAgent(BaseAgent):
 
         # 治本（2026-11-10）：无 Key 时 web 素材拼贴=把检索原文当成品出厂
         # （FP-1b 的源头），宁可不交；KB 抽取式草稿是另一条约，不在此列。
-        if not self._llm_api_key and article_contents:
+        if not llm_available and article_contents:
             content = self._keyless_refusal_content(
                 title, query, f"已读取 {len(article_contents)} 篇素材，无法整合成文")
             self.log_warning(
@@ -956,7 +987,7 @@ class WriterAgent(BaseAgent):
         # 裁决（2026-11-10 第三批）：web 素材只有在 LLM 重构真正执行时才可交付。
         # 空查询时重构没有目标，与无 Key / 重构不可用同病——骨架+TF-IDF 的
         # 拼贴不得出厂（keyless 同形状已拒绝，这里把有 Key 的同形状缺口堵上）。
-        if not query and self._llm_api_key and article_contents:
+        if not query and llm_available and article_contents:
             content = self._restructure_refusal_content(
                 title, query, f"已读取 {len(article_contents)} 篇素材，无查询主题可执行重构")
             self.log_warning(
@@ -1021,7 +1052,7 @@ class WriterAgent(BaseAgent):
         content = "\n".join(content_parts)
 
         # 降级声明：无 LLM 时空章节不再静默交付，在文档头部显式标记
-        if empty_sections and not self._llm_api_key:
+        if empty_sections and not llm_available:
             warn_block = (
                 degradation.DEGRADE_BANNER + "：以下章节未能从检索素材中提取到足够内容（当前为占位符）："
                 + "、".join(s for s in empty_sections if s)
@@ -1032,7 +1063,7 @@ class WriterAgent(BaseAgent):
                 f"任务 {task_id}: {len(empty_sections)} 个章节内容不足（降级），已在文档头部声明")
 
         # LLM 重构：生成严谨技术文档结构（篇-章-节 + mermaid + 表格 + 代码块）
-        if query and self._llm_api_key:
+        if query and llm_available:
             restructured = self._restructure_document(content, article_contents, query, title, task_id=task_id)
             if restructured:
                 content = restructured
@@ -1132,7 +1163,7 @@ class WriterAgent(BaseAgent):
                                        system_prompt: str, context: str) -> tuple[int, str, str]:
         """异步生成单个 section，返回 (序号, 章节名, 内容)"""
         part = await self._generate_text_async(sec_prompt, system_prompt, context,
-                                                max_tok=4096, time_out=180)
+                                                max_tok=self._restructure_max_tokens, time_out=180)
         return (idx, sec_name, part)
 
     async def _generate_text_async(self, section_prompt: str, system_prompt: str,
@@ -1290,7 +1321,7 @@ class WriterAgent(BaseAgent):
                                stream_callback: StreamCallback | None = None,
                                task_id: str = "") -> str | None:
         """多轮 LLM 生成：每轮一篇，逐步拼接成完整文档（prompt 从外部模板加载）"""
-        if not self._llm_api_key:
+        if not self._llm_available():
             return None
         # P2 修复：按 task_id 从注册表拾取回调（并发流互不串扰），未命中回退旧单槽
         if stream_callback is None:

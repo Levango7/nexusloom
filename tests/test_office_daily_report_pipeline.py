@@ -5,6 +5,10 @@
 2. 该流水线没有 typed inputs 声明，POST /api/tasks 的自由文本闸门应放行；
 3. 成稿路径不含 researcher/fetcher，内部业务上下文不会被公网检索外送。
 """
+from pathlib import Path
+
+import yaml
+
 from loom_core.input_schema import declaration, gate_freeform
 from loom_core.scheduler import Scheduler
 
@@ -36,3 +40,19 @@ def test_no_research_or_fetch_in_context_pipeline():
     assert ids == {"writer", "quality_gate__quality_tail", "checker__quality_tail",
                    "fact_checker__quality_tail", "layout__quality_tail",
                    "safe_writer__quality_tail"}
+
+
+def test_compact_daily_prompt_and_token_cap():
+    plan = Scheduler().parse("office-daily-report")
+    writer = next(n for level in plan.levels for n in level if n.agent_name == "writer")
+    assert writer.agent_config.config["prompt_profile"] == "office-daily-report"
+    assert writer.agent_config.config["restructure_max_tokens"] == 768
+
+    prompt_path = (Path(__file__).parent.parent / "packs" / "docgen" / "prompts"
+                   / "office-daily-report.yaml")
+    prompt = yaml.safe_load(prompt_path.read_text(encoding="utf-8"))
+    assert len(prompt["sections"]) == 1
+    section_prompt = prompt["sections"][0]["prompt"]
+    assert "日报" in section_prompt
+    assert "不得编造" in section_prompt
+    assert "Mermaid" not in section_prompt

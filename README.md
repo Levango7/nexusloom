@@ -1158,7 +1158,10 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**3957 个测试本机全绿**（`3957 passed, 25 skipped, 6 deselected`，2026-11-22 按 +3 条
+**3964 个测试本机全绿**（`3964 passed, 25 skipped, 6 deselected`，2026-11-24 按 +5 条
+（DeepSeek/LLMRouter 可用性与短日报成本控制：路由异常不启用／仅路由器进入真实重构调用／
+章节 token 上限／office-daily-report 专用单节模板与 lock／输入 H1 标题传递），并补记 #146 通知帧判据 +2，
+自 3957 同 skipped 集推为；2026-11-22 按 +3 条
 （office-daily-report 流水线：拓扑与 lock／自由文本闸门／无检索三钉，
 判据文件 `tests/test_office_daily_report_pipeline.py`）自 3954 同 skipped 集推为；2026-11-18 按 +4 条
 （recover_tasks stale-running 只读对账告警四判据：漂移告警/无漂移对照/异常降级/只读性，
