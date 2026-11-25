@@ -49,7 +49,9 @@ agents:
     timeout: 300
     dependencies: ["fetcher"]
     config:
-      prompt_profile: generic-tech
+      # 单节交付简报 + 单次输出硬上限：不做五段技术白皮书式长生成。
+      prompt_profile: delivery-brief
+      restructure_max_tokens: 768
 
   # 质量尾（含 fact_checker 这一档）来自共享片段 _quality-tail.yaml。
   # 与 docgen 基线一致：不做事实核查（fact_check: false）。

@@ -14,6 +14,7 @@
 import io
 import json
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -902,6 +903,32 @@ class TestSubmitTask:
         data = handler._json.call_args[0][0]
         assert "message" in data
         handler._schedule_input_cleanup.assert_called_once()
+
+    def test_loom_title_prefix_stays_out_of_generated_input(self, handler):
+        task = MagicMock()
+        task.id = "t-title"
+        task.status.value = "done"
+        task.pipeline_name = "docgen"
+        task.output_path = None
+        task.output_content = None
+        task.error = None
+        seen = {}
+
+        def capture(_plan, input_file=None, **_kwargs):
+            seen["text"] = Path(input_file).read_text(encoding="utf-8")
+            return task
+
+        handler.orch.run_plan.side_effect = capture
+        handler._find_streaming_agent = MagicMock(return_value=None)
+        raw_title = "[loom:730ceb9b-31d3-42c6-8fee-6ba3a310b8bc] 真实标题"
+        with patch("loom_core.scheduler.Scheduler") as mock_sched:
+            mock_sched.return_value.parse.return_value = MagicMock()
+            handler._handle_submit_task(self._body(title=raw_title, wait=True))
+
+        assert seen["text"].startswith("# 真实标题\n")
+        assert "[loom:" not in seen["text"]
+        # 归属/审计元数据原样保留，不能为了清标题把隔离信息删掉。
+        assert handler._json.call_args[0][0]["title"] == raw_title
 
     def test_submit_bad_pipeline_400(self, handler):
         with patch("loom_core.scheduler.Scheduler") as mock_sched:

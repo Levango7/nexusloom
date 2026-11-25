@@ -76,6 +76,7 @@ from artesian.fast_json import loads as _fast_loads
 from . import scheduler as _scheduler_mod
 from .artifacts import task_output
 from .ids import new_task_id
+from .input_docs import display_title
 from .input_schema import InputValidationError, gate_freeform, prepare_inputs
 from .scheduler import resolve_pipeline_name
 from .tokens import LOCAL_PRINCIPAL, Principal, TokenConfigError, TokenStore, parse_bearer, token_from_query
@@ -1730,7 +1731,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                 input_text = prepare_inputs(plan, typed_inputs, title=pipeline_name)
             else:
                 gate_freeform(plan, surface="POST /api/tasks")
-                input_text = f"# {title}\n\n## 查询\n\n{query}\n"
+                # title 的 `[loom:<wid>]` 只用于归属元数据，不得进入生成内容。
+                input_text = f"# {display_title(title)}\n\n## 查询\n\n{query}\n"
         except InputValidationError as e:
             return self._json(e.to_dict(), 400)
 
@@ -3045,7 +3047,8 @@ class AdminHandler(BaseHTTPRequestHandler):
                     input_text = prepare_inputs(plan, typed_inputs, title=pipeline_name)
                 else:
                     gate_freeform(plan, surface="GET /stream")
-                    input_text = f"# {title}\n\n## 查询\n\n{query}\n"
+                    # title 的 `[loom:<wid>]` 只用于归属元数据，不得进入生成内容。
+                    input_text = f"# {display_title(title)}\n\n## 查询\n\n{query}\n"
             except InputValidationError as e:
                 return self._json(e.to_dict(), 400)
 

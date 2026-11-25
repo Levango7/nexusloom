@@ -27,6 +27,13 @@ services:
       # 默认值必须为空而非占位串：若默认非空，启动校验"缺失即拒绝"的
       # 安全护栏会被永远短路，弱默认密钥也会直接随 compose 上线。
       ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      # LLM 供应商密钥（从同目录 .env 读取；非空才被 llm_router 加载）
+      DEEPSEEK_API_URL: ${DEEPSEEK_API_URL:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      LLM_API_URL: ${LLM_API_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
       # 可选: 配置 LLM 供应商密钥（推荐挂载 .env 文件替代明文写这里）
       # BOCHA_API_KEY: ${BOCHA_API_KEY:-}
       # TAVILY_API_KEY: ${TAVILY_API_KEY:-}
