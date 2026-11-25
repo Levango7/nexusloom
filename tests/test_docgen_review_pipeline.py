@@ -5,6 +5,7 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
+from loom_core.pack_manifest import physical_packs  # noqa: E402
 from loom_core.scheduler import Scheduler, installed_pipelines  # noqa: E402
 
 
@@ -27,6 +28,11 @@ def test_docgen_review_is_installed_and_ends_at_approval_gate():
     assert sched.verify_lockfile(
         plan, lockfile=str(PROJECT / "packs" / "docgen" / "pipelines" /
                            "docgen-review.lock")) == []
+
+
+def test_docgen_review_is_declared_by_docgen_pack():
+    pack = next(p for p in physical_packs() if p.name == "docgen")
+    assert "docgen-review" in pack.declared_pipelines
 
 
 def test_docgen_review_keeps_standard_quality_tail():

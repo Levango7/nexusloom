@@ -21,6 +21,7 @@ pipelines:
   - docgen-render
   - docgen-verified
   - docgen-lean
+  - docgen-review
   - docreq
   - kb-docgen
   - office-daily-report
