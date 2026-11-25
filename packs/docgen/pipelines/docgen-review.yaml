@@ -1,0 +1,83 @@
+# Docgen-Review：文档生成 + 交付前人审
+# 与 docgen 的区别：质量尾之后追加 approval_gate 节点（带 approval 属性）。
+# 该节点不是 Agent——带 approval 属性的节点被 DAG 引擎识别为审批闸门：
+# 执行到此时任务进入 awaiting_approval 等待批准（Admin API 的
+# POST /tasks/<id>/approve|reject 放行），批准后 continue 到交付；
+# 驳回则终止（reason 进任务 error 与审计）。
+#
+# 使用：POST /api/tasks {query, title, pipeline: "docgen-review"}
+# 产物路径：output/<task_id>_result.md（与 docgen 同形）
+_name: docgen-review
+_version: "4.1"
+description: 自动文档生成流水线（Researcher → Fetcher → Writer → 质量尾片段 → 人审闸门）
+
+defaults:
+  parallelism:
+    mode: single
+    max_workers: 1
+
+# ── Agent 定义（与 docgen 同形）──────────────────────────────
+agents:
+  - name: researcher
+    version: "2.0"
+    timeout: 300
+    dependencies: []
+    pool_size: 2
+    rate_limit:
+      rate: 5
+      burst: 10
+    config:
+      search_engines:
+        - bocha
+        - tavily
+        - serper
+        - bing
+        - sogou
+        - "360"
+      max_results: 10
+
+  - name: fetcher
+    version: "1.0"
+    timeout: 120
+    dependencies: ["researcher"]
+    config:
+      max_downloads: 15
+      temp_dir: tmp_fetcher
+
+  - name: writer
+    version: "2.0"
+    timeout: 300
+    dependencies: ["fetcher"]
+    config:
+      prompt_profile: generic-tech
+
+  # 质量尾（含 fact_checker 这一档）来自共享片段 _quality-tail.yaml。
+  # 与 docgen 基线一致：不做事实核查（fact_check: false）。
+  - name: quality_tail
+    call: _quality-tail
+    dependencies: ["writer"]
+    inputs:
+      fact_check: false
+
+  # ── 人审闸门 ──
+  # 带 approval 属性的节点 = 审批闸门（非 Agent）：任务执行到此时进入
+  # awaiting_approval，等待 Admin API 的 approve/reject 放行。
+  - name: approval_gate
+    approval: {}
+    dependencies: ["quality_tail"]
+
+# ── DAG 拓扑 ──────────────────────────────
+topology:
+  type: dag
+  levels:
+    - [researcher]
+    - [fetcher]
+    - [writer]
+    - [quality_tail]
+    - [approval_gate]
+
+  edges:
+    - [researcher, fetcher]
+    - [fetcher, writer]
+    - [writer, quality_tail]
+    - [quality_tail, approval_gate]
