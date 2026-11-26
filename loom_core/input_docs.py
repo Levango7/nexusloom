@@ -11,9 +11,22 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from artesian.fast_json import dumps as _fast_dumps
+
+_LOOM_TITLE_PREFIX = re.compile(r"^\[loom:[0-9a-f-]{36}\]\s+")
+
+
+def display_title(title: str) -> str:
+    """返回给用户内容使用的标题：剥离 `[loom:<wid>]` 归属传输前缀。
+
+    Corps 用该前缀做多租户归属校验，任务元数据/响应里的原 title 不动；
+    但它不能进入输入文档，否则 writer 会把内部租户标记写成成品 H1。
+    """
+    stripped = _LOOM_TITLE_PREFIX.sub("", title, count=1).strip()
+    return stripped or title
 
 
 def render_inputs_doc(title: str, inputs: Any) -> str:

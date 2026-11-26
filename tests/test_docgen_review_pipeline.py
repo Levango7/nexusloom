@@ -2,6 +2,8 @@
 import sys
 from pathlib import Path
 
+import yaml
+
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
 
@@ -42,3 +44,18 @@ def test_docgen_review_keeps_standard_quality_tail():
                      "layout__quality_tail", "safe_writer__quality_tail"):
         assert expected in names
     assert names.index("safe_writer__quality_tail") < names.index("approval_gate")
+
+
+def test_docgen_review_uses_compact_prompt_and_token_cap():
+    plan = _scheduler().parse("docgen-review")
+    writer = next(n for level in plan.levels for n in level if n.agent_name == "writer")
+    assert writer.agent_config.config["prompt_profile"] == "delivery-brief"
+    assert writer.agent_config.config["restructure_max_tokens"] == 768
+
+    prompt_path = PROJECT / "packs" / "docgen" / "prompts" / "delivery-brief.yaml"
+    prompt = yaml.safe_load(prompt_path.read_text(encoding="utf-8"))
+    assert len(prompt["sections"]) == 1
+    section_prompt = prompt["sections"][0]["prompt"]
+    assert "250—500 字" in section_prompt
+    assert "风险与下一步" in section_prompt
+    assert "Mermaid" not in section_prompt
