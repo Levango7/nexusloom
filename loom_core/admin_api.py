@@ -2125,7 +2125,46 @@ class AdminHandler(BaseHTTPRequestHandler):
         # 锁指纹（A5）随明细一起回：列表不需要，但"这一跑用的是哪把锁"必须可查。
         item["topology_hash"] = str(rec.get("topology_hash") or "")
         item["config_hashes"] = dict(rec.get("config_hashes") or {})
+        # 运行间差异（A5）：同流水线上一次终态运行 vs 本次。
+        # 上次运行同样按 principal 裁决可见性（与本次同一 _scoped_run 口径），
+        # 越权当不存在处理，不给 403。
+        try:
+            from .deliveries import DeliveryLedger
+            prev = DeliveryLedger().previous_for_pipeline(
+                str(rec.get("pipeline") or ""),
+                float(rec.get("finished_at") or 0))
+        except Exception as e:  # noqa: BLE001
+            _logger.warning("[AdminAPI] 读取上一次运行失败: %s", e)
+            prev = None
+        prev_id = str((prev or {}).get("run_id") or "")
+        if prev and prev_id and (p.admin or self._scoped_run(prev_id) is not None):
+            item["previous_run_id"] = prev_id
+            item["run_diff"] = self._delivery_run_diff(rec, prev)
+        else:
+            item["previous_run_id"] = ""
+            item["run_diff"] = None
         self._json({"delivery": item})
+
+    @staticmethod
+    def _delivery_run_diff(cur: dict, prev: dict) -> dict:
+        """本次 vs 上次的指纹差异（拓扑 + 逐节点配置）。
+
+        只报告"变没变"和"哪些节点变了"，不猜测原因——原因要靠
+        `loom plan --diff`（当前文件 vs 锁）那半边回答。
+        """
+        cur_topo = str(cur.get("topology_hash") or "")
+        prev_topo = str(prev.get("topology_hash") or "")
+        cur_conf = dict(cur.get("config_hashes") or {})
+        prev_conf = dict(prev.get("config_hashes") or {})
+        return {
+            "topology_changed": cur_topo != prev_topo,
+            "config_changed": sorted(
+                k for k in cur_conf.keys() & prev_conf.keys()
+                if cur_conf[k] != prev_conf[k]),
+            "config_added": sorted(cur_conf.keys() - prev_conf.keys()),
+            "config_removed": sorted(prev_conf.keys() - cur_conf.keys()),
+            "previous_topology_hash": prev_topo,
+        }
 
     def _handle_delivery_download(self, run_id: str):
         """`GET /api/deliveries/<run_id>/download`：交付物文件本体（attachment）。
