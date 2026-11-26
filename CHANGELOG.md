@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added（2026-11-26，A4 安装证据债补齐）
+
+- **独立 venv 安装判据** `tests/test_a4_install_evidence.py`：真 venv
+  （`--no-system-site-packages`）+ 独立依赖解析，不再借宿主机 site-packages。
+  基础安装跑 `loom demo` 产 md/html、docx 不产出且不在 `supported_formats()`；
+  `nexusloom[render]` 安装跑 demo 产 docx/md/html。
+- **判据缺口登记**：A4 原文要求基础安装即产 docx，当前基础包不含 `render`
+  extra——docx 进基础依赖 vs 验收线改为 `nexusloom[render]`，待 owner 拍板。
+  打包口径本批不改动。
+
 ### Added（2026-11-25，可嵌入 SDK：一次创建、一次生成）
 
 - **Python `LoomClient.from_env()`＋`generate()`**：统一读取
