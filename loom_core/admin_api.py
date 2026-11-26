@@ -2078,6 +2078,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             "output_sha256": str(rec.get("output_sha256") or ""),
             # 字节数三态（None=没记录 / -1=文件读不到 / >=0=实测），老行没有这键 ⇒ None
             "output_bytes": rec.get("output_bytes"),
+            # 逐产物保留期（A6）：None = 历史行 / 未配 deliverables_days，
+            # 不编造保留期。
+            "retention_until": rec.get("retention_until"),
             "projection": self.orch.run_handle(run_id).projection(),
         }
 

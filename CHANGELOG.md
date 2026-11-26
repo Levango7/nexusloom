@@ -19,6 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   docx；不把 python-docx 单独移入基础依赖，避免 docx 与 pdf/xlsx/pptx
   口径分裂。打包口径本批不改动。
 
+### Added（2026-11-26，A6 逐产物保留期）
+
+- **`deliveries` 账本增 `retention_until` 列**：写侧按
+  `retention.deliverables_days` 填充（>0 才填；0/缺省 = 不启用删除）。
+- **GC 删过期产物**：`retention_until` 已过期的行独立于年龄/数量判据
+  被选中，其 `output_path` 指向的磁盘交付物一并删除。**没有**
+  `retention_until` 的行（历史行 / 未配部署）只删账本行、不碰磁盘——
+  "清理过期记录"不外溢成"清理用户产物"。
+- **配置**：`retention.deliverables_days`（默认 0 = 不启用删除，
+  保守口径）。删除用户磁盘文件是破坏性操作，需显式配置才启用。
+- **控制台**：交付物明细展示"保留期至"（未配置显示"未配置
+  （不自动删除）"）。
+- 判据 `tests/test_a6_deliverable_retention.py` 12 条（假时钟）。
+  `tests/test_maintenance.py` 同步更新：未配保留期的行清理只删
+  行不碰文件。
+
 ### Added（2026-11-25，可嵌入 SDK：一次创建、一次生成）
 
 - **Python `LoomClient.from_env()`＋`generate()`**：统一读取

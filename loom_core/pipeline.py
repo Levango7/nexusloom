@@ -1789,6 +1789,18 @@ class PipelineOrchestrator:
             except OSError:
                 pass
 
+        # 逐产物保留期（A6）：只在显式配置 retention.deliverables_days
+        # > 0 时填 retention_until；0/缺省 = 不启用删除，历史行与
+        # 未配部署继续只删账本行、不碰磁盘。
+        retention_until = None
+        try:
+            _deliverables_days = int(
+                self.config.get("retention.deliverables_days", 0) or 0)
+        except (TypeError, ValueError):
+            _deliverables_days = 0
+        if _deliverables_days > 0 and finished:
+            retention_until = finished + _deliverables_days * 86400.0
+
         return {
             "run_id": task.id,
             "pipeline": plan.pipeline_name,
@@ -1804,6 +1816,7 @@ class PipelineOrchestrator:
             "error": task.error or "",
             "topology_hash": topology_hash,
             "config_hashes": config_hashes,
+            "retention_until": retention_until,
             "nodes": nodes,
         }
 

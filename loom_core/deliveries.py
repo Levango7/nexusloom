@@ -14,6 +14,7 @@ LOOM_STATE_DIR 隔离，测试互不污染。PG 由 ``LOOM_DATABASE_URL`` 或显
 """
 from __future__ import annotations
 
+import contextlib
 from typing import Any, cast
 
 from artesian.fast_json import dumps as _fast_dumps
@@ -22,6 +23,26 @@ from artesian.fast_json import loads as _fast_loads
 from . import state_paths
 from .db_backend import resolve_backend
 from .run_store import TERMINAL_STATUSES
+
+
+def _remove_deliverable(output_path: str) -> None:
+    """删除账本指向的磁盘交付物（A6）。
+
+    只删**文件**，不碰目录；路径来自账本 `output_path`（服务端写入），
+    不来自用户输入。删除失败只记 warning，不把 GC 拖垮——产物删除
+    是保留期的附带面，不该让维护循环因一个删不掉的文件而停摆。
+    """
+    import logging
+    from pathlib import Path
+
+    path = Path(output_path)
+    if not path.is_file():
+        return
+    try:
+        path.unlink()
+    except OSError as e:
+        logging.getLogger(__name__).warning(
+            "[deliveries] 删除过期交付物失败: %s (%s)", output_path, e)
 
 
 class DeliveryLedger:
@@ -44,8 +65,15 @@ class DeliveryLedger:
                 "(run_id TEXT PRIMARY KEY, pipeline TEXT NOT NULL, "
                 "status TEXT NOT NULL, finished_at REAL NOT NULL DEFAULT 0, "
                 "duration_sec REAL, output_path TEXT DEFAULT '', "
+                "retention_until REAL, "
                 "payload_json TEXT NOT NULL DEFAULT '{}')"  # nosec B608
             )
+            # A6 迁移：老库没有 retention_until 列。ADD COLUMN 幂等性靠
+            # 捕获"duplicate column"错误（SQLite/PG 都没有 IF NOT EXISTS
+            # for ADD COLUMN）；失败即视为已存在，忽略。
+            with contextlib.suppress(Exception):
+                conn.execute(
+                    "ALTER TABLE deliveries ADD COLUMN retention_until REAL")
 
     def record(self, rec: dict[str, Any]) -> str:
         """记一行交付。以 rec["run_id"] 为主键，重复写入覆盖（幂等收尾）。
@@ -63,19 +91,22 @@ class DeliveryLedger:
         finished_at = float(rec.get("finished_at") or 0.0)
         duration = _as_float_or_none(rec.get("duration_sec"))
         output_path = str(rec.get("output_path") or "")
+        retention_until = _as_float_or_none(rec.get("retention_until"))
         payload = _fast_dumps(rec)
         with self._pool.conn() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO deliveries "
                 "(run_id, pipeline, status, finished_at, duration_sec, "
-                " output_path, payload_json) VALUES (?,?,?,?,?,?,?)",
+                " output_path, retention_until, payload_json) "
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (run_id, pipeline, status, finished_at, duration,
-                 output_path, payload))
+                 output_path, retention_until, payload))
             conn.execute(
                 "UPDATE deliveries SET pipeline=?, status=?, finished_at=?, "
-                "duration_sec=?, output_path=?, payload_json=? WHERE run_id=?",
+                "duration_sec=?, output_path=?, retention_until=?, "
+                "payload_json=? WHERE run_id=?",
                 (pipeline, status, finished_at, duration,
-                 output_path, payload, run_id))
+                 output_path, retention_until, payload, run_id))
         return run_id
 
     def get(self, run_id: str) -> dict[str, Any] | None:
@@ -105,6 +136,12 @@ class DeliveryLedger:
         - retention_days > 0：删除 finished_at 早于 now - days*86400 的记录
         - max_runs > 0：只保留 finished_at 最新的 N 条终态记录，其余删除
         两个判据可同时生效（年龄判据在保留集内也适用）。
+
+        A6 逐产物删除：被删行若带过期 ``retention_until``（< now），
+        其 ``output_path`` 指向的磁盘交付物一并删除。**没有**
+        ``retention_until`` 的行（历史行 / 未配 deliverables_days）只删
+        账本行、不碰磁盘——这是"清理过期记录"不意外外溢成"清理用户
+        产物"的安全边界。
         """
         import time as _time
         if retention_days <= 0 and max_runs <= 0:
@@ -116,19 +153,29 @@ class DeliveryLedger:
             # 再逐行 DELETE——走 db_backend 双方言（psycopg3 Connection 无
             # executemany），也避开 DELETE ... NOT IN (SELECT 自表) 的语义坑。
             rows = conn.execute(
-                "SELECT run_id, finished_at FROM deliveries "
+                "SELECT run_id, finished_at, retention_until, output_path "
+                "FROM deliveries "
                 "WHERE status IN (?, ?, ?) ORDER BY finished_at DESC",
                 TERMINAL_STATUSES).fetchall()
-            to_delete: list[str] = []
+            to_delete: list[tuple[str, float | None, str]] = []
             if max_runs > 0:
-                to_delete += [r[0] for r in rows[max_runs:]]
+                to_delete += [(r[0], r[2], r[3]) for r in rows[max_runs:]]
             if retention_days > 0:
-                to_delete += [r[0] for r in rows
+                to_delete += [(r[0], r[2], r[3]) for r in rows
                               if float(r[1] or 0) < cutoff]
             deleted = 0
-            for rid in sorted(set(to_delete)):
+            for rid, retention_until, output_path in sorted(
+                    set(to_delete), key=lambda t: t[0]):
                 deleted += conn.execute(
                     "DELETE FROM deliveries WHERE run_id = ?", (rid,)).rowcount
+                # 只删"写侧明确给了保留期且已过期"的产物。
+                if retention_until is None:
+                    continue
+                try:
+                    if float(retention_until) < now_ts and output_path:
+                        _remove_deliverable(output_path)
+                except (TypeError, ValueError):
+                    continue
         return deleted
 
 

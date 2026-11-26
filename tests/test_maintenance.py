@@ -217,13 +217,14 @@ class TestGcRuns:
         from loom_core.maintenance import retention_from_config
         fake_cfg = SimpleNamespace(get=lambda key, default=0:
                                    {"retention.runs_days": 30,
-                                    "retention.max_runs": 500}[key])
+                                    "retention.max_runs": 500,
+                                    "retention.deliverables_days": 7}[key])
         r = retention_from_config(fake_cfg)
-        assert (r.days, r.max_runs) == (30, 500)
+        assert (r.days, r.max_runs, r.deliverables_days) == (30, 500, 7)
         # 非正数 / 读错 → 0（保守，不悄悄变成"删光"）
         r2 = retention_from_config(SimpleNamespace(
             get=lambda key, default=0: -5))
-        assert (r2.days, r2.max_runs) == (0, 0)
+        assert (r2.days, r2.max_runs, r2.deliverables_days) == (0, 0, 0)
         r3 = retention_from_config(None)
         assert r3.enabled is False
 
@@ -508,12 +509,13 @@ class TestDeliveryLedgerCleanup:
             assert led.get(f"r-{status}") is None
         assert led.get("alive") is not None
 
-    def test_cleanup_never_deletes_the_delivered_file(self, state, tmp_path):
-        """账本行走了，磁盘产物还在——清理只删行，不碰用户声明的输出。
+    def test_cleanup_without_retention_until_keeps_file(self, state, tmp_path):
+        """账本行走了，磁盘产物还在——没配保留期的行，清理只删行不碰文件。
 
-        交付物的所有权不在 GC：output_path 指向的是用户仓库里的产物，
-        删账本的保留期策略不该外溢成删文件。这条防的是将来有人把
-        "清理过期记录"扩写成"清理过期产物"。
+        A6 把"删不删用户文件"做成显式判据：只有写侧明确填了
+        ``retention_until`` 且已过期时，GC 才删磁盘交付物。没有
+        ``retention_until`` 的历史行 / 未配部署，GC 只删账本行，
+        不外溢成删文件。
         """
         doc = tmp_path / "result.md"
         doc.write_text("# 交付\n正文", encoding="utf-8")
@@ -522,7 +524,7 @@ class TestDeliveryLedgerCleanup:
         self._seed(led, "with-file", finished_at=now - 100 * 86400,
                    output_path=str(doc))
         assert led.cleanup(retention_days=30, now=now) == 1
-        assert doc.exists(), "GC 不该删磁盘上的交付物"
+        assert doc.exists(), "未配保留期的产物不许被 GC 删"
         assert doc.read_text(encoding="utf-8").startswith("# 交付")
         assert led.get("with-file") is None
 
