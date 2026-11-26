@@ -92,23 +92,26 @@ ANCHORS = [
     # 逐条按**整行原文**在合并后的树上重新定位，未按偏移推算。
     # 2026-11-24：MCP HTTP 与任务控制并入主线后整批下移，逐条按整行原文重钉。
     # T10 随后给流回调增加 owner 并在 /stream 前置载荷闸门，再次按整行原文重钉。
-    ("loom_core/admin_api.py", 754, "get_task"),
-    ("loom_core/admin_api.py", 1187, "list_tasks"),
+    # 2026-11-26 第四次钉：#153（docgen-review-brief）在 admin_api.py 上方
+    # 增删了输入文档装配与简报路由，这组 10 条整批下移 +1~+2（偏移非常数，
+    # 按整行原文就近重钉，未按偏移推算）。
+    ("loom_core/admin_api.py", 755, "get_task"),
+    ("loom_core/admin_api.py", 1188, "list_tasks"),
     # Stage 2：/tasks、dashboard、cost 三处读口从 `list_tasks`（内存）换成
     # `list_runs`（内存缓存 ∪ 投影）——锚点跟着换而不是删，否则"读侧已并轨"
     # 这句话在表里就没有对应物了。
     ("loom_core/admin_api.py", 1205, "list_runs"),
-    ("loom_core/admin_api.py", 1551, "def _task_checkpoint_view"),
-    ("loom_core/admin_api.py", 1974, "list_runs"),
-    ("loom_core/admin_api.py", 2548, "list_runs"),
-    ("loom_core/admin_api.py", 2913, "task = _aio.run(orch.run_plan_async("),
-    ("loom_core/admin_api.py", 2986, "existing_callback = get_callback(task_id)"),
+    ("loom_core/admin_api.py", 1552, "def _task_checkpoint_view"),
+    ("loom_core/admin_api.py", 1976, "list_runs"),
+    ("loom_core/admin_api.py", 2550, "list_runs"),
+    ("loom_core/admin_api.py", 2915, "task = _aio.run(orch.run_plan_async("),
+    ("loom_core/admin_api.py", 2988, "existing_callback = get_callback(task_id)"),
     # #8：账本与锁的只读 HTTP 面。三条 handler 进表，"文档教了这三个口"才在代码里
     # 有对应物（`test_doc_consistency` 只把文档对到 openapi 规范，规范和 handler
     # 之间没人守——这条就是补那段距离的）。
-    ("loom_core/admin_api.py", 2082, "def _handle_deliveries"),
-    ("loom_core/admin_api.py", 2100, "def _handle_delivery_detail"),
-    ("loom_core/admin_api.py", 2242, "def _handle_locks"),
+    ("loom_core/admin_api.py", 2084, "def _handle_deliveries"),
+    ("loom_core/admin_api.py", 2102, "def _handle_delivery_detail"),
+    ("loom_core/admin_api.py", 2244, "def _handle_locks"),
     # 锁路径解析只留一处：巡检口（`lock_drift`）与执行口（`_verify_lock_after_parse`）
     # 各自解析一次就会报出执行时根本不会发生的漂移。
     ("loom_core/scheduler.py", 338, "def resolve_lock_path"),
