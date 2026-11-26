@@ -1179,7 +1179,8 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**4001 个测试本机全绿**（`4001 passed, 25 skipped, 6 deselected`，2026-11-26 按 +2 条
+**4005 个测试本机全绿**（`4005 passed, 25 skipped, 6 deselected`，2026-11-26 按 +4 条
+（A5 运行间差异：配置变 / 首次无上次 / 越权不可见 / admin 跨 principal 可见）自 4001 同 skipped 集推为；2026-11-26 按 +2 条
 （A4 安装证据：独立 venv 基础安装与 `[render]` 安装两条判据）自 3999 同 skipped 集推为；2026-11-26 按 +5 条
 （docgen-review 装配清册／标准质量尾／单节短输出与 token cap／Admin 归属标题清洗）自 3994 同 skipped 集推为；2026-11-25 按 +5 条
 （可嵌入 SDK：from_env 统一配置／demo generate 成功／失败任务结构化异常／审批默认拒绝与显式回调／

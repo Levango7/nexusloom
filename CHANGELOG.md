@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added（2026-11-26，A5 运行间差异视图）
+
+- **`GET /api/deliveries/<run_id>` 新增 `previous_run_id` + `run_diff`**：
+  同流水线按 `finished_at` 取上一次终态运行，比较拓扑指纹与逐节点
+  `config_hash`，回拓扑变没变、变配置的节点、节点增减。上次运行
+  同样按 principal 裁决可见性（越权当不存在，不报差异）。
+- **控制台交付物明细新增「本次 vs 上次」块**：上次运行 ID、拓扑变没变、
+  节点配置变没变、变配置的节点列表；首次运行或上次不可见时整块不出现。
+- `DeliveryLedger.previous_for_pipeline` 承担"同流水线上一次终态运行"
+  查询。判据 `tests/test_a5_run_diff.py` 4 条真 HTTP。
+- 边界：只报告指纹变没变、哪些节点变了，原因仍靠 `loom plan --diff`
+  （当前文件 vs 锁）那半边回答。
+
 ### Added（2026-11-26，A4 安装证据债补齐）
 
 - **独立 venv 安装判据** `tests/test_a4_install_evidence.py`：真 venv
