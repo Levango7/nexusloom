@@ -16,8 +16,8 @@
 - **假时钟**：`now` 参数可注入，判据测试不依赖真实时间。
 
 配置层（config.json / 覆写文件，点号键）：`retention.runs_days`、
-`retention.max_runs`、`maintenance.gc_ticks`（worker 每 N 个轮询跑一次
-GC，默认 60）。
+`retention.max_runs`、`retention.deliverables_days`、`maintenance.gc_ticks`
+（worker 每 N 个轮询跑一次 GC，默认 60）。
 """
 from __future__ import annotations
 
@@ -137,7 +137,8 @@ def gc_runs(*, queue: Any = None, cost: Any = None, feedback: Any = None,
     if log:
         stamp = now if now is not None else time.time()
         log(f"[maintenance] GC 执行（{stamp}，保留 {retention.days} 天 / 最近 "
-            f"{retention.max_runs} 条）：删除 {count_dropped(summary)} 行")
+            f"{retention.max_runs} 条 / 交付物 {retention.deliverables_days} 天）："
+            f"删除 {count_dropped(summary)} 行")
     return summary
 
 
@@ -175,7 +176,8 @@ def format_summary(summary: dict[str, Any], retention: Retention | None = None
                 "全 0）——未删任何行；worker 循环同样如此")
     lines: list[str] = []
     if retention is not None:
-        lines.append(f"[gc] 保留 {retention.days} 天 / 最近 {retention.max_runs} 条")
+        lines.append(f"[gc] 保留 {retention.days} 天 / 最近 {retention.max_runs} 条 / "
+                     f"交付物 {retention.deliverables_days} 天")
     for name, value in summary.items():
         if name == "enabled" or value is None:
             continue

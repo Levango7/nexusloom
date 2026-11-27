@@ -410,7 +410,7 @@ class TestDeliveryLedgerCleanup:
       - retention_days > 0：删除 finished_at 早于 now - days*86400 的记录
       - max_runs > 0：只保留 finished_at 最新的 N 条
       - 两个判据可同时生效
-      - 0/0 = 不清理（返回 0）
+      - 0/0 时不按年龄/数量清理；但已过期的 retention_until 仍独立回收
       - 只碰终态（done/failed/cancelled），进行中的行一行都不删
     """
 
