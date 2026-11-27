@@ -166,6 +166,7 @@ class DeliveryLedger:
                 if expires is not None and expires < now_ts:
                     to_delete.append((row[0], row[2], row[3]))
             deleted = 0
+            expired_files: list[str] = []
             for rid, retention_until, output_path in sorted(
                     set(to_delete), key=lambda t: t[0]):
                 deleted += conn.execute(
@@ -175,9 +176,12 @@ class DeliveryLedger:
                     continue
                 try:
                     if float(retention_until) < now_ts and output_path:
-                        _remove_deliverable(output_path)
+                        expired_files.append(output_path)
                 except (TypeError, ValueError):
                     continue
+        # 先提交账本删除，再碰磁盘：事务回滚时不会留下"行还在、文件没了"。
+        for output_path in expired_files:
+            _remove_deliverable(output_path)
         return deleted
 
 
