@@ -137,15 +137,13 @@ class DeliveryLedger:
         - max_runs > 0：只保留 finished_at 最新的 N 条终态记录，其余删除
         两个判据可同时生效（年龄判据在保留集内也适用）。
 
-        A6 逐产物删除：被删行若带过期 ``retention_until``（< now），
-        其 ``output_path`` 指向的磁盘交付物一并删除。**没有**
-        ``retention_until`` 的行（历史行 / 未配 deliverables_days）只删
-        账本行、不碰磁盘——这是"清理过期记录"不意外外溢成"清理用户
-        产物"的安全边界。
+        A6 逐产物删除：``retention_until`` 已过期的行独立于年龄/数量
+        判据被选中，其 ``output_path`` 指向的磁盘交付物一并删除。
+        **没有** ``retention_until`` 的行（历史行 / 未配
+        deliverables_days）只删账本行、不碰磁盘——这是"清理过期
+        记录"不意外外溢成"清理用户产物"的安全边界。
         """
         import time as _time
-        if retention_days <= 0 and max_runs <= 0:
-            return 0
         now_ts = now if now is not None else _time.time()
         cutoff = now_ts - retention_days * 86400.0
         with self._pool.conn() as conn:
@@ -163,6 +161,10 @@ class DeliveryLedger:
             if retention_days > 0:
                 to_delete += [(r[0], r[2], r[3]) for r in rows
                               if float(r[1] or 0) < cutoff]
+            for row in rows:
+                expires = _as_float_or_none(row[2])
+                if expires is not None and expires < now_ts:
+                    to_delete.append((row[0], row[2], row[3]))
             deleted = 0
             for rid, retention_until, output_path in sorted(
                     set(to_delete), key=lambda t: t[0]):

@@ -101,6 +101,33 @@ class TestDeliverableRetention:
         assert rec is not None
         assert rec.get("retention_until") == 200.0
 
+    def test_gc_with_only_deliverables_days_removes_expired(self, state, tmp_path):
+        """只配 deliverables_days 时，GC 仍按逐行 retention_until 回收。"""
+        from loom_core.maintenance import Retention, gc_runs
+
+        expired = tmp_path / "expired.md"
+        future = tmp_path / "future.md"
+        legacy = tmp_path / "legacy.md"
+        for doc in (expired, future, legacy):
+            doc.write_text("# 交付\n正文", encoding="utf-8")
+        led = _led(state)
+        now = 10_000_000.0
+        _seed(led, "expired", finished_at=now - 100,
+              output_path=str(expired), retention_until=now - 1)
+        _seed(led, "future", finished_at=now - 100,
+              output_path=str(future), retention_until=now + 86400)
+        _seed(led, "legacy", finished_at=now - 100,
+              output_path=str(legacy))
+
+        summary = gc_runs(deliveries=led,
+                          retention=Retention(deliverables_days=30), now=now)
+
+        assert summary["deliveries"] == 1
+        assert led.get("expired") is None
+        assert not expired.exists()
+        assert led.get("future") is not None and future.exists()
+        assert led.get("legacy") is not None and legacy.exists()
+
 
 class TestRetentionConfig:
     def test_deliverables_days_read_from_config(self):
