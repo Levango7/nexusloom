@@ -136,6 +136,10 @@ class CheckpointManager:
                 owner=str(data.get("owner", "") or ""),
             )
             task.result = data.get("_result", {})
+            # 旧断点没有这两个键时保持空串；新断点必须恢复审批前已落盘的交付事实，
+            # 否则跨进程 approve → resume 会在交付契约处误报“没有交付物”。
+            task.output_path = str(data.get("output_path", "") or "")
+            task.output_content = str(data.get("output_content", "") or "")
 
             restored_nodes = {}
             for name, snap in (data.get("_dag_nodes") or {}).items():

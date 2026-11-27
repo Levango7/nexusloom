@@ -177,6 +177,10 @@ class PipelineTask:
             "input": self.input_file,
             "status": self.status.value,
             "progress": self.progress,
+            # 审批前已生成的交付物必须穿过进程边界；否则 worker 恢复后会被
+            # HARD_FLOOR 误判为“没有交付物”，即使 output/ 里的文件仍存在。
+            "output_path": self.output_path,
+            "output_content": self.output_content,
             "awaiting_approval": dict(self.awaiting_approval) if self.awaiting_approval else None,
             "approvals": [dict(a) for a in self.approvals],
             "steps": [
