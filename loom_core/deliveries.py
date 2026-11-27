@@ -105,8 +105,7 @@ class DeliveryLedger:
         """
         row = self._pool.conn().execute(
             "SELECT payload_json FROM deliveries "
-            "WHERE pipeline = ? AND finished_at < ? AND status IN "
-            f"({','.join('?' for _ in TERMINAL_STATUSES)}) "
+            "WHERE pipeline = ? AND finished_at < ? AND status IN (?, ?, ?) "
             "ORDER BY finished_at DESC LIMIT 1",
             (pipeline, float(before_finished_at), *TERMINAL_STATUSES)).fetchone()
         if not row:
