@@ -624,18 +624,20 @@ checkpoint、交付账本、死信。默认**一个都不删**——保守默认
 |--------|------|------|
 | `retention.runs_days` | `0`（不启用） | 年龄判据：终态运行超过 N 天就回收 |
 | `retention.max_runs` | `0`（不启用） | 数量判据：只保留最近 N 条终态运行 |
+| `retention.deliverables_days` | `0`（不启用） | 逐产物保留期：写侧记录到期时间，GC 只删到期且文件身份未变化的交付物 |
 | `maintenance.gc_ticks` | `60` | worker 每 N 个轮询跑一次 GC（**有活没活都算**） |
 | `maintenance.gc_seconds` | `600` | 常驻服务（`--admin`/`--dashboard`/`--daemon`）两次回收之间的秒数；`0` = 服务模式不跑 |
 
-两条保留期判据任一 > 0 即启用；配成负数或读不懂的值一律按 `0` 处理——配置写错
-不该悄悄变成"删光一切"。覆盖面：`runs`/`run_nodes`/`events`/`approvals`、任务队列、
-成本、质量反馈、checkpoint（仅在 `runs_days > 0` 时）、交付账本、以及消息总线的死信表。
+三条保留期判据任一 > 0 即启用；配成负数或读不懂的值一律按 `0` 处理——配置写错
+不该悄悄变成"删光一切"。`runs_days` / `max_runs` 覆盖 `runs`/`run_nodes`/`events`/
+`approvals`、任务队列、成本、质量反馈、checkpoint（仅在 `runs_days > 0` 时）、
+交付账本、以及消息总线的死信表；`deliverables_days` 只控制交付物文件删除。
 
 手动跑一次并看清每张表删了多少：
 
 ```bash
 python run.py --gc
-# [gc] 保留 30 天 / 最近 500 条
+# [gc] 保留 30 天 / 最近 500 条 / 交付物 30 天
 #   run_store: approvals=1 events=9 run_nodes=5 runs=3
 #   deliveries: 2 行
 #   dlq: 0 行
@@ -645,10 +647,11 @@ python run.py --gc
 三条边界要说在前面：
 
 - **进行中的运行一行不碰**——把活运行从观测面抹掉比不删更糟，它还在写投影。
-- **只删库里的行，不删磁盘产物**：`output_path` 指向你自己声明的输出目录，删它
-  等于删你的文件。账本行走了文件还在，核对靠 `output_sha256` 与逐节点摘要。
-- **历史行不 backfill**：A6 之前写入的账本行没有逐节点摘要，读侧如实显示"未记录"，
-  不会补算一个当时并不存在的值。
+- **删除磁盘产物需显式保留期**：只有写了 `retention_until` 且已到期的行才可能删
+  `output_path`；删除前还核对设备、inode、大小和 mtime，文件被后续运行覆盖或修改时
+  跳过删除。没有保留期或文件身份的记录只删账本行，磁盘文件保留。
+- **历史行不 backfill**：不会给旧记录补算保留期或文件身份，因此不会仅凭旧账本路径
+  冒险删除文件。
 
 ## 管理 API
 
@@ -1179,7 +1182,8 @@ HEALTHCHECK 直接探测容器内 `/health`（免鉴权）。
 python -m pytest tests/ -v
 ```
 
-**4001 个测试本机全绿**（`4001 passed, 25 skipped, 6 deselected`，2026-11-26 按 +2 条
+**4015 个测试本机全绿**（`4015 passed, 25 skipped, 6 deselected`，2026-11-26 按 +14 条
+（A6 逐产物保留期：过期删文件+行 / 无保留期保留文件 / 保留期未到保留文件 / 文件缺失不炸 / retention_until 读回 / 配置读取 / 默认 0 / enabled 含 deliverables_days / 写侧填与不填 / 只配 deliverables_days 也回收 / 固定路径被覆盖时保留新文件 / 缺文件身份时只删行）自 4001 同 skipped 集推为；2026-11-26 按 +2 条
 （A4 安装证据：独立 venv 基础安装与 `[render]` 安装两条判据）自 3999 同 skipped 集推为；2026-11-26 按 +5 条
 （docgen-review 装配清册／标准质量尾／单节短输出与 token cap／Admin 归属标题清洗）自 3994 同 skipped 集推为；2026-11-25 按 +5 条
 （可嵌入 SDK：from_env 统一配置／demo generate 成功／失败任务结构化异常／审批默认拒绝与显式回调／

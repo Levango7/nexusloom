@@ -1699,12 +1699,14 @@ class TestPipelineTailArms:
         out.write_text("hello", encoding="utf-8")
         task = _mk_task(status=TaskStatus.DONE)
         task.output_path = str(out)
-        monkeypatch.setattr("pathlib.Path.read_bytes",
+        monkeypatch.setattr("pathlib.Path.open",
                             MagicMock(side_effect=OSError("disk")))
 
         rec = orch._build_delivery_record(task, _real_plan())
 
         assert rec["output_sha256"] == ""
+        assert rec["output_bytes"] == -1
+        assert rec["output_identity"] is None
 
     def test_deliver_site_build_failure_warns(self, orch, tmp_path, monkeypatch):
         import loom_core.deliveries as dv

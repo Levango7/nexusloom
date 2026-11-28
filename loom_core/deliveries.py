@@ -24,6 +24,39 @@ from .db_backend import resolve_backend
 from .run_store import TERMINAL_STATUSES
 
 
+def _remove_deliverable(output_path: str, identity: Any) -> None:
+    """文件身份未变化时，删除账本指向的磁盘交付物（A6）。
+
+    固定输出路径可能被后续运行覆盖；只按路径删会误删新产物。身份缺失
+    或已变化时宁可保留文件。删除失败只记 warning，不拖垮维护循环。
+    """
+    import logging
+    from pathlib import Path
+
+    if not isinstance(identity, dict):
+        logging.getLogger(__name__).warning(
+            "[deliveries] 交付物缺少文件身份，跳过删除: %s", output_path)
+        return
+    path = Path(output_path)
+    try:
+        st = path.stat()
+        current = {"device": st.st_dev, "inode": st.st_ino,
+                   "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+        recorded = {key: int(identity[key])
+                    for key in ("device", "inode", "size", "mtime_ns")}
+    except (OSError, TypeError, ValueError, KeyError):
+        return
+    if current != recorded:
+        logging.getLogger(__name__).warning(
+            "[deliveries] 交付物已被替换或修改，跳过删除: %s", output_path)
+        return
+    try:
+        path.unlink()
+    except OSError as e:
+        logging.getLogger(__name__).warning(
+            "[deliveries] 删除过期交付物失败: %s (%s)", output_path, e)
+
+
 class DeliveryLedger:
     """交付账本（SQLite/Postgres 双方言）。写入失败由调用方决定是否致命——钩子侧永远只警告。"""
 
@@ -44,8 +77,11 @@ class DeliveryLedger:
                 "(run_id TEXT PRIMARY KEY, pipeline TEXT NOT NULL, "
                 "status TEXT NOT NULL, finished_at REAL NOT NULL DEFAULT 0, "
                 "duration_sec REAL, output_path TEXT DEFAULT '', "
+                "retention_until REAL, "
                 "payload_json TEXT NOT NULL DEFAULT '{}')"  # nosec B608
             )
+            self._pool.add_column_if_missing(
+                conn, "deliveries", "retention_until", "REAL")
 
     def record(self, rec: dict[str, Any]) -> str:
         """记一行交付。以 rec["run_id"] 为主键，重复写入覆盖（幂等收尾）。
@@ -63,19 +99,22 @@ class DeliveryLedger:
         finished_at = float(rec.get("finished_at") or 0.0)
         duration = _as_float_or_none(rec.get("duration_sec"))
         output_path = str(rec.get("output_path") or "")
+        retention_until = _as_float_or_none(rec.get("retention_until"))
         payload = _fast_dumps(rec)
         with self._pool.conn() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO deliveries "
                 "(run_id, pipeline, status, finished_at, duration_sec, "
-                " output_path, payload_json) VALUES (?,?,?,?,?,?,?)",
+                " output_path, retention_until, payload_json) "
+                "VALUES (?,?,?,?,?,?,?,?)",
                 (run_id, pipeline, status, finished_at, duration,
-                 output_path, payload))
+                 output_path, retention_until, payload))
             conn.execute(
                 "UPDATE deliveries SET pipeline=?, status=?, finished_at=?, "
-                "duration_sec=?, output_path=?, payload_json=? WHERE run_id=?",
+                "duration_sec=?, output_path=?, retention_until=?, "
+                "payload_json=? WHERE run_id=?",
                 (pipeline, status, finished_at, duration,
-                 output_path, payload, run_id))
+                 output_path, retention_until, payload, run_id))
         return run_id
 
     def get(self, run_id: str) -> dict[str, Any] | None:
@@ -105,30 +144,59 @@ class DeliveryLedger:
         - retention_days > 0：删除 finished_at 早于 now - days*86400 的记录
         - max_runs > 0：只保留 finished_at 最新的 N 条终态记录，其余删除
         两个判据可同时生效（年龄判据在保留集内也适用）。
+
+        A6 逐产物删除：``retention_until`` 已过期的行独立于年龄/数量
+        判据被选中；磁盘文件还须通过写入时记录的身份核对，避免固定路径
+        被后续运行覆盖后误删。**没有** ``retention_until`` 或文件身份的行
+        （历史行 / 未配 deliverables_days）只删账本行、不碰磁盘——这是
+        "清理过期记录"不意外外溢成"清理用户产物"的安全边界。
         """
         import time as _time
-        if retention_days <= 0 and max_runs <= 0:
-            return 0
         now_ts = now if now is not None else _time.time()
         cutoff = now_ts - retention_days * 86400.0
         with self._pool.conn() as conn:
-            # 候选先圈定终态行（与 run_store 同序），判删是两条判据的并集，
+            # 候选先圈定终态行（与 run_store 同序），判删是三条判据的并集，
             # 再逐行 DELETE——走 db_backend 双方言（psycopg3 Connection 无
             # executemany），也避开 DELETE ... NOT IN (SELECT 自表) 的语义坑。
             rows = conn.execute(
-                "SELECT run_id, finished_at FROM deliveries "
+                "SELECT run_id, finished_at, retention_until, output_path, "
+                "payload_json FROM deliveries "
                 "WHERE status IN (?, ?, ?) ORDER BY finished_at DESC",
                 TERMINAL_STATUSES).fetchall()
-            to_delete: list[str] = []
+            to_delete: list[tuple[str, float | None, str, str]] = []
             if max_runs > 0:
-                to_delete += [r[0] for r in rows[max_runs:]]
+                to_delete += [(r[0], r[2], str(r[3] or ""), r[4])
+                              for r in rows[max_runs:]]
             if retention_days > 0:
-                to_delete += [r[0] for r in rows
-                              if float(r[1] or 0) < cutoff]
+                to_delete += [(r[0], r[2], str(r[3] or ""), r[4])
+                              for r in rows if float(r[1] or 0) < cutoff]
+            for row in rows:
+                expires = _as_float_or_none(row[2])
+                if expires is not None and expires < now_ts:
+                    to_delete.append((row[0], row[2], str(row[3] or ""), row[4]))
             deleted = 0
-            for rid in sorted(set(to_delete)):
+            expired_files: list[tuple[str, Any]] = []
+            for rid, retention_until, output_path, payload_json in sorted(
+                    set(to_delete), key=lambda t: t[0]):
                 deleted += conn.execute(
                     "DELETE FROM deliveries WHERE run_id = ?", (rid,)).rowcount
+                # 只删"写侧明确给了保留期且已过期"的产物。
+                if retention_until is None:
+                    continue
+                try:
+                    if float(retention_until) < now_ts and output_path:
+                        try:
+                            payload = _fast_loads(payload_json)
+                        except (TypeError, ValueError):
+                            payload = {}
+                        identity = (payload.get("output_identity")
+                                    if isinstance(payload, dict) else None)
+                        expired_files.append((output_path, identity))
+                except (TypeError, ValueError):
+                    continue
+        # 先提交账本删除，再碰磁盘：事务回滚时不会留下"行还在、文件没了"。
+        for output_path, identity in expired_files:
+            _remove_deliverable(output_path, identity)
         return deleted
 
 

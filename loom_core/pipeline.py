@@ -1794,18 +1794,45 @@ class PipelineOrchestrator:
         # -1=声明了落盘路径但文件读不到，>=0=收尾时实测字节数。
         output_sha256 = ""
         output_bytes = None
+        output_identity = None
         if task.output_path:
             output_bytes = -1
             try:
+                import hashlib
+                import os
                 from pathlib import Path
                 p = Path(task.output_path)
-                if p.is_file():
-                    import hashlib
-                    data = p.read_bytes()
-                    output_sha256 = hashlib.sha256(data).hexdigest()
-                    output_bytes = len(data)
+                with p.open("rb") as f:
+                    before = os.fstat(f.fileno())
+                    data = f.read()
+                    after = os.fstat(f.fileno())
+                output_sha256 = hashlib.sha256(data).hexdigest()
+                output_bytes = len(data)
+                before_key = (before.st_dev, before.st_ino, before.st_size,
+                              before.st_mtime_ns)
+                after_key = (after.st_dev, after.st_ino, after.st_size,
+                             after.st_mtime_ns)
+                if before_key == after_key:
+                    output_identity = {
+                        "device": after.st_dev,
+                        "inode": after.st_ino,
+                        "size": after.st_size,
+                        "mtime_ns": after.st_mtime_ns,
+                    }
             except OSError:
                 pass
+
+        # 逐产物保留期（A6）：只在显式配置 retention.deliverables_days
+        # > 0 时填 retention_until；0/缺省 = 不启用删除，历史行与
+        # 未配部署继续只删账本行、不碰磁盘。
+        retention_until = None
+        try:
+            _deliverables_days = int(
+                self.config.get("retention.deliverables_days", 0) or 0)
+        except (TypeError, ValueError):
+            _deliverables_days = 0
+        if _deliverables_days > 0 and finished:
+            retention_until = finished + _deliverables_days * 86400.0
 
         return {
             "run_id": task.id,
@@ -1819,9 +1846,11 @@ class PipelineOrchestrator:
             "output_path": task.output_path,
             "output_sha256": output_sha256,
             "output_bytes": output_bytes,
+            "output_identity": output_identity,
             "error": task.error or "",
             "topology_hash": topology_hash,
             "config_hashes": config_hashes,
+            "retention_until": retention_until,
             "nodes": nodes,
         }
 

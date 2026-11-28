@@ -1973,13 +1973,20 @@
     wrap.appendChild(dlNote);
 
     const short = fmtShortSha(delivery.output_sha256);
-    wrap.appendChild(inspBlock('交付物', [
+    const retentionRows = [
       ['路径', delivery.output_path || '未落盘'],
       ['sha256', short || '未记录（没有落盘产物，或写在摘要面之前）', short ? 'mono' : 'insp-muted'],
       ['字节数', fmtBytes(delivery.output_bytes)],
       ['节点 / 产物', (delivery.node_count || 0) + ' / ' + (delivery.artifact_count || 0)],
       ['耗时', delivery.duration_sec == null ? '--' : (delivery.duration_sec + 's')],
-    ], '摘要是这一跑收尾时算的：账本行按保留期回收后，磁盘上的交付物文件不受影响。'));
+    ];
+    if (delivery.retention_until) {
+      retentionRows.push(['保留期至', new Date(delivery.retention_until * 1000).toLocaleString(), 'mono']);
+    } else {
+      retentionRows.push(['保留期', '未配置（不自动删除）', 'insp-muted']);
+    }
+    wrap.appendChild(inspBlock('交付物', retentionRows,
+      '摘要是这一跑收尾时算的。配了 retention.deliverables_days 的运行，过期后 GC 只删文件身份未变化的交付物；路径被后续运行覆盖或修改时跳过删除。未配置或历史记录只删账本行，磁盘交付物保留。'));
     if (short) {
       // 短摘要供肉眼比，整串留在这里供复制粘贴核对
       wrap.appendChild(elt('div', 'insp-note mono', delivery.output_sha256));

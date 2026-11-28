@@ -16,8 +16,8 @@
 - **假时钟**：`now` 参数可注入，判据测试不依赖真实时间。
 
 配置层（config.json / 覆写文件，点号键）：`retention.runs_days`、
-`retention.max_runs`、`maintenance.gc_ticks`（worker 每 N 个轮询跑一次
-GC，默认 60）。
+`retention.max_runs`、`retention.deliverables_days`、`maintenance.gc_ticks`
+（worker 每 N 个轮询跑一次 GC，默认 60）。
 """
 from __future__ import annotations
 
@@ -29,6 +29,9 @@ from typing import Any
 #: retention 配置的键名（点号，供 ConfigCenter.get 直接读）
 RETENTION_DAYS_KEY = "retention.runs_days"
 RETENTION_MAX_RUNS_KEY = "retention.max_runs"
+#: 逐产物保留期（A6）：>0 时写侧给每条交付记录填 retention_until，
+#: GC 删过期产物（磁盘文件 + 账本行）。0 = 不启用删除，保守默认。
+RETENTION_DELIVERABLES_DAYS_KEY = "retention.deliverables_days"
 GC_TICKS_KEY = "maintenance.gc_ticks"
 #: 常驻服务（`--daemon`/`--admin`）没有"轮询 tick"可数，只能按秒计；
 #: 默认 600s（10 分钟），0 = 服务模式不跑 GC（显式关掉，而不是"忘了接"）。
@@ -41,14 +44,21 @@ AGE_DISABLED = 10 ** 9
 
 @dataclass
 class Retention:
-    """保留期判据。两个字段都是 0 = 不启用（保守默认）。"""
+    """保留期判据。两个字段都是 0 = 不启用（保守默认）。
+
+    ``deliverables_days`` 是 A6 逐产物保留期：>0 时写侧给每条交付
+    记录填 ``retention_until``，GC 删过期产物（磁盘文件 + 账本行）。
+    它独立于 runs_days / max_runs——只配 deliverables_days 也启用 GC。
+    """
 
     days: int = 0
     max_runs: int = 0
+    deliverables_days: int = 0
 
     @property
     def enabled(self) -> bool:
-        return self.days > 0 or self.max_runs > 0
+        return (self.days > 0 or self.max_runs > 0
+                or self.deliverables_days > 0)
 
     def age_days(self) -> int:
         """给各 store cleanup 的年龄参数：0 = 不启用 → 10^9 天（不删任何行）。"""
@@ -60,13 +70,17 @@ def retention_from_config(config: Any) -> Retention:
     配置写错不该悄悄变成"删光一切"。"""
     days = 0
     cap = 0
+    deliverables_days = 0
     if config is not None:
         try:
             days = int(config.get(RETENTION_DAYS_KEY, 0) or 0)
             cap = int(config.get(RETENTION_MAX_RUNS_KEY, 0) or 0)
+            deliverables_days = int(
+                config.get(RETENTION_DELIVERABLES_DAYS_KEY, 0) or 0)
         except (TypeError, ValueError):
             pass
-    return Retention(days=max(days, 0), max_runs=max(cap, 0))
+    return Retention(days=max(days, 0), max_runs=max(cap, 0),
+                     deliverables_days=max(deliverables_days, 0))
 
 
 def gc_runs(*, queue: Any = None, cost: Any = None, feedback: Any = None,
@@ -123,7 +137,8 @@ def gc_runs(*, queue: Any = None, cost: Any = None, feedback: Any = None,
     if log:
         stamp = now if now is not None else time.time()
         log(f"[maintenance] GC 执行（{stamp}，保留 {retention.days} 天 / 最近 "
-            f"{retention.max_runs} 条）：删除 {count_dropped(summary)} 行")
+            f"{retention.max_runs} 条 / 交付物 {retention.deliverables_days} 天）："
+            f"删除 {count_dropped(summary)} 行")
     return summary
 
 
@@ -161,7 +176,8 @@ def format_summary(summary: dict[str, Any], retention: Retention | None = None
                 "全 0）——未删任何行；worker 循环同样如此")
     lines: list[str] = []
     if retention is not None:
-        lines.append(f"[gc] 保留 {retention.days} 天 / 最近 {retention.max_runs} 条")
+        lines.append(f"[gc] 保留 {retention.days} 天 / 最近 {retention.max_runs} 条 / "
+                     f"交付物 {retention.deliverables_days} 天")
     for name, value in summary.items():
         if name == "enabled" or value is None:
             continue
