@@ -319,6 +319,23 @@ class TestCheckpointSaveLoadSameSource:
         assert loaded is not None, "save 写的断点 load 读不到（双源漂移）"
         assert loaded.pipeline_name == "gate_demo"
 
+    def test_roundtrip_preserves_delivery_fields(self, tmp_path):
+        from loom_core import pipeline as P
+        from loom_core.checkpoint_manager import CheckpointManager
+
+        task = P.PipelineTask(id="delivery_fields", pipeline_name="docgen-review",
+                              input_file="in.md", config={})
+        task.status = P.TaskStatus.PAUSED
+        task.output_path = "output/delivery_fields.md"
+        task.output_content = "# 已生成，等待审批"
+        mgr = CheckpointManager(str(tmp_path / "ckpt"))
+        mgr.save(task, full_state=True)
+
+        loaded, _snaps = mgr.load("delivery_fields")
+        assert loaded is not None
+        assert loaded.output_path == "output/delivery_fields.md"
+        assert loaded.output_content == "# 已生成，等待审批"
+
     def test_remove_clears_the_same_file(self, tmp_path):
         from loom_core import pipeline as P
         from loom_core.checkpoint_manager import CheckpointManager

@@ -177,6 +177,10 @@ class PipelineTask:
             "input": self.input_file,
             "status": self.status.value,
             "progress": self.progress,
+            # 审批前已生成的交付物必须穿过进程边界；否则 worker 恢复后会被
+            # HARD_FLOOR 误判为“没有交付物”，即使 output/ 里的文件仍存在。
+            "output_path": self.output_path,
+            "output_content": self.output_content,
             "awaiting_approval": dict(self.awaiting_approval) if self.awaiting_approval else None,
             "approvals": [dict(a) for a in self.approvals],
             "steps": [
@@ -993,12 +997,11 @@ class PipelineOrchestrator:
                         self._log("warning", f"agent {name} on_restore 失败", error=str(e))
         return task  # type: ignore[no-any-return]
 
-    def _resume_snapshots_for(self, plan: ExecutionPlan, task_id: str) -> dict | None:
-        """声明式路径的断点取数：返回可合并的节点快照；无断点/归属不符返回 None。
+    def _resume_task_for(self, plan: ExecutionPlan, task_id: str) -> PipelineTask | None:
+        """声明式路径的断点读取与归属校验；无断点/归属不符返回 None。
 
-        归属校验是必须的：声明式调用方会自己拼 task_id，而断点文件属于哪条
-        流水线只有文件自己知道。把别的流水线的快照合进来，节点名对不上时
-        静默全量重跑、对上了就是用错结果——两种都不是"续传"。
+        调用方需要的不只是节点快照：run_plan 会新建运行对象，审批前已经落盘的
+        output_path/output_content 也必须由同一个 loaded task 带入，不能只取 DAG。
         """
         loaded = self._load_checkpoint(task_id)
         if loaded is None:
@@ -1012,7 +1015,14 @@ class PipelineOrchestrator:
         snaps = getattr(loaded, "_resumed_node_snapshots", None) or {}
         self._log("info", "从断点恢复", task_id=task_id,
                   pipeline=plan.pipeline_name, restored_nodes=len(snaps))
-        return snaps or None
+        return loaded
+
+    def _resume_snapshots_for(self, plan: ExecutionPlan, task_id: str) -> dict | None:
+        """兼容既有调用方的节点快照读取；run_plan 本身使用完整 `_resume_task_for`。"""
+        loaded = self._resume_task_for(plan, task_id)
+        if loaded is None:
+            return None
+        return getattr(loaded, "_resumed_node_snapshots", None) or None
 
     def _remove_checkpoint(self, task_id: str):
         self._checkpoint.remove(task_id)
@@ -1466,7 +1476,8 @@ class PipelineOrchestrator:
             raise TypeError("run_plan 需要 ExecutionPlan 实例")
 
         task_id = task_id or str(uuid.uuid4())[:8]
-        resume_snaps = self._resume_snapshots_for(plan, task_id) if resume else None
+        resumed = self._resume_task_for(plan, task_id) if resume else None
+        resume_snaps = getattr(resumed, "_resumed_node_snapshots", None) if resumed else None
 
         task = PipelineTask(
             id=task_id,
@@ -1477,6 +1488,9 @@ class PipelineOrchestrator:
             owner=owner,
         )
         task.checkpoint_file = str(self.checkpoint_dir / f"{task_id}.json")
+        if resumed:
+            task.output_path = resumed.output_path
+            task.output_content = resumed.output_content
         if resume_snaps:
             task._resumed_node_snapshots = resume_snaps
 
@@ -1582,7 +1596,8 @@ class PipelineOrchestrator:
             raise TypeError("run_plan_async 需要 ExecutionPlan 实例")
 
         task_id = task_id or str(uuid.uuid4())[:8]
-        resume_snaps = self._resume_snapshots_for(plan, task_id) if resume else None
+        resumed = self._resume_task_for(plan, task_id) if resume else None
+        resume_snaps = getattr(resumed, "_resumed_node_snapshots", None) if resumed else None
 
         task = PipelineTask(
             id=task_id,
@@ -1593,6 +1608,9 @@ class PipelineOrchestrator:
             owner=owner,
         )
         task.checkpoint_file = str(self.checkpoint_dir / f"{task_id}.json")
+        if resumed:
+            task.output_path = resumed.output_path
+            task.output_content = resumed.output_content
         if resume_snaps:
             task._resumed_node_snapshots = resume_snaps
 
