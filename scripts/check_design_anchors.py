@@ -69,22 +69,24 @@ ANCHORS = [
     # 2026-11-12 再钉一次：#78 之后 beb6242（L4-02 GC）/4ae0394（async 尾部钉测）/
     # 0dbc4a2（#132 空计划守卫）三批把 run_store.py 推 +31/+31/+31/+35/+35、pipeline.py
     # 推 +5/+8/+5/+8/+11/+11/+11（偏移非常数），逐条按整行原文重钉后复验。
-    ("loom_core/pipeline.py", 322, "_max_task_history"),
-    ("loom_core/pipeline.py", 780, "def cancel"),
-    ("loom_core/pipeline.py", 823, "def resume"),
+    # 2026-11-28：A5 更新到最新 main 后，pipeline.py 的 10 条锚点因主线提交移动；
+    # 逐条按整行原文重钉，未按偏移推算。
+    ("loom_core/pipeline.py", 326, "_max_task_history"),
+    ("loom_core/pipeline.py", 784, "def cancel"),
+    ("loom_core/pipeline.py", 827, "def resume"),
     # 原 1290「不更新 task_queue」那句 docstring 已被 Stage 0 改掉——退役它，改钉新增的
     # 共用写口：§2 那条裂缝的"已并轨"结论必须指向一个真实存在的函数。
-    ("loom_core/pipeline.py", 457, "def _record_plan_terminal_state"),
-    # 注：legacy `run()` 已改走同一条发布点；run_plan_async 也发 pipeline.started（1608），
-    # 「只剩 run_plan() 里这一处」已过时，本条钉同步发布点（1487）
-    ("loom_core/pipeline.py", 1508, "pipeline.started"),
-    ("loom_core/pipeline.py", 1085, "pipeline.finished"),    # _finalize_plan_task 内
-    ("loom_core/pipeline.py", 1550, "pipeline.finished"),    # _finalize_plan_task_async 内
-    ("loom_core/pipeline.py", 1821, "record"),               # _deliver 内 DeliveryLedger().record
-    ("loom_core/pipeline.py", 1927, "pipeline.audit"),
+    ("loom_core/pipeline.py", 461, "def _record_plan_terminal_state"),
+    # 注：legacy `run()` 已改走同一条发布点；run_plan_async 也发 pipeline.started（1647），
+    # 「只剩 run_plan() 里这一处」已过时，本条钉同步发布点（1522）
+    ("loom_core/pipeline.py", 1522, "pipeline.started"),
+    ("loom_core/pipeline.py", 1095, "pipeline.finished"),    # _finalize_plan_task 内
+    ("loom_core/pipeline.py", 1564, "pipeline.finished"),    # _finalize_plan_task_async 内
+    ("loom_core/pipeline.py", 1847, "record"),               # _deliver 内 DeliveryLedger().record
+    ("loom_core/pipeline.py", 1945, "pipeline.audit"),
     # 2026-11-06：#106（C-23）给 resolve_pipeline_name 的 docstring 加了 4 行，
     # 只有这一条在其下方，2049→2053；同批其余 pipeline 锚点都在改动点之上，未动。
-    ("loom_core/pipeline.py", 2118, ".done"),
+    ("loom_core/pipeline.py", 2136, ".done"),
     # 2026-11-06 再钉一次：控制台三面（#90/#91/#93）在 admin_api.py 里加删代码，
     # 这组 10 条整批下移（1072→1074 … 2019→2052，偏移不是常数，按整行文本对齐）。
     # 2026-11-07 第三次：批次一（#107 F1 / #108 F2 / #109 F3 / #110 F4+F5）又在 admin_api.py
