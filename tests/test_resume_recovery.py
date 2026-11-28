@@ -347,6 +347,29 @@ class TestDeclarativeResumeEndToEnd:
             craft.dag_nodes[name] = n
         orch._checkpoint.save(craft, full_state=True)
 
+    @pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+    def test_resume_entry_preserves_delivery_fields(self, orch, docgen_plan, async_mode):
+        """loader 读对还不够：run_plan 新建任务时也必须带入交付字段。"""
+        import asyncio
+
+        task_id = f"resume_delivery_{'async' if async_mode else 'sync'}"
+        craft = PipelineTask(id=task_id, pipeline_name=docgen_plan.pipeline_name,
+                             input_file=INPUT_FILE, config={})
+        craft.output_path = f"output/{task_id}.md"
+        craft.output_content = "# 审批前已生成"
+        orch._checkpoint.save(craft, full_state=True)
+        docgen_plan.levels = []
+
+        if async_mode:
+            task = asyncio.run(orch.run_plan_async(
+                plan=docgen_plan, input_file=INPUT_FILE, task_id=task_id, resume=True))
+        else:
+            task = orch.run_plan(plan=docgen_plan, input_file=INPUT_FILE,
+                                 task_id=task_id, wait=True, resume=True)
+
+        assert task.output_path == craft.output_path
+        assert task.output_content == craft.output_content
+
     def test_run_plan_resume_reuses_completed_levels(self, orch, docgen_plan, tmp_path):
         task_id = "resume_decl_e2e"
         out_file = tmp_path / "decl_resumed_doc.md"
