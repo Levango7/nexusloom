@@ -69,22 +69,24 @@ ANCHORS = [
     # 2026-11-12 再钉一次：#78 之后 beb6242（L4-02 GC）/4ae0394（async 尾部钉测）/
     # 0dbc4a2（#132 空计划守卫）三批把 run_store.py 推 +31/+31/+31/+35/+35、pipeline.py
     # 推 +5/+8/+5/+8/+11/+11/+11（偏移非常数），逐条按整行原文重钉后复验。
-    ("loom_core/pipeline.py", 322, "_max_task_history"),
-    ("loom_core/pipeline.py", 780, "def cancel"),
-    ("loom_core/pipeline.py", 823, "def resume"),
+    # 2026-11-28：A5 更新到最新 main 后，pipeline.py 的 10 条锚点因主线提交移动；
+    # 逐条按整行原文重钉，未按偏移推算。
+    ("loom_core/pipeline.py", 326, "_max_task_history"),
+    ("loom_core/pipeline.py", 784, "def cancel"),
+    ("loom_core/pipeline.py", 827, "def resume"),
     # 原 1290「不更新 task_queue」那句 docstring 已被 Stage 0 改掉——退役它，改钉新增的
     # 共用写口：§2 那条裂缝的"已并轨"结论必须指向一个真实存在的函数。
-    ("loom_core/pipeline.py", 457, "def _record_plan_terminal_state"),
-    # 注：legacy `run()` 已改走同一条发布点；run_plan_async 也发 pipeline.started（1608），
-    # 「只剩 run_plan() 里这一处」已过时，本条钉同步发布点（1487）
-    ("loom_core/pipeline.py", 1508, "pipeline.started"),
-    ("loom_core/pipeline.py", 1085, "pipeline.finished"),    # _finalize_plan_task 内
-    ("loom_core/pipeline.py", 1550, "pipeline.finished"),    # _finalize_plan_task_async 内
-    ("loom_core/pipeline.py", 1821, "record"),               # _deliver 内 DeliveryLedger().record
-    ("loom_core/pipeline.py", 1927, "pipeline.audit"),
+    ("loom_core/pipeline.py", 461, "def _record_plan_terminal_state"),
+    # 注：legacy `run()` 已改走同一条发布点；run_plan_async 也发 pipeline.started（1647），
+    # 「只剩 run_plan() 里这一处」已过时，本条钉同步发布点（1522）
+    ("loom_core/pipeline.py", 1522, "pipeline.started"),
+    ("loom_core/pipeline.py", 1095, "pipeline.finished"),    # _finalize_plan_task 内
+    ("loom_core/pipeline.py", 1564, "pipeline.finished"),    # _finalize_plan_task_async 内
+    ("loom_core/pipeline.py", 1847, "record"),               # _deliver 内 DeliveryLedger().record
+    ("loom_core/pipeline.py", 1945, "pipeline.audit"),
     # 2026-11-06：#106（C-23）给 resolve_pipeline_name 的 docstring 加了 4 行，
     # 只有这一条在其下方，2049→2053；同批其余 pipeline 锚点都在改动点之上，未动。
-    ("loom_core/pipeline.py", 2118, ".done"),
+    ("loom_core/pipeline.py", 2136, ".done"),
     # 2026-11-06 再钉一次：控制台三面（#90/#91/#93）在 admin_api.py 里加删代码，
     # 这组 10 条整批下移（1072→1074 … 2019→2052，偏移不是常数，按整行文本对齐）。
     # 2026-11-07 第三次：批次一（#107 F1 / #108 F2 / #109 F3 / #110 F4+F5）又在 admin_api.py
@@ -95,6 +97,9 @@ ANCHORS = [
     # 2026-11-26 第四次钉：#153（docgen-review-brief）在 admin_api.py 上方
     # 增删了输入文档装配与简报路由，这组 10 条整批下移 +1~+2（偏移非常数，
     # 按整行原文就近重钉，未按偏移推算）。
+    # 2026-11-26 第五次钉：A5 运行间差异在 _handle_delivery_detail 内
+    # 插入 previous_run_id/run_diff 与 _delivery_run_diff，下方锚点再下移
+    # （2548→2589、2913→2954、2986→3027、2242→2283 等，偏移非常数）。
     ("loom_core/admin_api.py", 755, "get_task"),
     ("loom_core/admin_api.py", 1188, "list_tasks"),
     # Stage 2：/tasks、dashboard、cost 三处读口从 `list_tasks`（内存）换成
@@ -103,15 +108,15 @@ ANCHORS = [
     ("loom_core/admin_api.py", 1205, "list_runs"),
     ("loom_core/admin_api.py", 1552, "def _task_checkpoint_view"),
     ("loom_core/admin_api.py", 1976, "list_runs"),
-    ("loom_core/admin_api.py", 2550, "list_runs"),
-    ("loom_core/admin_api.py", 2915, "task = _aio.run(orch.run_plan_async("),
-    ("loom_core/admin_api.py", 2988, "existing_callback = get_callback(task_id)"),
+    ("loom_core/admin_api.py", 2589, "list_runs"),
+    ("loom_core/admin_api.py", 2954, "task = _aio.run(orch.run_plan_async("),
+    ("loom_core/admin_api.py", 3027, "existing_callback = get_callback(task_id)"),
     # #8：账本与锁的只读 HTTP 面。三条 handler 进表，"文档教了这三个口"才在代码里
     # 有对应物（`test_doc_consistency` 只把文档对到 openapi 规范，规范和 handler
     # 之间没人守——这条就是补那段距离的）。
     ("loom_core/admin_api.py", 2084, "def _handle_deliveries"),
     ("loom_core/admin_api.py", 2102, "def _handle_delivery_detail"),
-    ("loom_core/admin_api.py", 2244, "def _handle_locks"),
+    ("loom_core/admin_api.py", 2283, "def _handle_locks"),
     # 锁路径解析只留一处：巡检口（`lock_drift`）与执行口（`_verify_lock_after_parse`）
     # 各自解析一次就会报出执行时根本不会发生的漂移。
     ("loom_core/scheduler.py", 338, "def resolve_lock_path"),

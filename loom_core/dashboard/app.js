@@ -2000,6 +2000,32 @@
         '逐节点是 config_hash 前 12 位：拿它和当前锁文件比，就能回答"跑的是不是锁住的那件事"。'));
     }
 
+    // 运行间差异（A5）：本次 vs 同流水线上一次终态运行。
+    // 上次运行不可见（首次运行 / 越权）时整个块不出现，不编造差异。
+    const diff = delivery.run_diff;
+    if (diff && delivery.previous_run_id) {
+      const diffRows = [];
+      diffRows.push(['上次运行', delivery.previous_run_id, 'mono']);
+      diffRows.push(['拓扑指纹', diff.topology_changed ? '变了' : '没变',
+        diff.topology_changed ? 'insp-warn' : 'insp-muted']);
+      const changed = diff.config_changed || [];
+      diffRows.push(['节点配置', changed.length ? '变了 ' + changed.length + ' 个' : '没变',
+        changed.length ? 'insp-warn' : 'insp-muted']);
+      if (changed.length) {
+        diffRows.push(['变配置的节点', changed.join(', '), 'mono']);
+      }
+      const added = diff.config_added || [];
+      const removed = diff.config_removed || [];
+      if (added.length || removed.length) {
+        diffRows.push(['节点增减',
+          (added.length ? '+' + added.join(',') : '')
+          + (added.length && removed.length ? ' / ' : '')
+          + (removed.length ? '-' + removed.join(',') : ''), 'mono']);
+      }
+      wrap.appendChild(inspBlock('本次 vs 上次', diffRows,
+        '只报告指纹变没变、哪些节点变了；原因要靠「当前文件 vs 锁」那半边（loom plan --diff）回答。'));
+    }
+
     for (const n of (delivery.nodes || [])) {
       const block = artifactDigestBlock(n);
       if (block) wrap.appendChild(block);

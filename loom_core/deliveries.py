@@ -95,6 +95,23 @@ class DeliveryLedger:
             "ORDER BY finished_at DESC LIMIT ?", (limit,)).fetchall()
         return [cast(dict[str, Any], _fast_loads(r[0])) for r in rows]
 
+    def previous_for_pipeline(
+            self, pipeline: str, before_finished_at: float) -> dict[str, Any] | None:
+        """同流水线在 ``before_finished_at`` 之前最近一次终态运行。
+
+        A5 运行间差异的"上次"：按 pipeline 限定（不同流水线拓扑不同，
+        跨流水线比较无意义），按 finished_at 降序取第一条终态记录。
+        找不到 = None（首次运行 / 该流水线尚无终态运行）。
+        """
+        row = self._pool.conn().execute(
+            "SELECT payload_json FROM deliveries "
+            "WHERE pipeline = ? AND finished_at < ? AND status IN (?, ?, ?) "
+            "ORDER BY finished_at DESC LIMIT 1",
+            (pipeline, float(before_finished_at), *TERMINAL_STATUSES)).fetchone()
+        if not row:
+            return None
+        return cast(dict[str, Any], _fast_loads(row[0]))
+
     def cleanup(self, retention_days: int = 0, max_runs: int = 0,
                 now: float | None = None) -> int:
         """按保留期判据清理交付账本。返回删除行数。
