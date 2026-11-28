@@ -1776,16 +1776,31 @@ class PipelineOrchestrator:
         # -1=声明了落盘路径但文件读不到，>=0=收尾时实测字节数。
         output_sha256 = ""
         output_bytes = None
+        output_identity = None
         if task.output_path:
             output_bytes = -1
             try:
+                import hashlib
+                import os
                 from pathlib import Path
                 p = Path(task.output_path)
-                if p.is_file():
-                    import hashlib
-                    data = p.read_bytes()
-                    output_sha256 = hashlib.sha256(data).hexdigest()
-                    output_bytes = len(data)
+                with p.open("rb") as f:
+                    before = os.fstat(f.fileno())
+                    data = f.read()
+                    after = os.fstat(f.fileno())
+                output_sha256 = hashlib.sha256(data).hexdigest()
+                output_bytes = len(data)
+                before_key = (before.st_dev, before.st_ino, before.st_size,
+                              before.st_mtime_ns)
+                after_key = (after.st_dev, after.st_ino, after.st_size,
+                             after.st_mtime_ns)
+                if before_key == after_key:
+                    output_identity = {
+                        "device": after.st_dev,
+                        "inode": after.st_ino,
+                        "size": after.st_size,
+                        "mtime_ns": after.st_mtime_ns,
+                    }
             except OSError:
                 pass
 
@@ -1813,6 +1828,7 @@ class PipelineOrchestrator:
             "output_path": task.output_path,
             "output_sha256": output_sha256,
             "output_bytes": output_bytes,
+            "output_identity": output_identity,
             "error": task.error or "",
             "topology_hash": topology_hash,
             "config_hashes": config_hashes,

@@ -15,7 +15,7 @@ ANCHORS = [
     ("loom_core/message_bus_v3.py", 128, "save_message"),
     ("loom_core/message_store.py", 171, "sqlite3.connect"),
     ("loom_core/audit.py", 31, "def write_audit"),
-    ("loom_core/deliveries.py", 78, "def record"),
+    ("loom_core/deliveries.py", 86, "def record"),
     # Stage 3a：审批的三个写点从 approvals.py 搬进了 RunStore（投影 + 同事务事件）。
     # §1 那一行"审批本身就是一个写面"的结论必须指向新位置，而不是退役成无处可指。
     # Stage 3c 补账把这三口整体下推 12 行（`close_run` 长成条件裁决版）。
@@ -80,14 +80,14 @@ ANCHORS = [
     ("loom_core/pipeline.py", 1508, "pipeline.started"),
     ("loom_core/pipeline.py", 1085, "pipeline.finished"),    # _finalize_plan_task 内
     ("loom_core/pipeline.py", 1550, "pipeline.finished"),    # _finalize_plan_task_async 内
-    ("loom_core/pipeline.py", 1842, "record"),               # _deliver 内 DeliveryLedger().record
-    ("loom_core/pipeline.py", 1940, "pipeline.audit"),
+    ("loom_core/pipeline.py", 1858, "record"),               # _deliver 内 DeliveryLedger().record
+    ("loom_core/pipeline.py", 1956, "pipeline.audit"),
     # 2026-11-26 A6 保留期：_build_delivery_record 插 retention_until
-    # 计算块，下方 .done 锚点下移 +13。
-    ("loom_core/pipeline.py", 2131, ".done"),
+    # 与文件身份核对块，下方 .done 锚点随实际整行重钉。
+    ("loom_core/pipeline.py", 2147, ".done"),
     # 2026-11-06：#106（C-23）给 resolve_pipeline_name 的 docstring 加了 4 行，
     # 只有这一条在其下方，2049→2053；同批其余 pipeline 锚点都在改动点之上，未动。
-    # 2026-11-26 A6 保留期：下方 .done 锚点已并入上方 2131 条。
+    # 2026-11-26 A6 保留期：下方 .done 锚点已并入上方 2147 条。
     # 2026-11-06 再钉一次：控制台三面（#90/#91/#93）在 admin_api.py 里加删代码，
     # 这组 10 条整批下移（1072→1074 … 2019→2052，偏移不是常数，按整行文本对齐）。
     # 2026-11-07 第三次：批次一（#107 F1 / #108 F2 / #109 F3 / #110 F4+F5）又在 admin_api.py
@@ -122,7 +122,7 @@ ANCHORS = [
     ("loom_core/scheduler.py", 338, "def resolve_lock_path"),
     ("loom_core/scheduler.py", 357, "def lock_drift"),
     # 账本的读口：`list` 在本批之前**没有任何生产调用者**（只有测试读它）。
-    ("loom_core/deliveries.py", 121, "def list(self, limit"),
+    ("loom_core/deliveries.py", 129, "def list(self, limit"),
 ]
 
 root = pathlib.Path(__file__).resolve().parent.parent

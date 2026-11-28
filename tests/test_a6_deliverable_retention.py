@@ -7,10 +7,9 @@ A6 验收判据要求"GC 只删过期产物"。
 本批把"删不删用户文件"做成**显式判据**而不是默认行为：
 - 写侧只在显式配置 ``retention.deliverables_days > 0`` 时填
   ``retention_until``；
-- GC 只删**带过期 ``retention_until``** 的行的磁盘交付物；
-  没有 ``retention_until`` 的行（历史行 / 未配部署）只删账本行、
-  不碰磁盘——这是"清理过期记录"不意外外溢成"清理用户产物"的
-  安全边界。
+- GC 只删**带过期 ``retention_until`` 且文件身份未变化**的磁盘交付物；
+  固定路径被覆盖或没有文件身份时只删账本行、不碰磁盘——这是
+  "清理过期记录"不意外外溢成"清理用户产物"的安全边界。
 
 判据用假时钟（``now`` 注入），不依赖真实时间。
 """
@@ -36,13 +35,20 @@ def _led(state):
     return DeliveryLedger()
 
 
+def _identity(path):
+    st = Path(path).stat()
+    return {"device": st.st_dev, "inode": st.st_ino,
+            "size": st.st_size, "mtime_ns": st.st_mtime_ns}
+
+
 def _seed(led, run_id, *, finished_at, status="done",
-          output_path=None, retention_until=None):
+          output_path=None, retention_until=None, output_identity=None):
     led.record({"run_id": run_id, "pipeline": "p", "status": status,
                 "finished_at": float(finished_at),
                 "duration_sec": 1.0,
                 "output_path": output_path or f"{run_id}.md",
                 "retention_until": retention_until,
+                "output_identity": output_identity,
                 "nodes": []})
 
 
@@ -54,10 +60,40 @@ class TestDeliverableRetention:
         led = _led(state)
         now = 10_000_000.0
         _seed(led, "expired", finished_at=now - 100 * 86400,
-              output_path=str(doc), retention_until=now - 1)
+              output_path=str(doc), retention_until=now - 1,
+              output_identity=_identity(doc))
         assert led.cleanup(retention_days=30, now=now) == 1
         assert led.get("expired") is None
         assert not doc.exists(), "过期产物必须被 GC 删除"
+
+    def test_reused_output_path_keeps_new_file(self, state, tmp_path):
+        """固定输出路径被后续运行覆盖时，不删新产物。"""
+        doc = tmp_path / "shared.md"
+        doc.write_text("old", encoding="utf-8")
+        led = _led(state)
+        now = 10_000_000.0
+        _seed(led, "expired", finished_at=now - 100,
+              output_path=str(doc), retention_until=now - 1,
+              output_identity=_identity(doc))
+        doc.write_text("new deliverable with different bytes", encoding="utf-8")
+
+        assert led.cleanup(now=now) == 1
+        assert led.get("expired") is None
+        assert doc.read_text(encoding="utf-8") == \
+            "new deliverable with different bytes"
+
+    def test_missing_output_identity_keeps_file(self, state, tmp_path):
+        """历史行没有文件身份时只删账本行，不冒险删磁盘文件。"""
+        doc = tmp_path / "legacy.md"
+        doc.write_text("legacy", encoding="utf-8")
+        led = _led(state)
+        now = 10_000_000.0
+        _seed(led, "legacy", finished_at=now - 100,
+              output_path=str(doc), retention_until=now - 1)
+
+        assert led.cleanup(now=now) == 1
+        assert led.get("legacy") is None
+        assert doc.exists()
 
     def test_no_retention_until_keeps_file(self, state, tmp_path):
         """没有 retention_until 的历史行：只删账本行，磁盘文件保留。"""
@@ -113,7 +149,8 @@ class TestDeliverableRetention:
         led = _led(state)
         now = 10_000_000.0
         _seed(led, "expired", finished_at=now - 100,
-              output_path=str(expired), retention_until=now - 1)
+              output_path=str(expired), retention_until=now - 1,
+              output_identity=_identity(expired))
         _seed(led, "future", finished_at=now - 100,
               output_path=str(future), retention_until=now + 86400)
         _seed(led, "legacy", finished_at=now - 100,
@@ -167,11 +204,15 @@ class TestWriteSide:
         # 把 set 进去的内存值冲掉（config.json 无 retention 段）。
         orch.config._auto_reload = False
         task = _fake_task("r1", "done")
+        doc = tmp_path / "r1.md"
+        doc.write_text("deliverable", encoding="utf-8")
+        task.output_path = str(doc)
         plan = _fake_plan("p")
         orch.config.set("retention.deliverables_days", 30)
         rec = orch._build_delivery_record(task, plan)
         assert rec["retention_until"] is not None
         assert rec["retention_until"] == rec["finished_at"] + 30 * 86400.0
+        assert rec["output_identity"] == _identity(doc)
 
     def test_pipeline_record_no_retention_when_unconfigured(self, state, tmp_path):
         """未配 deliverables_days：retention_until 为 None（不启用删除）。"""

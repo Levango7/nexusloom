@@ -1986,7 +1986,7 @@
       retentionRows.push(['保留期', '未配置（不自动删除）', 'insp-muted']);
     }
     wrap.appendChild(inspBlock('交付物', retentionRows,
-      '摘要是这一跑收尾时算的。配了 retention.deliverables_days 的运行，过期后 GC 连账本行带磁盘文件一起删；未配置的运行只删账本行，磁盘交付物保留。'));
+      '摘要是这一跑收尾时算的。配了 retention.deliverables_days 的运行，过期后 GC 只删文件身份未变化的交付物；路径被后续运行覆盖或修改时跳过删除。未配置或历史记录只删账本行，磁盘交付物保留。'));
     if (short) {
       // 短摘要供肉眼比，整串留在这里供复制粘贴核对
       wrap.appendChild(elt('div', 'insp-note mono', delivery.output_sha256));
